@@ -1802,11 +1802,11 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
     let surface_pass = surface_alpha_mode <= 1u || m.model_flags.y > 0.5;
     if (surface_slot != 0u && instance_wet > 0.0 && surface_pass && !is_wmo && !is_emissive
         && !is_mod && !is_mod2x && (u32(m.clutter_fade.z) & 4u) == 0u) {
-        var surface_frame = wow_light.monkey;
         // MONKEY: max of exposed rain and retained wetness, one darken/gloss application.
+        // MONKEY (motion verify 2): retained wetness is wet on every facing (`wet_body`); before,
+        // the rain law's facing weight left a swum body's vertical sides ~6 % darker and unglossed.
         let rain_wet = select(clamp(wow_light.monkey.wet_a.y, 0.0, 1.0) * wet_open, 0.0, wet_dry);
-        surface_frame.wet_a.y = max(rain_wet, instance_wet);
-        wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz, 1.0, surface_frame);
+        wet = wet_hook::wet_body(rgb, n_lit, rain_wet, instance_wet);
     }
     rgb = wet.albedo;
     if (wet.boost > 0.0) {

@@ -97,6 +97,24 @@ fn wet_surface(albedo: vec3<f32>, n: vec3<f32>, world_pos: vec3<f32>, exposure: 
     return o;
 }
 
+// MONKEY (motion verify 2): a character's wetness. `retained` (waded/swum/soaked, the
+// monkey-surfacefx row) is NOT facing-weighted like rain on a surface: a body out of the water is
+// wet all round, so its sides (legs, arms, flanks: n.y ~ 0) darken fully and keep a gloss. `rain`
+// (exposed rain now) keeps the surface law (tops only). Same darken/saturate law as `wet_surface`.
+const WET_BODY_UNDERSIDE: f32 = 0.85; // undersides a touch less (dripped off, shaded)
+const WET_BODY_GLOSS: f32 = 0.7;      // gloss weight on every facing at full retained wetness
+fn wet_body(albedo: vec3<f32>, n: vec3<f32>, rain: f32, retained: f32) -> WetSurface {
+    var o: WetSurface;
+    let w_rain = wet_amount(n, 1.0, rain);
+    let w_body = clamp(retained, 0.0, 1.0) * mix(WET_BODY_UNDERSIDE, 1.0, smoothstep(-0.6, 0.4, n.y));
+    let w = max(w_rain, w_body);
+    let luma = dot(albedo, vec3<f32>(0.299, 0.587, 0.114));
+    let sat = max(mix(vec3<f32>(luma), albedo, 1.0 + 0.3 * w), vec3<f32>(0.0));
+    o.albedo = sat * (1.0 - 0.36 * w);
+    o.boost = max(w_rain * smoothstep(0.35, 0.9, n.y), w_body * WET_BODY_GLOSS);
+    return o;
+}
+
 fn wet_hash(p: vec2<f32>) -> f32 {
     let q = fract(p * vec2<f32>(0.1031, 0.1030));
     let r = q + dot(q, q.yx + 33.33);
