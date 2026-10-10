@@ -156,6 +156,8 @@ struct WowLight {
     // Per rig slot, the straddle waterline (size mirrored in straddle.rs): x = its world height
     // (Bevy Y), y = the side the near copy keeps (+1 above, −1 below, 0 not straddling).
     water_clip: array<vec2<f32>, 2048>,
+    // MONKEY: whole wetness, lower wetness, Bevy waterline Y, feather Y; zero is inert.
+    rig_surface: array<vec4<f32>, 2048>,
     palettes: array<vec4<f32>>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
@@ -1785,8 +1787,27 @@ fn fragment(in: WowVsOut, @builtin(front_facing) is_front: bool) -> WowFragOut {
                 wow_light.shelter[wet_st.idx.w], in.world_position.y, wow_light.shelter_cfg);
         }
     }
-    let wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz,
+    var wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz, // MONKEY: retained wetness may replace rain.
         select(1.0, 0.0, wet_dry) * wet_open, wow_light.monkey);
+    // MONKEY: character parts share their slot even when unskinned; wetness survives indoor shelter.
+    let surface_slot = (fade_tag >> 19u) & 0x7ffu;
+    let surface = wow_light.rig_surface[surface_slot];
+    let feather = max(surface.w, 0.01);
+    let instance_wet = max(clamp(surface.x, 0.0, 1.0), clamp(surface.y, 0.0, 1.0)
+        * (1.0 - smoothstep(surface.z - feather, surface.z + feather, in.world_position.y)));
+    // MONKEY: opaque/alpha-test only (Bevy alpha-mode bits 29-31: 0 opaque, 1 mask), plus the
+    // feather twin of such a batch (`model_flags.y`; an authored-Blend batch is its own twin), so a
+    // fading or translucent unit keeps its wet body instead of popping dry mid-feather.
+    let surface_alpha_mode = pbr_input.material.flags >> 29u;
+    let surface_pass = surface_alpha_mode <= 1u || m.model_flags.y > 0.5;
+    if (surface_slot != 0u && instance_wet > 0.0 && surface_pass && !is_wmo && !is_emissive
+        && !is_mod && !is_mod2x && (u32(m.clutter_fade.z) & 4u) == 0u) {
+        var surface_frame = wow_light.monkey;
+        // MONKEY: max of exposed rain and retained wetness, one darken/gloss application.
+        let rain_wet = select(clamp(wow_light.monkey.wet_a.y, 0.0, 1.0) * wet_open, 0.0, wet_dry);
+        surface_frame.wet_a.y = max(rain_wet, instance_wet);
+        wet = wet_hook::wet_surface(rgb, n_lit, in.world_position.xyz, 1.0, surface_frame);
+    }
     rgb = wet.albedo;
     if (wet.boost > 0.0) {
         rgb = min(rgb + wet_hook::wet_sheen(wet.boost, n_lit, normalize(view.world_position - in.world_position.xyz),

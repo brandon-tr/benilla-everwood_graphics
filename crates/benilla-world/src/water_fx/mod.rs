@@ -35,8 +35,9 @@ use crate::view::WorldCamera;
 use crate::world_unit::{ViewerUnit, WorldUnit};
 use benilla_assets::{AssetSet, WorldAssets};
 
-use params::{foam_params, foam_uv, rand01, record_alpha, record_size, WadeState};
+// MONKEY: stock and plugin emission share the record parameters and drawing math.
 use params::{foam_gain, swim_ramp, tread_params, FoamLook, TREAD_INTERVAL};
+use params::{foam_params, foam_uv, rand01, record_alpha, record_size, FoamParams, WadeState};
 use params::{wake_cooldown, RING_INTERVAL};
 
 /// The ring and wake stencils, loaded raw: the alpha is the shape and the near-black RGB the
@@ -48,6 +49,36 @@ const WAKE_TEXTURE: &str = "xtextures/splash/wake.blp";
 /// everyone else from `[32, 128)`, so others never evict its records.
 const POOL_SIZE: usize = 128;
 const SELF_SLOTS: usize = 32;
+
+// MONKEY: external emissions own their capacity and never touch stock records/cooldowns.
+const PLUGIN_POOL_SIZE: usize = 96;
+// MONKEY: bound the spatial-index/geometry walk even for malformed finite plugin parameters.
+const PLUGIN_MAX_EXTENT: f32 = 64.0;
+
+/// MONKEY: foam stencil category; splash uses the ring stencil with caller-supplied dynamics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaterFoamKind {
+    Ring,
+    Wake,
+    Splash,
+}
+
+/// MONKEY: one caller-authored foam patch on loaded water. Heading is WoW radians; sizes
+/// are half-widths in yards, growth is yd/s, lifetime is seconds, peak alpha is 0..1.
+/// `subject` selects a unit's liquid claim; `None` accepts either ADT or WMO water.
+/// Invalid/nonfinite requests and dry points are dropped. Capacity is independent of stock foam.
+/// MONKEY: the final half-width must not exceed 64 yd to bound patch construction.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct WaterFoamSpawn {
+    pub subject: Option<Entity>,
+    pub center_bevy: Vec3,
+    pub kind: WaterFoamKind,
+    pub heading: f32,
+    pub start_size: f32,
+    pub growth: f32,
+    pub lifetime: f32,
+    pub peak_alpha: f32,
+}
 
 /// The step-in and step-out one-shot depth as a fraction of the unit's own collision height
 /// (`0x6030c0`, CMovement+0xb4), latched either way: about 0.81 yd for a human.
@@ -123,6 +154,8 @@ struct WaterFoam {
     pool: Vec<Option<FoamRecord>>,
     self_cursor: usize,
     other_cursor: usize,
+    plugin_pool: Vec<Option<FoamRecord>>, // MONKEY: separate bounded plugin pool.
+    plugin_cursor: usize,                 // MONKEY: never advances either stock cursor.
     units: EntityHashMap<UnitFoam>,
 }
 
@@ -132,6 +165,8 @@ impl Default for WaterFoam {
             pool: (0..POOL_SIZE).map(|_| None).collect(),
             self_cursor: 0,
             other_cursor: 0,
+            plugin_pool: (0..PLUGIN_POOL_SIZE).map(|_| None).collect(), // MONKEY: plugin capacity.
+            plugin_cursor: 0,                                           // MONKEY: plugin cursor.
             units: EntityHashMap::default(),
         }
     }
@@ -510,6 +545,88 @@ fn emit_water_foam(
     foam.units.retain(|_, uf| uf.active);
 }
 
+// MONKEY: validate external requests on the unit's own water, then reuse the stock patch builder.
+fn emit_plugin_foam(
+    mut requests: MessageReader<WaterFoamSpawn>,
+    time: Res<Time>,
+    assets: Option<Res<FoamAssets>>,
+    mut foam: ResMut<WaterFoam>,
+    water: Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
+    index: Res<WaterIndex>,
+    rooms: Query<&crate::wmo_portal::UnitWmoRoom>,
+    placements: crate::liquid::RoomPlacements,
+) {
+    for request in requests.read() {
+        if assets.is_none()
+            || !request.center_bevy.is_finite()
+            || ![
+                request.heading,
+                request.start_size,
+                request.growth,
+                request.lifetime,
+                request.peak_alpha,
+            ]
+            .into_iter()
+            .all(f32::is_finite)
+            || request.start_size <= 0.0
+            || request.growth < 0.0
+            || request.lifetime <= 0.0
+            || request.peak_alpha <= 0.0
+        {
+            continue;
+        }
+        let final_size = request.start_size + request.growth * request.lifetime;
+        if !final_size.is_finite() || final_size > PLUGIN_MAX_EXTENT {
+            continue;
+        }
+        let wow = bevy_to_wow(request.center_bevy);
+        let claim = request
+            .subject
+            .map_or(crate::liquid::LiquidClaim::Unknown, |e| {
+                crate::liquid::unit_claim(rooms.get(e).ok(), &placements)
+            });
+        let host = index
+            .over(wow[0], wow[1])
+            .iter()
+            .filter_map(|&e| {
+                let (_, info, _) = water.get(e).ok()?;
+                let hit = crate::liquid::liquid_at(std::iter::once(info), wow, claim)?;
+                if hit.kind.is_fullbright() {
+                    return None;
+                }
+                info.water_z_at(wow[0], wow[1]).map(|z| (e, z))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if host.is_none() {
+            continue;
+        }
+        let p = FoamParams {
+            size0: request.start_size,
+            growth: request.growth,
+            lifetime: request.lifetime,
+            peak: request.peak_alpha.clamp(0.0, 1.0),
+            ring: request.kind != WaterFoamKind::Wake,
+        };
+        let WaterFoam {
+            plugin_pool,
+            plugin_cursor,
+            ..
+        } = &mut *foam;
+        let mut alloc = |rec| {
+            plugin_pool[alloc_slot(plugin_cursor, 0, PLUGIN_POOL_SIZE)] = Some(rec);
+        };
+        emit_record(
+            &mut alloc,
+            &index,
+            &water,
+            [wow[0], wow[1]],
+            &p,
+            request.heading,
+            time.elapsed_secs(),
+        );
+    }
+}
+
 /// Ages the pool and pushes one additive draw per (chunk, category) with live records: static
 /// positions, the texgen at `size(t)` and white times the alpha ramp.
 fn push_water_foam(
@@ -530,7 +647,11 @@ fn push_water_foam(
     let enhanced = quality.0 >= 1;
     let gain = foam_gain(enhanced);
 
-    for slot in &mut foam.pool {
+    // MONKEY: age both pools without lending plugin emissions any stock storage.
+    let WaterFoam {
+        pool, plugin_pool, ..
+    } = &mut *foam;
+    for slot in pool.iter_mut().chain(plugin_pool.iter_mut()) {
         if slot.as_ref().is_some_and(|r| now - r.born >= r.lifetime) {
             *slot = None;
         }
@@ -538,7 +659,8 @@ fn push_water_foam(
 
     // One contiguous draw per (chunk, category).
     let mut groups: HashMap<(Entity, bool), Vec<usize>> = HashMap::default();
-    for (i, rec) in foam.pool.iter().enumerate() {
+    for (i, rec) in foam.pool.iter().chain(foam.plugin_pool.iter()).enumerate() {
+        // MONKEY: both pools draw.
         let Some(rec) = rec else { continue };
         if chunks_alive.get(rec.chunk).is_err() {
             continue; // chunk streamed out; the record ages out silently
@@ -550,7 +672,14 @@ fn push_water_foam(
         let mut centroid = Vec3::ZERO;
         let mut n = 0u32;
         for i in records {
-            let rec = foam.pool[i].as_ref().expect("grouped above");
+            // MONKEY: combined indices keep stock records first and plugin storage separate.
+            let rec = if i < POOL_SIZE {
+                &foam.pool[i]
+            } else {
+                &foam.plugin_pool[i - POOL_SIZE]
+            }
+            .as_ref()
+            .expect("grouped above");
             let size = record_size(rec.size0, rec.growth, rec.born, now);
             let alpha = record_alpha(rec.peak, rec.lifetime, rec.born, now);
             for v in &rec.verts {
@@ -621,10 +750,19 @@ pub(crate) struct WaterFxPlugin;
 
 impl Plugin for WaterFxPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_water_fx.after(AssetSet::Open))
+        app.add_message::<WaterFoamSpawn>() // MONKEY: public external foam ingress.
+            .add_systems(Startup, setup_water_fx.after(AssetSet::Open))
             .add_systems(
                 Update,
                 emit_water_foam
+                    .in_set(WaterFoamSet)
+                    .in_set(WorldStage::Present),
+            )
+            // MONKEY: separate emitter runs after stock emission, in the public foam ordering set.
+            .add_systems(
+                Update,
+                emit_plugin_foam
+                    .after(emit_water_foam)
                     .in_set(WaterFoamSet)
                     .in_set(WorldStage::Present),
             )
@@ -640,6 +778,160 @@ impl Plugin for WaterFxPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // MONKEY: test the public message ingress, real wet-cell lookup, and independent allocation.
+    #[test]
+    fn plugin_spawns_drop_dry_points_and_cannot_evict_or_throttle_stock() {
+        let mut app = App::new();
+        app.add_message::<WaterFoamSpawn>()
+            .init_resource::<Time>()
+            .init_resource::<WaterIndex>()
+            .init_resource::<WaterFoam>()
+            .insert_resource(FoamAssets {
+                ring: Handle::default(),
+                wake: Handle::default(),
+            })
+            .add_systems(
+                Update,
+                (crate::liquid::maintain_water_index, emit_plugin_foam).chain(),
+            );
+        let info = WaterChunkInfo::new(
+            crate::liquid::LiquidSource::AdtChunk,
+            benilla_formats::LiquidKind::Still,
+            [2, 2],
+            vec![
+                [0.0, 0.0, 5.0],
+                [10.0, 0.0, 5.0],
+                [0.0, 10.0, 5.0],
+                [10.0, 10.0, 5.0],
+            ],
+            vec![true],
+        );
+        let chunk = app.world_mut().spawn((info, FoamPatch)).id();
+        // MONKEY: a dry hole inside an indexed chunk and magma are also non-water controls.
+        for (offset, kind, wet) in [
+            (20.0, benilla_formats::LiquidKind::Still, false),
+            (30.0, benilla_formats::LiquidKind::Magma, true),
+        ] {
+            let positions = (0..3)
+                .flat_map(|j| (0..3).map(move |i| [offset + i as f32 * 5.0, j as f32 * 5.0, 5.0]))
+                .collect();
+            app.world_mut().spawn((
+                WaterChunkInfo::new(
+                    crate::liquid::LiquidSource::AdtChunk,
+                    kind,
+                    [3, 3],
+                    positions,
+                    if wet {
+                        vec![true; 4]
+                    } else {
+                        vec![true, false, false, true]
+                    },
+                ),
+                FoamPatch,
+            ));
+        }
+        let subject = app.world_mut().spawn_empty().id();
+        {
+            let mut foam = app.world_mut().resource_mut::<WaterFoam>();
+            foam.self_cursor = 3;
+            foam.other_cursor = 5;
+            let mut unit = UnitFoam::new(42);
+            unit.ready = 123.0;
+            foam.units.insert(subject, unit);
+            for (i, slot) in foam.pool.iter_mut().enumerate() {
+                *slot = Some(FoamRecord {
+                    center: [i as f32, 0.0],
+                    heading: 0.0,
+                    size0: 1.0,
+                    growth: 0.0,
+                    lifetime: 100.0,
+                    peak: 0.25,
+                    born: 0.0,
+                    ring: true,
+                    verts: vec![Vec3::ONE],
+                    chunk,
+                });
+            }
+        }
+        let request = WaterFoamSpawn {
+            subject: Some(subject),
+            center_bevy: wow_to_bevy([2.0, 2.0, 4.9]),
+            kind: WaterFoamKind::Ring,
+            heading: 0.5,
+            start_size: 0.5,
+            growth: 0.25,
+            lifetime: 1.0,
+            peak_alpha: 0.75,
+        };
+        app.world_mut().write_message(WaterFoamSpawn {
+            center_bevy: wow_to_bevy([50.0, 50.0, 5.0]),
+            ..request
+        });
+        // MONKEY: dry cells, non-water liquids and invalid requests consume no plugin slots.
+        for x in [27.0, 32.0] {
+            app.world_mut().write_message(WaterFoamSpawn {
+                subject: None,
+                center_bevy: wow_to_bevy([x, 2.0, 5.0]),
+                ..request
+            });
+        }
+        for invalid in [
+            WaterFoamSpawn {
+                heading: f32::NAN,
+                ..request
+            },
+            WaterFoamSpawn {
+                start_size: PLUGIN_MAX_EXTENT + 1.0,
+                ..request
+            },
+            WaterFoamSpawn {
+                lifetime: 0.0,
+                ..request
+            },
+        ] {
+            app.world_mut().write_message(invalid);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<WaterFoam>().plugin_cursor, 0);
+        assert!(app
+            .world()
+            .resource::<WaterFoam>()
+            .plugin_pool
+            .iter()
+            .all(Option::is_none));
+        for i in 0..PLUGIN_POOL_SIZE + 5 {
+            app.world_mut().write_message(WaterFoamSpawn {
+                heading: i as f32,
+                kind: [
+                    WaterFoamKind::Ring,
+                    WaterFoamKind::Wake,
+                    WaterFoamKind::Splash,
+                ][i % 3],
+                ..request
+            });
+        }
+        app.update();
+        let foam = app.world().resource::<WaterFoam>();
+        assert_eq!(foam.plugin_pool.len(), PLUGIN_POOL_SIZE);
+        assert_eq!(foam.plugin_pool.iter().flatten().count(), PLUGIN_POOL_SIZE);
+        assert_eq!(foam.plugin_cursor, 5);
+        assert_eq!(
+            foam.plugin_pool[0].as_ref().unwrap().heading,
+            PLUGIN_POOL_SIZE as f32
+        );
+        assert!(!foam.plugin_pool[1].as_ref().unwrap().ring);
+        assert!(foam.plugin_pool[2].as_ref().unwrap().ring);
+        assert_eq!((foam.self_cursor, foam.other_cursor), (3, 5));
+        assert_eq!(foam.units[&subject].ready, 123.0);
+        assert_eq!(foam.units.len(), 1);
+        for (i, rec) in foam.pool.iter().enumerate() {
+            let rec = rec.as_ref().unwrap();
+            assert_eq!(rec.center, [i as f32, 0.0]);
+            assert_eq!(rec.verts, vec![Vec3::ONE]);
+            assert_eq!(rec.peak, 0.25);
+        }
+    }
 
     /// An empty or stale index means no foam anywhere, which no helper-level test catches.
     #[test]

@@ -41,10 +41,11 @@ pub(crate) fn rig_origin_region_bytes() -> u64 {
     MAX_RIG_SLOTS as u64 * 16
 }
 
-/// Byte offset of the palette rows, after the slot, tint, origin, mat-anim and straddle-clip
+/// MONKEY: palette rows follow the slot, tint, origin, mat-anim, clip and surface
 /// tables: last, because `wow_model.wgsl` declares them as the struct's one runtime-sized array.
 pub(crate) fn palette_region_offset() -> u64 {
-    crate::straddle::region_offset() + crate::straddle::region_bytes()
+    // MONKEY: include the zero-default surface table before the palette tail.
+    crate::instance_surface::region_offset() + crate::instance_surface::region_bytes()
 }
 
 /// Total bytes the slot-indexed regions add to every `wow_light`-layout buffer.
@@ -54,6 +55,7 @@ pub(crate) fn palette_regions_bytes() -> u64 {
         + rig_origin_region_bytes()
         + crate::mat_anim_table::region_bytes()
         + crate::straddle::region_bytes()
+        + crate::instance_surface::region_bytes() // MONKEY: includes every LightBlob booth/portrait allocation.
         + MAX_PALETTE_BONES as u64 * BONE_BYTES
 }
 
@@ -598,6 +600,12 @@ fn free_rig_skin(mut world: DeferredWorld, ctx: HookContext) {
     // unit's colour reaches the slot's next owner.
     if let Some(mut tints) = world.get_resource_mut::<crate::instance_tint::InstanceTints>() {
         tints.clear(slot);
+    }
+    // MONKEY: recycled rig slots must not inherit retained wetness.
+    if let Some(mut surface) =
+        world.get_resource_mut::<crate::instance_surface::InstanceSurfaceParams>()
+    {
+        surface.clear(slot);
     }
     // And the straddle waterline, for the same reason.
     if let Some(mut clips) = world.get_resource_mut::<crate::straddle::WaterClips>() {
@@ -1228,9 +1236,18 @@ mod tests {
             "the straddle clip table follows the mat-anim table"
         );
         assert_eq!(
-            palette_region_offset() - crate::straddle::region_offset(),
+            crate::instance_surface::region_offset() - crate::straddle::region_offset(), // MONKEY: new table.
             crate::straddle::region_bytes(),
-            "the palette rows follow the straddle clip table"
+            "the surface table follows the straddle clip table" // MONKEY: layout fence.
+        );
+        // MONKEY: vec4 surface rows directly precede the runtime palette array.
+        assert_eq!(
+            palette_region_offset() - crate::instance_surface::region_offset(),
+            crate::instance_surface::region_bytes()
+        );
+        assert_eq!(
+            crate::instance_surface::region_bytes(),
+            (MAX_RIG_SLOTS * 16) as u64
         );
         assert_eq!(
             palette_regions_bytes(),
@@ -1239,6 +1256,7 @@ mod tests {
                 + rig_origin_region_bytes()
                 + crate::mat_anim_table::region_bytes()
                 + crate::straddle::region_bytes()
+                + crate::instance_surface::region_bytes() // MONKEY: full buffer size.
                 + (MAX_PALETTE_BONES as u64) * BONE_BYTES
         );
         // One `vec4` a slot: the shader declares `array<vec4<f32>, 2048>`.

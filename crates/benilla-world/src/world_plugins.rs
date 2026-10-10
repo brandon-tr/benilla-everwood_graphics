@@ -64,6 +64,7 @@ impl PluginGroup for WorldPlugins {
             .add(crate::rig_anim::plugin)
             // The per-instance body tint (a state kit's CharProc-1 colour), on the palette's slot.
             .add(crate::instance_tint::plugin)
+            .add(crate::instance_surface::plugin) // MONKEY: zero-default surface slot table.
             // The mat-anim table: each frame's UV and tint samples, so no material is mutated.
             .add(crate::mat_anim_table::plugin)
             // The M2 render lane: render alpha, water far-side twins and depth-prime twins.

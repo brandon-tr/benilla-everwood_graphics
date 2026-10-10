@@ -119,6 +119,7 @@ pub mod ffx_glow;
 pub mod final_pass;
 pub mod frame_pace;
 pub mod ground_fx;
+pub mod instance_surface; // MONKEY: independent per-rig wet-surface renderer seam.
 pub mod instance_tint;
 pub mod interact;
 pub mod interior;
@@ -161,6 +162,7 @@ pub mod thread_qos;
 pub mod view;
 pub mod vis_chain;
 pub mod water_fx;
+pub use water_fx::{WaterFoamKind, WaterFoamSpawn}; // MONKEY: plugin foam messages.
 pub mod wdl;
 pub mod weather;
 pub mod wind; // MONKEY (wind): shared stateless gust/veer field and foliage quality gate
