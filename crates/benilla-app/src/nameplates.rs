@@ -309,7 +309,11 @@ fn build_name_mesh(atlas: &mut UiFontAtlas, lines: &[String]) -> Mesh {
                 path: None, // UNIT_NAME_FONT = Friz Quadrata, the default face
                 height: Some(BAKE_PX),
                 outline: Outline::None,
+                spacing: 0.0, // one line
+                shadow_x: 0.0,
                 alpha_gradient: None,
+                non_space_wrap: false,
+                max_lines: 0,
             },
             // A world billboard: the glyphs are re-seated in pitch units below, off the UI grid.
             TextSeat::Exact,

@@ -16,6 +16,7 @@ use crate::ui_script::UiInput;
 use crate::ui_unit::UnitFeed;
 
 mod bar;
+pub(crate) use bar::active_aura_press;
 mod drain;
 mod menu;
 mod net;
@@ -144,11 +145,5 @@ impl PetUnit<'_, '_> {
     /// usability predicate makes on the client's player guid (`0x4bcf89`, typemask `0x10`).
     pub(crate) fn player_store(&self) -> Option<&ObjectStore> {
         self.store(self.self_guid.0?)
-    }
-
-    /// The pet's entity under [`Self::store`]'s contract, for the pet paper doll's model.
-    pub(crate) fn entity(&self, pet_guid: u64) -> Option<Entity> {
-        let e = *self.index.0.get(&pet_guid)?;
-        self.stores.contains(e).then_some(e)
     }
 }

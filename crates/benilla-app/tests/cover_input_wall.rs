@@ -55,6 +55,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
         "WindowOccluded",
         Open("the present-mode throttle: a load behind another window must still throttle"),
     ),
+    // MONKEY (perf): a capture probe's window opens unfocused and must keep ticking, so
+    // `capture/mod.rs` sets both update modes to Continuous. Scheduler plumbing, no player input.
+    ("UpdateMode", Plumbing),
+    ("WinitSettings", Plumbing),
     (
         "CursorOptions",
         Open("an OUTPUT (grab/visible), not a channel — the cover has nothing to take from it"),

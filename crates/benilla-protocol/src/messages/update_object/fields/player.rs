@@ -6,7 +6,16 @@ impl ObjectFields {
     /// `OBJECT_FIELD_ENTRY` (3): the template entry. The only route to a pet's template: its guid
     /// holds a pet number instead, but vmangos writes the entry here (`Creature.cpp:376`).
     pub fn object_entry(&self) -> Option<u32> {
-        self.get_u32(3)
+        self.get_u32(FIELD_OBJECT_ENTRY)
+    }
+    /// `ITEM_FIELD_OWNER` (field 6): the item's owner, which the client's lock watchers compare
+    /// with the active player.
+    pub fn item_owner(&self) -> Option<u64> {
+        self.get_guid(6)
+    }
+    /// `OBJECT_FIELD_TYPE & TYPEMASK_ITEM`: an item, a bag included.
+    pub fn is_item(&self) -> bool {
+        self.get_u32(FIELD_OBJECT_TYPE).unwrap_or(0) & 0x2 != 0
     }
     /// `ITEM_FIELD_STACK_COUNT`: an item object's stack size.
     pub fn item_stack_count(&self) -> Option<u32> {
@@ -16,7 +25,7 @@ impl ObjectFields {
     /// charges left on spell `i`, signed; negative is consumed when empty, 0 is spent.
     pub fn item_spell_charges(&self, i: u8) -> Option<i32> {
         (i < 5)
-            .then(|| self.get_u32(FIELD_ITEM_STACK_COUNT + 2 + u16::from(i)))?
+            .then(|| self.get_u32(FIELD_ITEM_SPELL_CHARGES + u16::from(i)))?
             .map(|v| v as i32)
     }
     /// `ITEM_FIELD_FLAGS` (field 21): `0x08` wrapped, never alerts; `0x10` forces red status 4.
@@ -405,6 +414,11 @@ impl ObjectFields {
     pub fn player_honor_rank(&self) -> Option<u8> {
         self.get_u32(FIELD_PLAYER_FIELD_BYTES)
             .map(|b| ((b >> 24) & 0xff) as u8)
+    }
+    /// `PLAYER_BYTES_3` whole (public): gender, drunkenness, the city-protector title and the
+    /// rank, bytes 0 to 3; the four bytes the reference's rank watch `0x5ddc5c` compares.
+    pub fn player_bytes_3(&self) -> Option<u32> {
+        self.get_u32(FIELD_PLAYER_BYTES_3)
     }
     /// `PLAYER_BYTES_3` byte 3 (public, `UpdateFields_1_12_1.h:125`): the current internal rank
     /// (`HonorMgr.cpp:900`), 0 unranked, 1-4 negative, 5 up positive, indexing `PVP_RANK_*`;

@@ -4,8 +4,9 @@
 //! every scroll call re-arming the displayed lines' fade (`0x788b80` when refused at an end,
 //! `0x788af0` when it moves), which is what brings a faded chat back.
 
-use mlua::{Lua, Table, Value};
+use mlua::{Lua, MultiValue, Table, Value};
 
+use super::{channel, is_number};
 use crate::script::object::frame_handle_of;
 use crate::script::{Model, UiScript};
 use crate::widget::{KindState, ScrollingMessageState};
@@ -30,24 +31,6 @@ fn with_smf<T>(
     match &mut frame.kind_state {
         KindState::ScrollingMessage(smf) => Ok(f(smf)),
         _ => Err(mlua::Error::runtime("not a ScrollingMessageFrame")),
-    }
-}
-
-/// `lua_isnumber`: a number or a numeric string. The rgb presence test is three of these.
-fn is_number(v: &Value) -> bool {
-    match v {
-        Value::Integer(_) | Value::Number(_) => true,
-        Value::String(s) => s.to_str().is_ok_and(|s| s.trim().parse::<f64>().is_ok()),
-        _ => false,
-    }
-}
-
-/// A colour argument as f32, 0 for anything but a number.
-fn num_f32(v: &Value) -> f32 {
-    match v {
-        Value::Number(n) => *n as f32,
-        Value::Integer(i) => *i as f32,
-        _ => 0.0,
     }
 }
 
@@ -94,15 +77,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let Some(text) = super::message_text(lua, &text) else {
                     return Ok(());
                 };
-                let has_rgb = is_number(&r) && is_number(&g) && is_number(&b);
-                // The chat-type index (`ChatFrame.lua` passes `info.id`), stack index 6 or 3.
-                let id = match if has_rgb { &id } else { &r } {
-                    Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
-                    Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
-                    _ => 0,
-                };
+                let has_rgb = [&r, &g, &b].iter().all(|v| is_number(lua, v).is_some());
+                // The chat-type index (`ChatFrame.lua` passes `info.id`), stack index 6 or 3, a
+                // `lua_isnumber`-gated `_ftol` (`0x792b1b`, `0x792b4f`); 0 when the gate fails.
+                let id = is_number(lua, if has_rgb { &id } else { &r })
+                    .map_or(0, |n| crate::script::binding_abi::ftol(n) as u32);
                 let (r, g, b) = if has_rgb {
-                    (num_f32(&r), num_f32(&g), num_f32(&b))
+                    (channel(lua, &r), channel(lua, &g), channel(lua, &b))
                 } else {
                     (1.0, 1.0, 1.0)
                 };
@@ -117,12 +98,17 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         "UpdateColorByID",
         lua.create_function(
             |lua, (this, id, r, g, b): (Table, Value, Value, Value, Value)| {
-                let id = match &id {
-                    Value::Integer(i) => u32::try_from(*i).unwrap_or(0),
-                    Value::Number(n) if n.is_finite() && *n >= 0.0 => *n as u32,
-                    _ => return Ok(()),
-                };
-                let (r, g, b) = (num_f32(&r), num_f32(&g), num_f32(&b));
+                // All four arguments are `lua_isnumber`-gated (`0x793345`-`0x793388`); any failure
+                // is a silent no-op, and the id is an `_ftol` (`0x7933a1`).
+                if ![&id, &r, &g, &b]
+                    .iter()
+                    .all(|v| is_number(lua, v).is_some())
+                {
+                    return Ok(());
+                }
+                let id =
+                    crate::script::binding_abi::ftol(is_number(lua, &id).unwrap_or(0.0)) as u32;
+                let (r, g, b) = (channel(lua, &r), channel(lua, &g), channel(lua, &b));
                 with_smf(lua, &this, |smf| {
                     smf.update_color_by_id(id, r, g, b);
                 })
@@ -168,13 +154,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             scroll(lua, &this, ScrollingMessageState::page_down)
         })?,
     )?;
+    // AtTop (`0x793130`) pushes 1 (`0x7931c3`) or nil (`0x7931d6`); AtBottom (`0x7931f0`) pushes 1
+    // (`0x793283`) or nil (`0x793296`).
     m.set(
         "AtTop",
-        lua.create_function(|lua, this: Table| with_smf(lua, &this, |smf| smf.at_top()))?,
+        lua.create_function(|lua, this: Table| {
+            with_smf(lua, &this, |smf| {
+                crate::script::binding_abi::flag(smf.at_top())
+            })
+        })?,
     )?;
     m.set(
         "AtBottom",
-        lua.create_function(|lua, this: Table| with_smf(lua, &this, |smf| smf.at_bottom()))?,
+        lua.create_function(|lua, this: Table| {
+            with_smf(lua, &this, |smf| {
+                crate::script::binding_abi::flag(smf.at_bottom())
+            })
+        })?,
     )?;
 
     // SetMaxLines wipes the ring (`0x7938a0`).
@@ -195,8 +191,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 
     m.set(
         "SetFading",
-        lua.create_function(|lua, (this, on): (Table, Value)| {
-            let on = !matches!(on, Value::Nil | Value::Boolean(false));
+        lua.create_function(|lua, (this, args): (Table, MultiValue)| {
+            // `GetBoolOrDefault` (`0x6f1c10`, `0x7939a0`) with default 1: a bare call enables.
+            let on = crate::script::binding_abi::bool_or_default(args.front(), true);
             with_smf(lua, &this, |smf| smf.fading_enabled = on)
         })?,
     )?;
@@ -242,7 +239,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             super::ensure_font_region(lua, h)
                 .ok_or_else(|| mlua::Error::runtime("not a ScrollingMessageFrame"))
         },
-        "ScrollingMessageFrame",
+        crate::script::font_block::FontKind::Instance,
         None,
     )?;
 
@@ -331,6 +328,37 @@ mod tests {
         assert_eq!(s.lines[0].alpha, 1.0);
         s.tick(0.1); // past phase 1 with no ramp: straight to 0
         assert_eq!(s.lines[0].alpha, 0.0);
+    }
+
+    /// The link flag's producers (`+0x3b8`): a new line's relayout (`0x788234`), a line fading out
+    /// (`0x788538`), once, and any scroll entry, refused or not (`0x788bf1`, `0x788a8e`). The
+    /// fade's ramp alone raises nothing.
+    #[test]
+    fn the_link_flag_rises_on_relayout_fade_out_and_scroll() {
+        let mut s = ScrollingMessageState {
+            time_visible: 0.5,
+            fade_duration: 1.0,
+            ..Default::default()
+        };
+        assert!(!s.links_dirty, "the ctor clears it");
+        s.add("x".into(), 1.0, 1.0, 1.0);
+        assert!(std::mem::take(&mut s.links_dirty), "AddMessage relayouts");
+        s.tick(0.6);
+        s.tick(0.5);
+        assert!(
+            s.lines[0].alpha > 0.0 && !s.links_dirty,
+            "mid-ramp: no flag"
+        );
+        s.tick(0.6);
+        assert_eq!(s.lines[0].alpha, 0.0);
+        assert!(std::mem::take(&mut s.links_dirty), "the hide raises it");
+        s.tick(0.6);
+        assert!(!s.links_dirty, "a hidden line is not hidden again");
+        s.scroll_down(4);
+        assert!(
+            s.links_dirty,
+            "a scroll refused at the bottom re-arms and raises it"
+        );
     }
 
     /// With a one-row viewport the scroll re-arms one line; the lines either side show the freeze.
@@ -536,10 +564,11 @@ mod tests {
             2,
             "partial top line draws, off-top line doesn't"
         );
-        assert_eq!(texts[0].0, "new");
-        assert!((texts[0].1 - 90.0).abs() < 0.01 && (texts[0].2 - 104.0).abs() < 0.01);
-        assert_eq!(texts[1].0, "wrapped");
-        assert!((texts[1].1 - 104.0).abs() < 0.01 && (texts[1].2 - 132.0).abs() < 0.01);
+        // Farthest displayed line first, the link rebuild's walk (`0x788c8d`-`0x788d7d`).
+        assert_eq!(texts[0].0, "wrapped");
+        assert!((texts[0].1 - 104.0).abs() < 0.01 && (texts[0].2 - 132.0).abs() < 0.01);
+        assert_eq!(texts[1].0, "new");
+        assert!((texts[1].1 - 90.0).abs() < 0.01 && (texts[1].2 - 104.0).abs() < 0.01);
         let clip = quads
             .iter()
             .find_map(|q| match &q.content {
@@ -665,10 +694,10 @@ mod tests {
             .collect();
         // 'doomed' draws nothing but keeps its band at the top; the live lines hold the bottom two.
         assert_eq!(texts.len(), 2);
-        assert_eq!(texts[0].0, "b");
-        assert!((texts[0].1 - 0.0).abs() < 0.01);
-        assert_eq!(texts[1].0, "a");
-        assert!((texts[1].1 - 14.0).abs() < 0.01);
+        assert_eq!(texts[0].0, "a");
+        assert!((texts[0].1 - 14.0).abs() < 0.01);
+        assert_eq!(texts[1].0, "b");
+        assert!((texts[1].1 - 0.0).abs() < 0.01);
     }
 
     #[test]

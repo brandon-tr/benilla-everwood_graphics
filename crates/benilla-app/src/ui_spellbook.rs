@@ -113,8 +113,9 @@ fn feed_spellbook(
         return;
     };
     let (memory, vm_reset) = memory.get_reset(&script);
-    // The book depends on these inputs alone. `UiClock` is not one: `ui_triple` is frame-stable
-    // per arm, and expiry moves the store's `feed_epoch`.
+    // The book depends on these inputs alone. `UiClock` is not one: a running read's `ui_triple`
+    // is frame-stable per arm (a held read's start is the query's `anchor`, so it moves with
+    // `ui_now`, but nothing held moves an input), and expiry moves the store's `feed_epoch`.
     let objects_moved = inv.changes.moved();
     let templates_moved = memory.items_templates.moved(items.template_epoch());
     let cooldowns_moved = memory.cooldown_epoch.moved(cooldowns.feed_epoch());
@@ -197,6 +198,30 @@ fn feed_spellbook(
         attack_icon,
         ranged_icon,
     );
+    // The face the action bar paints for a weapon-face or `ActiveIconID` spell, where it is not
+    // the book's: a drop writes it, so the slot's in-place event reads what the bar feed would.
+    for slot in &mut fresh.slots {
+        let Some(d) = spells
+            .catalog
+            .get(slot.spell_id)
+            .filter(|d| crate::ui_action::substitutes_weapon_icon(d) || d.active_icon_id != 0)
+        else {
+            continue;
+        };
+        let face = crate::ui_action::spell_action_icon(
+            slot.spell_id,
+            d,
+            spells,
+            store,
+            &inv.objects,
+            &items,
+            icons.as_deref(),
+            &commands,
+        );
+        if face != slot.texture {
+            slot.bar_texture = Some(face);
+        }
+    }
     // The book's `IsCurrentCast` is `0x4b3600`, not the action bar's `0x4e53a0`, with two arms: a
     // form spell is current while the form byte is its form, and the open trade-skill window, not
     // built. It has no casting-now arm, so a book slot never lights during a cast.
@@ -210,7 +235,8 @@ fn feed_spellbook(
         }
     }
     // Each slot's cooldown (`GetCooldownInfo` `0x6e13e0`: id, category and GCD alike) on the
-    // `GetTime` clock, frame-stable per arm, so a running cooldown never churns the diff.
+    // `GetTime` clock, frame-stable per arm while it runs, so a running cooldown never churns the
+    // diff; a held read starts at `anchor`, so it differs per push.
     let (anchor, ui_now) = (clock.anchor, clock.ui_now);
     for slot in &mut fresh.slots {
         slot.cooldown = cooldowns
@@ -380,6 +406,8 @@ fn build_book(
                 // no packed word.
                 autocast: None,
                 packed: 0,
+                // Stamped by the feed after the build, from live state.
+                bar_texture: None,
             });
         }
         tabs.push(SpellTabView {

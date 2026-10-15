@@ -23,10 +23,13 @@ mod drain_tests;
 pub(crate) mod drop_item;
 mod errors;
 mod feed;
+pub(crate) use feed::{spell_action_icon, MISSING_ITEM_ICON};
 #[cfg(test)]
 mod feed_tests;
 mod net;
 mod ranks;
+mod recount;
+pub(crate) use recount::recount_item_actions;
 mod state;
 pub(crate) mod toggle;
 mod weapon_icon;
@@ -43,7 +46,7 @@ pub(crate) use errors::{
     show_messages, ui_error_text, CastErrors, CastFail, Caster, FillArg, MessageSink, MountErrors,
     PetTameFailures, Shown, UiError, UiErrorKeys, UiErrorTexts,
 };
-pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon};
+pub(crate) use weapon_icon::{melee_auto_attack_icon, ranged_weapon_icon, substitutes_weapon_icon};
 
 /// `Attack`, the auto-attack pseudo-spell: it toggles melee rather than casting. The use path
 /// keys on this id; the icon keys on `SPELL_EFFECT_ATTACK`, which only 6603 carries.
@@ -61,8 +64,8 @@ pub(crate) struct PlayerActions {
     /// by array order, which is ascending id: the server sends the book from a `std::map`.
     pub spells: BTreeSet<u32>,
     /// Set by every book or bar change, cleared once the feed re-resolves slot identity, which a
-    /// landed item template ([`crate::items::Items::template_epoch`]) also triggers. Item counts
-    /// refresh every frame regardless.
+    /// landed item template ([`crate::items::Items::template_epoch`]) also triggers. Between
+    /// resolves an item slot's count moves only by the item watchers' recount (`recount`).
     pub dirty: bool,
 }
 
@@ -248,7 +251,10 @@ pub(crate) struct UiActionPlugin;
 impl Plugin for UiActionPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<PlayerActions>()
+        // A UI-only harness has no net stack; declaring a message twice is idempotent.
+        app.add_message::<crate::item_watch::ItemNotice>()
+            .add_message::<crate::net::WorldEnterCascadeMessage>()
+            .init_resource::<PlayerActions>()
             .init_resource::<LearnedAbilities>()
             .init_resource::<CastErrors>()
             .init_resource::<MountErrors>()
@@ -268,10 +274,17 @@ impl Plugin for UiActionPlugin {
                     ranks::normalize_action_ranks
                         .in_set(UnitFeed)
                         .before(feed::feed_actions),
+                    // The item watchers' recounts, after the server's unlocks, which each handler
+                    // runs first (`0x5d94af` before `0x5d94e1`).
+                    recount::recount_item_actions
+                        .in_set(UnitFeed)
+                        .after(crate::ui_items::locks::apply_item_releases)
+                        .before(feed::feed_actions),
                     feed::feed_actions.in_set(UnitFeed),
                     state::feed_action_state
                         .in_set(UnitFeed)
                         .in_set(CooldownEvents)
+                        .after(crate::player::ControlRestore)
                         .after(feed::feed_actions),
                     drain::drain_action_sets.after(UiInput),
                     // The target chain queues the openers earlier in the frame.

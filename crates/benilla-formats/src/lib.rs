@@ -22,11 +22,18 @@ pub use install::{
     addon_corpus, addon_corpus_candidates, candidates, project_folder, set_project_folder, skipped,
     wow_data,
 };
+/// The install's loose files, asked before the archives by the opens that set the loose flag.
+mod loose;
+pub use loose::{
+    install_index, install_loose_interface_folders, LooseFile, LooseIndex, LooseIndexCell,
+    LooseOpen,
+};
 mod characters;
 pub use characters::{
     equip_blits, equip_column, equip_region_candidates, equip_tex_dir, equip_tile, forearm_dressed,
-    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, CompositePlan, DialRanges,
-    EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, StartOutfitItem, VisibleGeosets,
+    BlitSource, CharCreateCatalog, CharSections, CharacterGeosets, ChrRaceRow, CompositePlan,
+    DialRanges, EmblemLayer, EquipBlit, EquipGeosets, GuildEmblem, NameGenRow, StartOutfitItem,
+    VisibleGeosets,
 };
 mod camera_shakes;
 mod cinematics;
@@ -50,6 +57,12 @@ mod macro_icons;
 pub use unit_blood::{load_blood_catalog, BloodCatalog};
 mod itemsets;
 pub use itemsets::{load_item_sets, ItemSetCatalog, ItemSetInfo};
+mod gm_survey;
+mod lfg_dungeons;
+pub use lfg_dungeons::{load_lfg_dungeons, LfgDungeon};
+mod skill_tiers;
+pub use gm_survey::{load_gm_survey, GmSurvey};
+pub use skill_tiers::{load_skill_tiers, SkillTiers};
 mod gm_ticket_category;
 pub use gm_ticket_category::{
     load_gm_ticket_categories, GmTicketCategory, GmTicketCategoryCatalog,
@@ -60,7 +73,12 @@ mod cfg_configs;
 pub use cfg_configs::{load_realm_configs, RealmConfig, RealmConfigs};
 mod wow_ini;
 pub use wow_ini::client_region;
+/// The client locale, the column a localized DBC string is read from.
+mod locale;
+pub use locale::Locale;
 mod itembagfamily;
+#[cfg(test)]
+mod locale_routing;
 pub use itembagfamily::{load_item_bag_families, ItemBagFamilyCatalog};
 mod itemclass;
 pub use itemclass::{load_item_classes, ItemClassCatalog};
@@ -70,8 +88,8 @@ mod itemsubclass;
 pub use itemsubclass::{load_item_sub_classes, ItemSubClassCatalog, ItemSubClassInfo};
 mod factions;
 pub use factions::{
-    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionInfo,
-    FactionTemplate, Reaction,
+    faction_flags, load_faction_catalog, reputation_rank, FactionCatalog, FactionGroupRow,
+    FactionInfo, FactionTemplate, Reaction,
 };
 mod creature_types;
 pub use creature_types::{load_creature_type_flags, CreatureTypeFlags};
@@ -343,7 +361,10 @@ pub use server_messages::{load_server_messages_catalog, ServerMessagesCatalog};
 mod game_tips;
 pub use game_tips::{load_game_tips, GameTipsCatalog};
 mod text_filter_lists;
-pub use text_filter_lists::{load_chat_profanity, load_spam_messages, FilterPattern};
+pub use text_filter_lists::{
+    load_chat_profanity, load_names_profanity, load_names_reserved, load_spam_messages,
+    FilterPattern,
+};
 mod race_sound;
 pub use race_sound::{load_exploration_sound_catalog, ExplorationSoundCatalog};
 

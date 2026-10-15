@@ -12,6 +12,26 @@ pub(crate) fn load_ui(s: &UiScript, entry: &str) -> usize {
     load_entry(s, entry, false, false)
 }
 
+/// Declares `TestTooltipTemplate`, the stock template's 30 `TextLeft`/`TextRight` pairs, for a test
+/// with no install. A tooltip made without the template holds no line, as on 1.12.1; a test makes
+/// one with `CreateFrame("GameTooltip", name, parent, "TestTooltipTemplate")`.
+pub(crate) fn load_tooltip_template(s: &UiScript) {
+    let mut xml = String::from(
+        r#"<Ui><GameTooltip name="TestTooltipTemplate" virtual="true"><Layers><Layer level="ARTWORK">"#,
+    );
+    for i in 1..=30 {
+        for side in ["Left", "Right"] {
+            xml.push_str(&format!(
+                r#"<FontString name="$parentText{side}{i}" hidden="true"/>"#
+            ));
+        }
+    }
+    xml.push_str("</Layer></Layers></GameTooltip></Ui>");
+    let doc = benilla_ui::framexml::parse(&xml).expect("tooltip template parses");
+    let report = benilla_ui::loader::load(s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "template: {:?}", report.errors);
+}
+
 /// The cooldown indicator's file, as the stock `CooldownFrameTemplate` names it.
 pub(super) const COOLDOWN_MODEL: &str = r"Interface\Cooldown\UI-Cooldown-Indicator.mdx";
 
@@ -819,8 +839,7 @@ pub(crate) fn seat_chain_addon(s: &mut UiScript, name: &str) {
     let toc = super::reference_ui::read(&format!("Interface/AddOns/{name}/{name}.toc"))
         .map(|b| benilla_ui::toc::Toc::parse(&benilla_ui::source::decode(&b)))
         .unwrap_or_else(|| panic!("{name}: no toc off the chain"));
-    let mut info = super::addons::info_from_toc(name, &toc);
-    info.chain = true;
+    let info = super::addons::info_from_toc(name, &toc, true);
     s.set_addon_chain_reader(Box::new(super::reference_ui::read));
     s.register_addons(vec![info], None, None, None);
 }

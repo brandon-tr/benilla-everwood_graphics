@@ -19,8 +19,9 @@ use crate::net::{
     FieldChanged, FieldEdges, Guid, NetCommands, ObjectStore, Reputations, SelfPlayer,
 };
 use crate::target::{ring_reaction, Factions, Selection};
-use crate::ui_script::{gate, UiInput};
+use crate::ui_script::{gate, SweepApp, UiInput};
 
+pub(crate) mod control_gate;
 mod held;
 
 /// The unit-feed pass, gated so none of its login one-shots or per-VM memos runs before the in-game
@@ -55,35 +56,6 @@ pub(crate) struct CombatTextEvent {
     pub(crate) message_type: &'static str,
     pub(crate) data: Option<String>,
     pub(crate) extra: Option<String>,
-}
-
-/// `PLAYER_LEAVING_WORLD` on a cross-map worldport. The reference fires event `0x111` at one site
-/// (`0x490b48`), gated only by the latch `[0xb4b424]`, from the local player's destructor
-/// (`0x5dd543`, this system), the shutdown tail `0x490bd0` (ours is `shutdown_ui_state`) and the
-/// local player's DESTROY or OUT_OF_RANGE (`0x5e9b5a`); a same-map teleport destroys nothing.
-///
-/// Deviation: fires with our descriptor present, so `UnitExists("player")` answers true where the
-/// reference's (`0x515970`) misses, because matching it breaks `UnitExists` for no stock reader.
-pub(crate) fn fire_leaving_world_on_worldport(
-    script: Option<NonSendMut<UiScript>>,
-    mut sweep: crate::ui_script::LeaveWorldSweep,
-    mut ports: MessageReader<crate::net::WorldportMessage>,
-) {
-    // `needs_ack` false is the initial-login map, an arrival; the whole iterator is read so no
-    // message carries over.
-    let leaving = ports.read().filter(|w| w.needs_ack).count() > 0;
-    if !leaving {
-        return;
-    }
-    // The world latch keeps this producer and the shutdown tail from both claiming one departure;
-    // spent even with no VM, as the reference clears it at `0x490a8d`, ahead of the fire.
-    if !sweep.run() {
-        return;
-    }
-    let Some(mut script) = script else {
-        return;
-    };
-    script.fire_event("PLAYER_LEAVING_WORLD", Vec::new());
 }
 
 /// The feed's change-tracking memory: what we last told the VM, plus one server-side log-once.
@@ -144,20 +116,30 @@ impl Plugin for UiUnitPlugin {
         .add_message::<CombatTextEvent>()
         .add_message::<crate::net::WorldportMessage>()
         .add_message::<crate::net::FieldChanged>()
-        .init_resource::<crate::ui_script::LeavingWorldArmed>()
-        .add_message::<crate::ui_script::WorldLeaveSweepMessage>()
+        .init_world_leave_sweep()
+        // Ahead of the unit feed, so a worldport's leaving edge precedes the entering edge
+        // `feed_units` raises for the same port, and outside its gate: the destructor sweeps
+        // (`0x5dd543`) whether or not an interface is up, the host legs with it.
+        .add_systems(
+            Update,
+            crate::ui_script::sweep_on_worldport
+                .after(benilla_world::schedule::WorldStage::Net)
+                .before(UnitFeed),
+        )
         .add_systems(
             Update,
             (
-                // First, so a worldport's leaving edge precedes the entering edge `feed_units`
-                // raises for the same port.
-                fire_leaving_world_on_worldport,
                 feed_units,
                 // After the aura feed, whose resolver inputs it measures.
                 feed_unit_reach.after(crate::ui_aura::AuraEvents),
                 // After the same feed, whose guids it covers.
                 held::feed_chain_units.after(crate::ui_aura::AuraEvents),
-                feed_player_control,
+                // After every snapshot above is pushed, so a handler reads the new reaction.
+                fire_faction_on_forced_table.after(crate::ui_aura::AuraEvents),
+                held::feed_name_candidates,
+                feed_player_control.after(crate::player::ControlRestore),
+                // After the control edge, whose flag the exemption is asked for.
+                control_gate::feed_control_bypass,
                 feed_farsight_focus,
                 melee_unit_combat,
                 fire_unit_combat,
@@ -223,7 +205,7 @@ pub(crate) fn known_languages(
         }
     }
     languages
-        .names(0)
+        .names()
         .filter(|(id, _)| {
             declared.get(id).is_some_and(|spells| {
                 spells.iter().any(|&spell| {
@@ -317,11 +299,11 @@ pub(crate) fn seed_default_language(world: &mut World, script: &mut UiScript) {
     let Some(row) = roster.pending_row() else {
         return;
     };
-    script.set_default_language(langs.0.name(u32::from(row.race), 0).map(str::to_string));
+    script.set_default_language(langs.0.name(u32::from(row.race)).map(str::to_string));
 }
 
 /// Seed a new VM with `Languages.dbc`, the static table `SendChatMessage` resolves its language
-/// name against (`0x49f8a0`); locale column 0, as [`feed_default_language`] reads.
+/// name against (`0x49f8a0`), in the install's locale column, as [`feed_default_language`] reads.
 pub(crate) fn seed_language_table(world: &World, script: &mut UiScript) {
     let Some(langs) = world.get_resource::<LanguagesRes>() else {
         return;
@@ -329,14 +311,14 @@ pub(crate) fn seed_language_table(world: &World, script: &mut UiScript) {
     script.set_language_table(
         langs
             .0
-            .names(0)
+            .names()
             .map(|(id, name)| (id, name.to_string()))
             .collect(),
     );
 }
 
 /// Push `GetDefaultLanguage()`'s string on a change of race; `None` is the reference's zero value.
-/// Locale column 0 (the client's slot is `[0xc0e080]`): only enUS is populated in the 1.12 data.
+/// The name is the install's locale column (`[0xc0e080]`).
 fn feed_default_language(
     script: Option<NonSendMut<UiScript>>,
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
@@ -352,7 +334,7 @@ fn feed_default_language(
         .next()
         .and_then(|store| store.0.unit_race())
         .zip(langs.as_ref())
-        .and_then(|(race, langs)| langs.0.name(u32::from(race), 0))
+        .and_then(|(race, langs)| langs.0.name(u32::from(race)))
         .map(str::to_string);
     if pushed.as_ref() != Some(&name) {
         script.set_default_language(name.clone());
@@ -698,8 +680,36 @@ fn dist_sq(q: Vec3, p: Vec3) -> f64 {
     (dz * dz + dx * dx) + dy * dy
 }
 
+/// `UNIT_FACTION` for every unit token, on each arrival of the forced-reaction table. The
+/// reference's handler `0x4d59a0` calls `0x606e20` on the active player (`0x4d5a5e`): event 29
+/// through `0x515e50` for the player and its summons and charms, then a sweep of every other
+/// unit (`0x468380` with `0x606f20`), so each token naming a unit hears it, and the target frame
+/// repaints its plate (`TargetFrame.lua:75-79`). The table is no descriptor field, so no field
+/// edge reaches this. Tokens come from the resolver's inputs the aura feed pushes
+/// ([`UiScript::bound_unit_tokens`]), the fan-out `0x515c50` builds; the first sight of a VM only
+/// seats the count, as a login's own first snapshots fire the event.
+fn fire_faction_on_forced_table(
+    script: Option<NonSendMut<UiScript>>,
+    reputations: Res<Reputations>,
+    mut seen: Local<crate::ui_script::VmMemo<Option<u64>>>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    let arrivals = reputations.forced_arrivals();
+    let seen = seen.get(&script);
+    let arrived = seen.is_some_and(|last| last != arrivals);
+    *seen = Some(arrivals);
+    if !arrived {
+        return;
+    }
+    for token in script.bound_unit_tokens() {
+        script.fire_event("UNIT_FACTION", vec![ScriptValue::Str(token)]);
+    }
+}
+
 /// `PLAYER_CONTROL_LOST`/`GAINED` on a change of the flag `SMSG_CLIENT_CONTROL_UPDATE` writes
-/// (`0x4958e0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
+/// (`0x4958e0`), for our own character only (`0x5fa6d0`); the boot value, and a fresh VM's memo, is in control (`0x48f626`).
 fn feed_player_control(
     script: Option<NonSendMut<UiScript>>,
     player: Option<Res<crate::player::Player>>,
@@ -709,11 +719,11 @@ fn feed_player_control(
         return;
     };
     let lost = lost.get(&script);
-    if *lost != player.control_lost {
-        *lost = player.control_lost;
+    if *lost != player.own_control_lost {
+        *lost = player.own_control_lost;
         // `HasFullControl`'s flag rides the same edge.
-        script.set_player_control(!player.control_lost);
-        let event = if player.control_lost {
+        script.set_player_control(!player.own_control_lost);
+        let event = if player.own_control_lost {
             "PLAYER_CONTROL_LOST"
         } else {
             "PLAYER_CONTROL_GAINED"
@@ -1185,13 +1195,28 @@ pub(crate) fn fire_transitions(
     }
     // `UNIT_FACTION`, the PvP-icon repaint, on the fields the icon reads and on the tapped bit: the
     // reference's dynamic-flags watcher (`0x600440`) fires event 29 on bit `0x4` (`0x6005a1` →
-    // `0x6005b0`) and has no arm for `0x8`.
-    if prev.is_none_or(|p| {
-        (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
-            != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
-    }) {
+    // `0x6005b0`) and has no arm for `0x8`. Also on any change of `UNIT_FIELD_FACTIONTEMPLATE`, the
+    // watch bridge's id 29 (`0x51bbb0`, as for `UNIT_FLAGS` above): a template swap between two
+    // that name no faction group moves nothing in the tuple, yet changes the reaction.
+    let template_moved = edges.moved(
+        cur.guid,
+        benilla_protocol::field::FIELD_UNIT_FACTIONTEMPLATE,
+    );
+    if template_moved
+        || prev.is_none_or(|p| {
+            (p.pvp, p.is_pvp_ffa, &p.faction_group, p.tapped)
+                != (cur.pvp, cur.is_pvp_ffa, &cur.faction_group, cur.tapped)
+        })
+    {
         script.fire_event("UNIT_FACTION", vec![tok()]);
     }
+}
+
+/// `CanAssist` (`0x6066f0`) of the player toward itself, `UnitCanAssist("player", "player")`: one
+/// object toward itself is friendly (`0x606200`), so `UNIT_FLAG_NOT_SELECTABLE` is the only refusal
+/// left.
+fn self_can_assist(store: &ObjectStore) -> bool {
+    crate::target::is_selectable(Some(store), None)
 }
 
 /// `"player"`'s snapshot off our own descriptor: no reaction (the unit is ours), the raid icon,
@@ -1212,12 +1237,19 @@ fn player_snapshot(
         .map(str::to_string);
     let mut s = snapshot(store, guid, name, 0, tables.classes(), tables.types(names));
     s.is_player = true;
+    s.can_assist = self_can_assist(store);
     s.raid_target = group.raid_target_index(guid);
     s.faction_group = faction_group(store, factions);
     s.faction_group_localized = faction_group_localized(store, factions);
     // `GetGuildInfo`: the public guild fields (191/192) joined against the lazy guild cache.
     s.guild = crate::ui_guild::unit_guild(&store.0, guild, commands);
     s
+}
+
+/// `"player"`, the `arg1` of the player-field watcher `0x5de4b0` (`"%s"` at `0x82e280`, `"player"`
+/// at `0x847894`).
+pub(crate) fn player_token() -> ScriptValue {
+    ScriptValue::Str("player".to_string())
 }
 
 /// `UnitXP("player")` and `UnitXPMax("player")` off our own descriptor, zero while unsent.
@@ -1314,6 +1346,8 @@ fn feed_units(
     let factions_changed = factions.as_ref().is_some_and(|r| r.is_changed());
     // The interaction NPC moves when nothing else does, and `MERCHANT_SHOW` reads `"npc"`.
     let interact_changed = interact.as_ref().is_some_and(|r| r.is_changed());
+    // A selection call showed its pick as `"target"` inside its chunk, past this memo.
+    let target_view_moved = script.take_target_view_moved();
     gate::trace(
         "feed_units",
         &[
@@ -1327,6 +1361,7 @@ fn feed_units(
             ("reputations", reps_changed),
             ("factions", factions_changed),
             ("interact", interact_changed),
+            ("target_view", target_view_moved),
         ],
     );
     let gate = gate::Gate::new(
@@ -1339,7 +1374,8 @@ fn feed_units(
             || group_changed
             || reps_changed
             || factions_changed
-            || interact_changed,
+            || interact_changed
+            || target_view_moved,
     );
     stores.removed.clear();
     if gate.skip() {
@@ -1376,6 +1412,9 @@ fn feed_units(
         feed.warned_sideless = sideless;
     }
     // What the three snapshots below (target, target-of-target, NPC) read besides a descriptor.
+    let by_guid = |guid: u64| -> Option<ObjectStore> {
+        stores.all.get(*index.as_ref()?.0.get(&guid)?).ok().cloned()
+    };
     let held = held::HeldUnits {
         names: &names,
         commands: &commands,
@@ -1385,6 +1424,7 @@ fn feed_units(
         self_store: self_pair.map(|(s, _)| s),
         classes: chr,
         types,
+        by_guid: &by_guid,
     };
     let target = selection.target.zip(selection.guid).and_then(|(e, guid)| {
         let store = stores.all.get(e).ok()?;
@@ -1412,11 +1452,12 @@ fn feed_units(
             script.set_unit("player", player.clone());
         }
     }
-    let target_dirty = match (&target, memo.last.get("target")) {
-        (Some(cur), Some(prev)) => cur != prev,
-        (None, None) => false,
-        _ => true,
-    };
+    let target_dirty = target_view_moved
+        || match (&target, memo.last.get("target")) {
+            (Some(cur), Some(prev)) => cur != prev,
+            (None, None) => false,
+            _ => true,
+        };
     if target_dirty {
         gate.audit("feed_units", "the target snapshot");
         script.set_unit("target", target.clone());
@@ -1458,34 +1499,38 @@ fn feed_units(
         }
     }
 
-    // The XP pair and `PLAYER_XP_UPDATE`, ahead of the world-enter events so `PLAYER_LOGIN` and
-    // `PLAYER_ENTERING_WORLD` handlers read real values. The event fires on first sight too, at
-    // login and after a `/reload`, where the reference's field watchers stay silent.
+    // The XP pair and the rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), pushed ahead of
+    // the world-enter events so `PLAYER_LOGIN` and `PLAYER_ENTERING_WORLD` handlers read real
+    // values, and both before any of their events fire, since a handler reads the two together.
+    //
+    // The events fire in the order the reference's notify pass walks the fields. `PLAYER_BYTES_2`
+    // byte 3 (194) is watched by `0x5de4e0`, which signals `UPDATE_EXHAUSTION` bare through
+    // `0x703e50` and prints the rest message; XP (716) and next-level XP (717) are two watches
+    // (`0x5ddb4b`, `0x5ddb72`), each signalling `PLAYER_XP_UPDATE("player")` through `0x5de4b0`
+    // when its four bytes change, so a level-up fires it twice; the rest pool (1175) is
+    // `0x5ddb24`, `UPDATE_EXHAUSTION("player")`. So the last rested kill, which moves all four,
+    // fires `UPDATE_EXHAUSTION()`, `PLAYER_XP_UPDATE`, `UPDATE_EXHAUSTION("player")`. Each event
+    // also fires once on first sight, at login and after a `/reload`, where the reference's
+    // watchers stay silent on a create: the XP one, and the exhaustion one bare in the byte's slot.
+    // Below `0x5ee990`'s local-GUID gate (`0x5eea93`) the flag arms test their own bits:
+    // `PLAYER_UPDATE_RESTING` on either edge of `0x20` (`0x5eead0`, fire `0x5eeaf2`),
+    // `PLAYTIME_CHANGED` on `0x3000` (`0x5eeb65`, fire `0x5eeb6f`).
     if let Some((store, _)) = self_q.iter().next() {
         let (xp, next) = xp_pair(store);
-        if memo.last_xp != Some((xp, next)) {
-            gate.audit("feed_units", "the XP pair");
-            memo.last_xp = Some((xp, next));
-            script.set_player_xp(xp, next);
-            script.fire_event("PLAYER_XP_UPDATE", vec![]);
-        }
-    }
-
-    // The rest snapshot (rest-state byte, pool, `PLAYER_FLAGS`), ahead of the world-enter events
-    // as the reference's descriptor is. Below `0x5ee990`'s local-GUID gate (`0x5eea93`) each arm
-    // tests its own bits: `PLAYER_UPDATE_RESTING` on either edge of `0x20` (`0x5eead0`, fire
-    // `0x5eeaf2`), `PLAYTIME_CHANGED` on `0x3000` (`0x5eeb65`, fire `0x5eeb6f`).
-    // `UPDATE_EXHAUSTION` is two other watchers, `0x5de4e0` on the byte and `0x5de4b0` on the pool;
-    // here it also fires on first sight, where they stay silent on a create and on `/reload`.
-    if let Some((store, _)) = self_q.iter().next() {
         let rest = (
             store.0.player_rest_state().unwrap_or(0),
             store.0.player_rest_state_experience().unwrap_or(0),
             store.0.player_flags(),
         );
-        if memo.last_rest != Some(rest) {
+        let (xp_prev, rest_prev) = (memo.last_xp, memo.last_rest);
+        let (xp_moved, rest_moved) = (xp_prev != Some((xp, next)), rest_prev != Some(rest));
+        if xp_moved {
+            gate.audit("feed_units", "the XP pair");
+            memo.last_xp = Some((xp, next));
+            script.set_player_xp(xp, next);
+        }
+        if rest_moved {
             gate.audit("feed_units", "the rest snapshot");
-            let prev = memo.last_rest;
             memo.last_rest = Some(rest);
             script.set_rest_state(rest.0, rest.1, rest.2 & PLAYER_FLAGS_RESTING != 0);
             // The play-time bits share the dword and the memo; only the events split by bit.
@@ -1493,26 +1538,37 @@ fn feed_units(
                 rest.2 & PLAYER_FLAGS_PARTIAL_PLAY_TIME != 0,
                 rest.2 & PLAYER_FLAGS_NO_PLAY_TIME != 0,
             );
-            if prev.map(|p| (p.0, p.1)) != Some((rest.0, rest.1)) {
-                script.fire_event("UPDATE_EXHAUSTION", vec![]);
-            }
+        }
+        if rest_moved && rest_prev.is_none_or(|p| p.0 != rest.0) {
+            script.fire_event("UPDATE_EXHAUSTION", vec![]);
             // Only the byte watcher messages, and only on a real change: `prev` None is the login
             // descriptor, a create the reference never runs through the notify pass.
-            if let Some(p) = prev {
+            if let Some(p) = rest_prev {
                 let line = rest_state_message(p.0, rest.0)
                     .and_then(|key| crate::ui_action::keyed_line(&script, key));
                 crate::ui_action::show_messages(&mut script, &mut sink, "ui_unit", line);
             }
-            // The self-only flag events on their own bits' edges; the login create is silent.
-            if let Some(p) = prev {
-                let moved = p.2 ^ rest.2;
-                if moved & PLAYER_FLAGS_RESTING != 0 {
-                    script.fire_event("PLAYER_UPDATE_RESTING", vec![]);
-                }
-                // `PLAYTIME_CHANGED` (id 530), argless; stock `PlayerFrame.lua:23` registers it.
-                if moved & (PLAYER_FLAGS_PARTIAL_PLAY_TIME | PLAYER_FLAGS_NO_PLAY_TIME) != 0 {
-                    script.fire_event("PLAYTIME_CHANGED", vec![]);
-                }
+        }
+        if xp_moved {
+            let fires = xp_prev.map_or(1, |(p_xp, p_next)| {
+                usize::from(p_xp != xp) + usize::from(p_next != next)
+            });
+            for _ in 0..fires {
+                script.fire_event("PLAYER_XP_UPDATE", vec![player_token()]);
+            }
+        }
+        if rest_prev.is_some_and(|p| p.1 != rest.1) {
+            script.fire_event("UPDATE_EXHAUSTION", vec![player_token()]);
+        }
+        // The self-only flag events on their own bits' edges; the login create is silent.
+        if let Some(p) = rest_prev {
+            let moved = p.2 ^ rest.2;
+            if moved & PLAYER_FLAGS_RESTING != 0 {
+                script.fire_event("PLAYER_UPDATE_RESTING", vec![]);
+            }
+            // `PLAYTIME_CHANGED` (id 530), argless; stock `PlayerFrame.lua:23` registers it.
+            if moved & (PLAYER_FLAGS_PARTIAL_PLAY_TIME | PLAYER_FLAGS_NO_PLAY_TIME) != 0 {
+                script.fire_event("PLAYTIME_CHANGED", vec![]);
             }
         }
     }
@@ -1568,9 +1624,13 @@ fn feed_units(
     // the world both times. `PLAYER_LOGIN` only when this VM's load armed it, so a worldport's
     // re-entry fires `PLAYER_ENTERING_WORLD` alone. At world exit, re-arm the entry and forget the
     // player-global memos so the next character seeds them.
-    if self_pair.is_some() {
+    if let Some((_, me)) = self_pair {
         if !memo.entered_world {
             gate.audit("feed_units", "the world-enter events");
+            // `"player"` names us when the cascade runs, from our own create: the stock windows
+            // bind their model panes to it here (`PaperDollFrame.lua:39`), so it is seated ahead
+            // of the aura feed's full resolver push, which this feed is not ordered against.
+            script.seat_player_guid(me.0);
             script.fire_world_enter();
             memo.entered_world = true;
         }
@@ -1611,8 +1671,8 @@ fn feed_units(
         }
     }
 
-    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo fires
-    // it for a kept selection, where the reference's shutdown clears the target (`0x490bdf`).
+    // `PLAYER_TARGET_CHANGED`, argless, when the selection changes. A `/reload`'s fresh memo finds
+    // none: the shutdown dropped the target and told the dying VM (`0x490bdf`).
     if selection.guid != memo.target_guid {
         gate.audit("feed_units", "the PLAYER_TARGET_CHANGED edge");
         memo.target_guid = selection.guid;
@@ -1706,12 +1766,15 @@ fn combo_edge(last: Option<(u8, u64)>, now: (u8, u64)) -> Option<bool> {
     (last != Some(now)).then(|| last.map(|(count, _)| count) != Some(now.0))
 }
 
+#[cfg(test)]
+pub(crate) use held::feed_name_candidates;
+
 /// The bare unit feed, for a test driving the stock unit frames off engine state.
 #[cfg(test)]
 pub(crate) fn add_unit_feed(app: &mut App) {
     app.init_resource::<UnitFeedState>()
         .add_message::<crate::net::FieldChanged>()
-        .add_systems(Update, feed_units);
+        .add_systems(Update, (feed_units, fire_faction_on_forced_table).chain());
 }
 
 #[cfg(test)]
@@ -2561,6 +2624,14 @@ mod tests {
             benilla_formats::load_languages(&mut chain).expect("Languages.dbc"),
         ));
         let mut script = UiScript::new().expect("VM");
+        // `SendChatMessage` needs a local player (`0x49f223`).
+        script.set_unit(
+            "player",
+            Some(UnitState {
+                exists: true,
+                ..Default::default()
+            }),
+        );
         seed_language_table(&world, &mut script);
         let want = [
             ("Orcish", 1),
@@ -2751,13 +2822,28 @@ mod tests {
         );
         app.world_mut()
             .resource_mut::<crate::player::Player>()
-            .control_lost = true;
+            .own_control_lost = true;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_LOST".to_string()]);
         assert_eq!(seen(&mut app), Vec::<String>::new(), "held, not repeated");
         app.world_mut()
             .resource_mut::<crate::player::Player>()
-            .control_lost = false;
+            .own_control_lost = false;
         assert_eq!(seen(&mut app), vec!["PLAYER_CONTROL_GAINED".to_string()]);
+
+        // A possessed creature stuck under fear or confusion is not our character losing control:
+        // `0x5fa600` writes `[0xb4b3e4]` for our own guid alone, so no event and no flag.
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = true;
+        assert_eq!(seen(&mut app), Vec::<String>::new());
+        assert!(app
+            .world()
+            .non_send_resource::<UiScript>()
+            .eval::<bool>("return HasFullControl() == 1")
+            .unwrap());
+        app.world_mut()
+            .resource_mut::<crate::player::Player>()
+            .control_lost = false;
 
         let set_farsight = |app: &mut App, guid: u64| {
             app.world_mut().entity_mut(me).insert(ObjectStore(
@@ -3069,6 +3155,140 @@ mod tests {
         );
     }
 
+    /// The player-field watcher `0x5de4b0` signals `("player")` once per watch whose own four
+    /// bytes changed: XP (`0x5ddb4b`) and next-level XP (`0x5ddb72`) are two watches, and the
+    /// rest pool (`0x5ddb24`) is a third, beside the rest-state byte's bare signal (`0x5de4e0`).
+    #[test]
+    fn the_xp_and_rest_watches_each_fire_on_their_own_bytes() {
+        use bevy::ecs::system::RunSystemOnce;
+        const FIELD_PLAYER_BYTES_2: u16 = 194;
+        const FIELD_PLAYER_XP: u16 = 716;
+        const FIELD_PLAYER_NEXT_LEVEL_XP: u16 = 717;
+        const FIELD_PLAYER_REST_STATE_EXPERIENCE: u16 = 1175;
+
+        let mut app = App::new();
+        app.add_message::<FieldChanged>();
+        app.init_resource::<Selection>()
+            .init_resource::<UnitFeedState>()
+            .init_resource::<NameCache>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        let script = UiScript::new().unwrap();
+        script
+            .run(
+                r#"
+                SEEN = {}
+                local f = CreateFrame("Frame")
+                f:RegisterEvent("PLAYER_XP_UPDATE")
+                f:RegisterEvent("UPDATE_EXHAUSTION")
+                f:SetScript("OnEvent", function()
+                    table.insert(SEEN, event .. " " .. tostring(arg1))
+                end)
+            "#,
+            )
+            .unwrap();
+        app.insert_non_send_resource(script);
+        let me = app
+            .world_mut()
+            .spawn((
+                SelfPlayer,
+                Guid(0x77),
+                ObjectStore(
+                    benilla_protocol::ObjectFields::from_pairs(&[])
+                        .into_created(benilla_protocol::messages::ObjectType::Player),
+                ),
+            ))
+            .id();
+        let step = |app: &mut App, pairs: &[(u16, u32)]| -> Vec<String> {
+            app.world_mut()
+                .entity_mut(me)
+                .get_mut::<ObjectStore>()
+                .unwrap()
+                .0
+                .merge(benilla_protocol::ObjectFields::from_pairs(pairs));
+            app.world_mut().run_system_once(feed_units).unwrap();
+            let mut s = app.world_mut().non_send_resource_mut::<UiScript>();
+            s.resolve();
+            let out = s.eval::<Vec<String>>("return SEEN").unwrap();
+            s.run("SEEN = {}").unwrap();
+            out
+        };
+
+        // The first sight is one fire of each, for the bars' first paint.
+        assert_eq!(
+            step(
+                &mut app,
+                &[(FIELD_PLAYER_XP, 10), (FIELD_PLAYER_NEXT_LEVEL_XP, 100)]
+            ),
+            vec!["UPDATE_EXHAUSTION nil", "PLAYER_XP_UPDATE player"]
+        );
+        assert_eq!(
+            step(&mut app, &[(FIELD_PLAYER_XP, 20)]),
+            vec!["PLAYER_XP_UPDATE player"]
+        );
+        // A level-up moves both fields: two watches, two signals.
+        assert_eq!(
+            step(
+                &mut app,
+                &[(FIELD_PLAYER_XP, 0), (FIELD_PLAYER_NEXT_LEVEL_XP, 200)]
+            ),
+            vec!["PLAYER_XP_UPDATE player"; 2]
+        );
+        assert!(step(&mut app, &[(FIELD_PLAYER_XP, 0)]).is_empty());
+        // The pool is the watcher's, the state byte is the bare one.
+        assert_eq!(
+            step(&mut app, &[(FIELD_PLAYER_REST_STATE_EXPERIENCE, 500)]),
+            vec!["UPDATE_EXHAUSTION player"]
+        );
+        assert_eq!(
+            step(&mut app, &[(FIELD_PLAYER_BYTES_2, 1 << 24)]),
+            vec!["UPDATE_EXHAUSTION nil"]
+        );
+        assert_eq!(
+            step(
+                &mut app,
+                &[
+                    (FIELD_PLAYER_BYTES_2, 2 << 24),
+                    (FIELD_PLAYER_REST_STATE_EXPERIENCE, 0)
+                ]
+            ),
+            vec!["UPDATE_EXHAUSTION nil", "UPDATE_EXHAUSTION player"],
+            "the byte's watch runs before the pool's in the notify pass"
+        );
+
+        // The last rested kill moves the state byte (194), XP (716) and the pool (1175) in one
+        // block, and the notify pass walks the fields in index order.
+        step(
+            &mut app,
+            &[
+                (FIELD_PLAYER_BYTES_2, 1 << 24),
+                (FIELD_PLAYER_REST_STATE_EXPERIENCE, 30),
+                (FIELD_PLAYER_XP, 100),
+            ],
+        );
+        assert_eq!(
+            step(
+                &mut app,
+                &[
+                    (FIELD_PLAYER_BYTES_2, 0),
+                    (FIELD_PLAYER_REST_STATE_EXPERIENCE, 0),
+                    (FIELD_PLAYER_XP, 160)
+                ]
+            ),
+            vec![
+                "UPDATE_EXHAUSTION nil",
+                "PLAYER_XP_UPDATE player",
+                "UPDATE_EXHAUSTION player"
+            ],
+            "byte 194, XP 716, pool 1175"
+        );
+    }
+
     /// The player-only refusal rides in the entry, so a boar in interact range is not inspectable.
     #[test]
     fn a_creature_target_enters_the_reach_map_at_its_real_distance() {
@@ -3314,6 +3534,25 @@ mod tests {
             [[0; 3]; 20],
             "a creature has no PLAYER block"
         );
+    }
+
+    /// The player can assist itself unless its descriptor says `UNIT_FLAG_NOT_SELECTABLE`
+    /// (`0x6066f0`'s first refusal; the reaction of one object toward itself is friendly,
+    /// `0x606200`).
+    #[test]
+    fn the_player_assists_itself_unless_it_is_unselectable() {
+        use benilla_protocol::messages::ObjectFields;
+
+        const OBJECT_TYPE: u16 = 2;
+        const FLAGS: u16 = 46;
+        let me = |flags: u32| {
+            ObjectStore(ObjectFields::from_pairs(&[
+                (OBJECT_TYPE, 0x19),
+                (FLAGS, flags),
+            ]))
+        };
+        assert!(self_can_assist(&me(0x8)));
+        assert!(!self_can_assist(&me(0x8 | (1 << 25))));
     }
 
     /// The rank getter's two gates (`0x605620`), through `enrich_unit`'s wiring.
@@ -3601,6 +3840,111 @@ mod tests {
         );
     }
 
+    /// A selection call shows its pick as `"target"` to the rest of its chunk (`TargetByName`,
+    /// `0x489d60`); when the commit does not follow (here the call is dropped), the next frame
+    /// re-pushes `"target"` from the committed selection, though nothing the feed diffs moved.
+    #[test]
+    fn a_target_view_the_commit_did_not_follow_is_re_pushed_the_next_frame() {
+        use crate::names::CreatureRecord;
+        use benilla_protocol::messages::ObjectType;
+        use benilla_protocol::ObjectFields;
+        use benilla_ui::script::NameCandidate;
+
+        const OBJECT_FIELD_ENTRY: u16 = 3;
+        /// `HIGHGUID_UNIT` guids of entries 69, the selected wolf, and 70, a druid.
+        const WOLF: u64 = 0xF130_0000_4500_0001;
+        const DRUID: u64 = 0xF130_0000_4600_0001;
+
+        let mut app = App::new();
+        app.init_resource::<UnitFeedState>()
+            .init_resource::<Selection>()
+            .init_resource::<Reputations>()
+            .init_resource::<crate::ui_party::GroupState>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .init_resource::<crate::ui_guild::GuildState>();
+        app.add_message::<FieldChanged>();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        app.insert_resource(NetCommands(tx));
+        app.insert_non_send_resource(UiScript::new().unwrap());
+        let mut names = NameCache::default();
+        names.insert_creature(
+            69,
+            Some(CreatureRecord {
+                name: "Wolf".into(),
+                subname: None,
+                creature_type: 1,
+                pet_family: 0,
+                rank: 0,
+                type_flags: 0,
+                civilian: false,
+                racial_leader: false,
+                display_id: 0,
+            }),
+        );
+        app.insert_resource(names);
+        app.add_systems(Update, feed_units);
+        app.world_mut().spawn((
+            SelfPlayer,
+            Guid(0x77),
+            ObjectStore(ObjectFields::from_pairs(&[]).into_created(ObjectType::Player)),
+        ));
+        let wolf = app
+            .world_mut()
+            .spawn(ObjectStore(ObjectFields::from_pairs(&[(
+                OBJECT_FIELD_ENTRY,
+                69,
+            )])))
+            .id();
+        *app.world_mut().resource_mut::<Selection>() = Selection {
+            target: Some(wolf),
+            guid: Some(WOLF),
+            ..Default::default()
+        };
+        let target_name = |app: &mut App, lua: &str| -> Option<String> {
+            app.world_mut()
+                .non_send_resource_mut::<UiScript>()
+                .eval::<Option<String>>(&format!("{lua} return UnitName('target')"))
+                .unwrap()
+        };
+        app.update();
+        app.update();
+        assert_eq!(target_name(&mut app, "").as_deref(), Some("Wolf"));
+
+        let mut script = app.world_mut().non_send_resource_mut::<UiScript>();
+        script.set_name_candidate(
+            DRUID,
+            Some(NameCandidate {
+                name: "Druid".into(),
+                dist2: 1.0,
+                state: benilla_ui::script::UnitState {
+                    exists: true,
+                    has_object: true,
+                    guid: DRUID,
+                    name: Some("Druid".into()),
+                    ..Default::default()
+                },
+                selectable: true,
+            }),
+        );
+        assert_eq!(
+            target_name(&mut app, "TargetByName('Druid')").as_deref(),
+            Some("Druid"),
+            "the chunk reads its pick"
+        );
+        let dropped = app
+            .world_mut()
+            .non_send_resource_mut::<UiScript>()
+            .take_script_calls();
+        assert_eq!(dropped.len(), 1, "the call queued for the commit");
+        app.update();
+        assert_eq!(
+            target_name(&mut app, "").as_deref(),
+            Some("Wolf"),
+            "the committed selection is shown again"
+        );
+    }
+
     /// `UnitCreatureType` through the real feed (`0x51a280`, resolver `0x605570`): a shapeshifted
     /// player answers the form's type before the race's, an unshifted one the race's, a form of
     /// type -1 falls through to the race, and a creature keeps its template's unless a form
@@ -3756,9 +4100,8 @@ mod tests {
     fn a_cross_map_worldport_fires_leaving_world_and_the_login_map_does_not() {
         let mut app = App::new();
         app.add_message::<crate::net::WorldportMessage>()
-            .init_resource::<crate::ui_script::LeavingWorldArmed>()
-            .add_message::<crate::ui_script::WorldLeaveSweepMessage>()
-            .add_systems(Update, fire_leaving_world_on_worldport);
+            .init_world_leave_sweep()
+            .add_systems(Update, crate::ui_script::sweep_on_worldport);
         app.insert_non_send_resource(UiScript::new().expect("VM"));
         app.world_mut()
             .non_send_resource::<UiScript>()

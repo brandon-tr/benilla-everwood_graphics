@@ -14,6 +14,8 @@ mod ace_gate_tests;
 mod away;
 /// The world broadcasts: `SMSG_ZONE_UNDER_ATTACK`/`_DEFENSE_MESSAGE`/`_SERVER_MESSAGE`.
 mod broadcast;
+/// The chat bubbles' hand-off to their `WorldFrame` widgets.
+pub(crate) mod bubbles;
 mod channels;
 /// The combat log's chat lines: classification, chat type and each sentence's GlobalString key.
 pub(crate) mod combat;
@@ -27,6 +29,9 @@ mod frames;
 /// The idle handler: the 5-minute auto-sit and auto-AFK, and the 30-minute camp.
 pub(crate) mod idle;
 mod input;
+/// The `SendChatMessage` drain, for the tests that feed it a real group.
+#[cfg(test)]
+pub(crate) use input::drain_addon_chat_sends;
 /// The language gate: the exemptions and fluency lookup behind the chat garble.
 mod language;
 /// `LoggingChat`/`LoggingCombat`: the two log files `/chatlog` and `/combatlog` toggle.

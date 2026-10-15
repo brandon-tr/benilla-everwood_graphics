@@ -38,8 +38,10 @@ impl Default for WaterUniform {
 #[derive(Resource, Clone, Copy, PartialEq)]
 pub struct WaterQuality(pub u8);
 
+/// MONKEY (planar water): High, the `waterQuality` row's own default (`VideoConfig`), so the
+/// frame before the first bridge publish draws what the bridge then publishes.
 impl Default for WaterQuality {
-    fn default() -> Self { Self(1) }
+    fn default() -> Self { Self(2) }
 }
 
 /// MONKEY (planar water): how the High tier reflects the scenery. 1 = planar (the scene rendered

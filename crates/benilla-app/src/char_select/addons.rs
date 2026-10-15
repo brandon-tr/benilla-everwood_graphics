@@ -21,7 +21,7 @@ use benilla_ui::script::UiScript;
 use benilla_ui::widget::{slider_fraction, slider_grab};
 
 use crate::glue::art::{tc_rect, GlueArt, DIM, GOLD};
-use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
+use crate::glue::backdrop::{backdrop_border, tiled_bg};
 use crate::glue::widgets::{
     glue_button, outlined_text, overlay, ArtSwap, GlueBtnKind, GlueText, Hilight,
 };
@@ -124,6 +124,9 @@ pub(super) struct AddonsPanel {
     /// The live `checkAddonVersion`, true meaning the force-load box is unticked; read off the
     /// boot VM every frame.
     version_check: bool,
+    /// The folder names the server's `SMSG_ADDON_INFO` banned (status 0, `[rec+0x24] == 2`), which
+    /// `AddOn_CanLoad` refuses (`0x51e841`); read off the reply every frame.
+    banned: Vec<String>,
     /// First visible row (`AddonList.offset`).
     offset: usize,
     /// The scroll drag's grab, as a fraction of the band's height. Held here, not read off
@@ -152,6 +155,7 @@ impl Default for AddonsPanel {
             // The registered default, "1"; a `false` would paint out-of-date rows loadable for a
             // frame.
             version_check: true,
+            banned: Vec::new(),
             offset: 0,
             drag: None,
             tip: None,
@@ -168,7 +172,7 @@ impl AddonsPanel {
     /// characters agree on, else the manifest's `## DefaultState`.
     pub(super) fn open_for(&mut self, realm: String, chars: Vec<String>) {
         self.list = addons::installed_rows();
-        self.store = addons::EnableStore::load(&realm, &chars);
+        self.store = addons::load_store(&realm, &chars);
         self.chars = chars;
         self.reread();
         // "All" is the reference's default selection.
@@ -228,7 +232,7 @@ impl AddonsPanel {
     /// Okay, `SaveAddOns` (`0x46d990` into the writer `0x51ef20`): each character a click changed
     /// gets its enable hash written; the rest are left as they are.
     fn save(&mut self) {
-        self.store.save();
+        self.store.save(&addons::AppAddonFiles);
     }
 
     /// Whether any addon is installed (`UpdateAddonButton` hides the button otherwise). Cached for
@@ -314,6 +318,9 @@ impl AddonsPanel {
             .map(|(i, a)| GateRow {
                 name: &a.name,
                 enabled: self.effective_enabled(i),
+                banned: self.banned.iter().any(|b| b.eq_ignore_ascii_case(&a.name)),
+                // Set by a signature check answering 2, which benilla never makes.
+                corrupt: false,
                 interface: a.interface,
                 load_on_demand: a.load_on_demand,
                 loaded: false,
@@ -429,6 +436,7 @@ pub(super) fn drive_addons_panel(
     assets: Res<AssetServer>,
     strings: Option<Res<GlueStrings>>,
     script: Option<NonSendMut<UiScript>>,
+    reply: Option<Res<crate::net::AddonInfoReply>>,
     mut cvars: ResMut<crate::cvars::Cvars>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
@@ -540,6 +548,19 @@ pub(super) fn drive_addons_panel(
         .is_none_or(|v| v != "0");
     if panel.version_check != version_check {
         panel.version_check = version_check;
+        panel.dirty = true;
+    }
+    // The addons the reply banned (status 0): the registry's BANNED, for the rows that are named.
+    let banned: Vec<String> = reply
+        .as_deref()
+        .and_then(|r| r.0.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.status == 0)
+        .map(|r| r.name.clone())
+        .collect();
+    if panel.banned != banned {
+        panel.banned = banned;
         panel.dirty = true;
     }
 
@@ -720,6 +741,7 @@ fn spawn_panel(
     commands
         .spawn((
             AddonsUi,
+            crate::glue::NativeGlue,
             GlobalZIndex(1200), // over the select screen's 1100, like the delete dialog
             // The reference's full-screen BACKGROUND layer, black at 0.75; it also keeps a stray
             // click off the screen behind.
@@ -1300,21 +1322,12 @@ fn spawn_panel(
                     }
                     list.with_children(|list| {
                         if framed {
-                            list.spawn((
-                                tiled_bg_node(
-                                    art.dialog_bg.clone().unwrap(),
-                                    32.0,
-                                    s,
-                                    Color::WHITE,
-                                ),
-                                Node {
-                                    position_type: PositionType::Absolute,
-                                    left: px(11.0),
-                                    right: px(12.0),
-                                    top: px(12.0),
-                                    bottom: px(11.0),
-                                    ..default()
-                                },
+                            list.spawn(tiled_bg(
+                                art.dialog_bg.clone().unwrap(),
+                                32.0,
+                                (11.0, 12.0, 12.0, 11.0),
+                                s,
+                                Color::WHITE,
                             ));
                             backdrop_border(
                                 list,
@@ -1463,16 +1476,12 @@ fn spawn_tooltip(
     }
     tip.with_children(|t| {
         if framed {
-            t.spawn((
-                tiled_bg_node(art.tooltip_bg.clone().unwrap(), 16.0, s, TIP_FILL),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(5.0),
-                    right: px(5.0),
-                    top: px(5.0),
-                    bottom: px(5.0),
-                    ..default()
-                },
+            t.spawn(tiled_bg(
+                art.tooltip_bg.clone().unwrap(),
+                16.0,
+                (5.0, 5.0, 5.0, 5.0),
+                s,
+                TIP_FILL,
             ));
             backdrop_border(t, art.tooltip_border.as_ref().unwrap(), 16.0, Color::WHITE);
         }
@@ -1494,6 +1503,24 @@ fn spawn_tooltip(
         }
     });
     tip.id()
+}
+
+/// The native screen's Okay for another module's test: opened for `chars` on `realm`, then each
+/// `(view, row, on)` pressed (`view` the dropdown's selection, `None` All), then saved.
+#[cfg(test)]
+pub(crate) fn okay_after_clicks(
+    realm: &str,
+    chars: &[String],
+    clicks: &[(Option<usize>, usize, bool)],
+) {
+    let mut panel = AddonsPanel::default();
+    panel.open_for(realm.to_string(), chars.to_vec());
+    for &(view, row, on) in clicks {
+        panel.view = view;
+        panel.set(row, on);
+        panel.reread();
+    }
+    panel.save();
 }
 
 #[cfg(test)]
@@ -1679,6 +1706,17 @@ mod tests {
         assert_eq!(p.box_state(0), BoxState::On);
     }
 
+    /// A banned addon (the reply's status 0) is refused, and its dependents with `DEP_BANNED`
+    /// (`0x51e841`).
+    #[test]
+    fn a_banned_addon_is_refused_and_its_dependents_inherit_it() {
+        let mut p = panel_for(1, vec![addon("A", &[], 11200), addon("B", &["A"], 11200)]);
+        assert!(p.verdict(0).loadable() && p.verdict(1).loadable());
+        p.banned = vec!["a".into()];
+        assert_eq!(p.verdict(0).token().as_deref(), Some("BANNED"));
+        assert_eq!(p.verdict(1).token().as_deref(), Some("DEP_BANNED"));
+    }
+
     /// In the All view a mixed box counts as checked, so a click disables for every character.
     #[test]
     fn an_all_view_click_follows_the_references_checkbutton() {
@@ -1788,7 +1826,7 @@ mod tests {
 
         // Read back through the store world entry resolves against.
         let roster = ["Alice".to_string(), "Bob".to_string(), "Carol".to_string()];
-        let store = addons::EnableStore::load("TestRealm", &roster);
+        let store = addons::load_store("TestRealm", &roster);
         let rows = addons::installed_rows();
         let read = |who: &str| -> Vec<bool> {
             rows.iter()

@@ -29,7 +29,8 @@ taken.
   queue, new Lua functions, graphics past 1.12's), and behaviour changed because it seems better.
   They live on top of benilla ("Building on top"), so that what benilla does is what 1.12.1 does,
   for everyone who builds on it. A deviation from the reference is the maintainer's call and is
-  recorded where it lives; a pull request is not the place to propose one.
+  recorded where it lives, and gathered in [`docs/DEVIATIONS.md`](DEVIATIONS.md); a pull request is
+  not the place to propose one.
 - Anything from a WoW install: art, models, sounds, maps, data, and interface code (FrameXML and
   GlueXML), which runs off the player's own install (`docs/METHOD.md`).
 - Big or mixed changes. One change per pull request, small enough to read in one sitting.
@@ -48,6 +49,29 @@ Past `run_with` and that folder, benilla opens a piece of itself to such a crate
 1.12.1 work creates that piece, never for the crate alone, and promises no stable API: a crate
 pins the benilla revision it builds on. What a crate cannot reach stays a fork's.
 
+## The reference
+
+[benilla-re](https://github.com/samwhosung/benilla-re) is the reverse engineering of the 1.12.1
+client that benilla is built against, read at its bytes, and the place to find what 1.12.1 does
+before you change benilla. Every client address a comment here cites is backed there, by a row
+or a finding.
+
+- **Look it up.** The site, `https://samwhosung.github.io/benilla-re/`, has a page per function,
+  global and struct, per system, and per Lua function, event, CVar and opcode;
+  `?0x5e6853` goes to whatever holds an address. For an agent, a clone beside this repo is
+  quicker: grep `symbols/functions.tsv` (a row per function: name, meaning, confidence, the
+  finding behind it), `tables/` (opcodes, events, CVars, Lua bindings, messages) and the docs
+  under `systems/`.
+- **Weigh it.** A row says how sure it is: `inferred` is a lead to check before you rest on it,
+  `verified` with proof `one` or `two` is one or two readings of the bytes.
+- **When it has a gap or is wrong,** take that to benilla-re: an issue there with what you need to
+  know, or a pull request that adds the finding (its `docs/CONTRIBUTING.md` says how a finding is
+  written and checked). Then cite the client address here, as the comments do, and link that
+  issue or pull request in yours while it is open.
+- **The vendored tables.** `reference/` holds the benilla-re tables benilla's tests read, at the
+  commit in `reference/PIN`; its README says how to move the pin. Move it only when your change
+  needs a row benilla-re has after the pin, to a commit on benilla-re's main.
+
 ## How a change is judged
 
 1. `scripts/gates.sh` is green: fmt, clippy with warnings denied, the workspace tests (once
@@ -55,9 +79,11 @@ pins the benilla revision it builds on. What a crate cannot reach stays a fork's
    doc-link and render-pass lints, the player build with its own tests, and the engine boot
    checks. A pull request from a fork runs the ones that need neither the install nor a display
    in CI, on Linux; the rest run on the maintainer's machine before it lands.
-2. The reference fact is stated: what 1.12.1 does, and where that is known from (the client's
+2. The reference fact is stated: what 1.12.1 does, and where that is known from (an entry in
+   [benilla-re](https://github.com/samwhosung/benilla-re) by client address, the client's
    behaviour you observed, a DBC field, a FrameXML line, a packet capture). The names and shapes
-   under `reference/` are the surface benilla tracks.
+   under `reference/` are the surface benilla tracks. A fact benilla-re does not have yet is
+   added there first ("The reference").
 3. A comment where it matters, one line, saying what the code does and the 1.12 fact behind it.
    No history.
 4. The commit message says what changed, for a player or a developer, in one line.
@@ -100,6 +126,9 @@ out of scope is closed with the reason.
   - `WOW_UNATTENDED=1` reconnects instead of waiting at a dialog, and exits non-zero on a login
     it cannot pass. `WOW_NOSOUND=1` runs silent. A capture (`WOW_CAPTURE`) is both, and a rig
     (`WOW_RIG`) is unattended. `WOW_ALLOW_ACCOUNT=1` overrides the account guard.
+  - An unattended run starts from defaults in a fresh state folder of its own, printed at boot
+    (`state:`), so it never reads or overwrites your settings, layout or addons. `BENILLA_HOME`
+    pins a folder, for a run that needs addons, seeded files or state kept across runs.
   - On vmangos, `WOW_RIG="tauren druid 60 gear:heal-preraid-bis spec:heal-preraid-bis
     at:ThunderBluff"` finds or creates that character on the account and applies the server's
     premade sets (`WOW_RIG="gear:?"` lists them). `WOW_PROBE_CHAT="<command>"` sends one GM
@@ -108,11 +137,22 @@ out of scope is closed with the reason.
     `WOW_GOD=off` leaves it off.
   - A trace is `WOW_MOVE_TRACE=<file>`, filtered with `WOW_MOVE_TRACE_TAGS` (`"move,snd,in"`) and
     ended by `WOW_PROBE_EXIT_AT=<seconds>`; grep it for the `rly` and `snd` lines.
+  - To sniff the wire, trace the tags `in` and `out` (`WOW_MOVE_TRACE_TAGS="in,out"`): one line
+    per world packet, with its opcode, name, `len=` and the body as `hex=`, the bytes after the
+    packet header. An `in` line also has `ev=`, the events it decoded to; a server packet that
+    failed to parse is a `skip` line with its bytes. Traces get attached to public issues, so two
+    kinds of body are kept out. A client packet that carries a secret, the auth session, a channel
+    password or any chat text starting with `.` or `!` (a server command), shows
+    `hex=<redacted>` always, and so does a dropped command's log line. Chat in both directions
+    and the bulk name lists (`SMSG_WHO`, the friend, ignore, guild roster and channel lists) show
+    `hex=<withheld>`, with `len=` kept, unless `WOW_MOVE_TRACE_CHAT=1` is set, for a developer who
+    needs those bodies and will read the file before sharing it.
   - A capture runs through `scripts/visual.sh`, whose recipe is the header of
     `crates/benilla-app/src/capture/mod.rs`. Pixel questions go through `benilla-visual crop`,
     `series` and `hotspot`.
-- **The loop.** `cargo play` builds and runs the play profile. `scripts/check.sh` verifies a
-  round of work; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
+- **The loop.** `cargo play` builds and runs the play profile. `cargo test -p <crate>` runs one
+  crate's tests, the quickest loop. `scripts/check.sh` verifies a round of work: the crates your
+  branch changed against main and their dependents, so on a clean clone it has nothing to check; `scripts/gates.sh` is the full chain, and it opens a window for the engine boot
   checks, so it needs a display. `WOW_STOCK_UI=1` boots a dev build on the stock interface
   alone, without benilla's layer. Work on a branch.
 

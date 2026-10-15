@@ -65,6 +65,12 @@ mod swim;
 mod view_subject;
 mod walk;
 mod wire_in;
+pub(crate) use wire_in::regain_control_on_arrival;
+
+/// The create's control restore (`regain_control_on_arrival`): every system that reads `Player`'s
+/// control flags runs after it in the frame, so it sees the restored flags, not the lost ones.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ControlRestore;
 
 // The last writer of a self body part's render alpha: `entities::apply_unit_mat_alpha` orders
 // itself before it.
@@ -80,8 +86,8 @@ use camera_zoom::{apply_zoom_scroll, CAM_DIST_DEFAULT};
 pub(crate) use follow::{FollowRequest, FollowState};
 // Click to Move: `crate::target`'s dispatchers start it and run the verb it owes on arrival.
 pub(crate) use approach::{
-    can_auto_interact, Approach, ApproachVerb, AutoMove, Refused, Subject, RANGE_STOP_FRACTION,
-    TALK_STOP,
+    can_auto_interact, cancel_move_action_on_ui_shutdown, Approach, ApproachVerb, AutoMove,
+    Refused, Subject, RANGE_STOP_FRACTION, TALK_STOP,
 };
 use state::{
     MoveSpeed, PlayerRide, AIR_NUDGE_SPEED, FALL_FAR_DROP, FALL_FAR_TIME, FOOT_CONE_HEIGHT,

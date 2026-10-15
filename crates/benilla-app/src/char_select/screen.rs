@@ -6,7 +6,7 @@ use bevy::ui_render::ui_material::MaterialNode;
 use bevy::window::PrimaryWindow;
 
 use crate::glue::art::{GlueArt, BACKDROP, DIM, GOLD, NAME_EDGE};
-use crate::glue::backdrop::{backdrop_border, tiled_bg_node};
+use crate::glue::backdrop::{backdrop_border, tiled_bg};
 use crate::glue::widgets::{
     abs, glue_button, outlined_text, overlay, GlueBtnKind, GlueText, Hilight, LockHighlight,
 };
@@ -70,10 +70,13 @@ const ROW_HIT_H: f32 = 55.0;
 const ROW_PITCH: f32 = 57.0;
 
 /// Entry only resets state: the initial state's `OnEnter` fires at startup, before the MPQ chain
-/// and booth slots exist, so the tree spawns in [`materialize_screen`].
+/// and booth slots exist, so the tree spawns in [`materialize_screen`]. The native screen's alone:
+/// the stock screens' facing is the glue VM's.
 pub(super) fn enter_select(mut preview: ResMut<GluePreview>) {
     // The model faces the camera on entry: the reference's facing global defaults to zero.
     preview.yaw = 0.0;
+    // `CharacterSelect`'s OnShow (`0x46fa60`).
+    preview.shown = preview.shown.wrapping_add(1);
 }
 
 /// Spawn the screen tree once the art is loaded, respawn it when art lands after an artless spawn
@@ -145,6 +148,7 @@ fn spawn_screen(
 
     let root = commands
         .spawn((
+            crate::glue::NativeGlue,
             CharSelectUi {
                 with_art: art.button_up.is_some(),
                 s,
@@ -317,21 +321,12 @@ fn character_frame(
             // Background inset (10,5,4,9) tiled at 16 under the 16-edge border, both tinted with
             // `DEFAULT_TOOLTIP_COLOR` in the reference's OnLoad.
             if let (Some(bg), Some(border)) = (&art.tooltip_bg, &art.name_border) {
-                frame.spawn((
-                    tiled_bg_node(
-                        bg.clone(),
-                        NAME_EDGE,
-                        s,
-                        FRAME_FILL.with_alpha(FRAME_FILL_ALPHA),
-                    ),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: px(10.0),
-                        right: px(5.0),
-                        top: px(4.0),
-                        bottom: px(9.0),
-                        ..default()
-                    },
+                frame.spawn(tiled_bg(
+                    bg.clone(),
+                    NAME_EDGE,
+                    (10.0, 5.0, 4.0, 9.0),
+                    s,
+                    FRAME_FILL.with_alpha(FRAME_FILL_ALPHA),
                 ));
                 backdrop_border(frame, border, NAME_EDGE, FRAME_BORDER);
             } else {
@@ -601,18 +596,21 @@ pub(super) fn hide_under_world_cover(
     }
 }
 
+/// Leaving the native select screen drops its scene; the next screen sets its own.
+pub(super) fn clear_select_scene(mut preview: ResMut<GluePreview>) {
+    preview.look = None;
+    preview.scene = None;
+}
+
 pub(super) fn exit_select(
     mut commands: Commands,
     roots: Query<Entity, With<CharSelectUi>>,
-    mut preview: ResMut<GluePreview>,
     mut dialog: ResMut<super::dialog::DeleteDialog>,
     mut glue_dialog: ResMut<crate::glue::dialog::GlueDialog>,
 ) {
     for e in &roots {
         commands.entity(e).despawn();
     }
-    preview.look = None;
-    preview.scene = None;
     dialog.close();
     // The glue dialog must not follow into the world or the create screen. Its tree is despawned
     // here, since its driver runs on the glue screens only.

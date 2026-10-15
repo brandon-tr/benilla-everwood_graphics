@@ -157,17 +157,18 @@ pub(crate) struct ServiceArms<'w> {
 /// The re-click gate (`0x5f0251`), before the ladder: a right-click on the NPC whose window is
 /// open (`[0xb4e2d0]`) does nothing, no packet, no error, no gesture. The reference arms that NPC
 /// only from window openers (`0x4930d0`, cleared at `0x493310`), never on the click, the set
-/// [`crate::ui_session::feed_interact_npc`] collapses (less the mailbox and text reader).
+/// [`crate::ui_session::feed_interact_npc`] publishes.
 fn interaction_already_open_on(target: u64, interact: &crate::ui_session::InteractNpc) -> bool {
     interact.1 == Some(target)
 }
 
 /// The refusals and openers the dispatchers raise.
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct Feedback<'w> {
+pub(crate) struct Feedback<'w, 's> {
     errors: ResMut<'w, crate::ui_action::UiErrorKeys>,
     cast_errors: ResMut<'w, crate::ui_action::CastErrors>,
-    mail: ResMut<'w, crate::ui_mail::MailOpen>,
+    // The mailbox's open, which registers on the interaction latch with the world in hand.
+    windows: Commands<'w, 's>,
     item_text: ResMut<'w, crate::ui_item_text::ItemTextOpen>,
     // The opener queue: this system cannot also hold `CastLadder` (a second `Items` and
     // `CastErrors` borrow), so the lock verdict goes to `ui_action::drain::drain_go_openers`.
@@ -176,7 +177,7 @@ pub(crate) struct Feedback<'w> {
     stone_uses: MessageWriter<'w, crate::ui_dialog_verbs::MeetingStoneUse>,
 }
 
-impl Feedback<'_> {
+impl Feedback<'_, '_> {
     /// Whether a walk started; the leash's refusal says `ERR_AUTOFOLLOW_TOO_FAR` (`0x61110c`).
     fn walked(&mut self, started: Result<(), crate::player::Refused>) -> bool {
         match started {
@@ -222,7 +223,7 @@ pub(crate) struct Dispatch<'w, 's> {
     >,
     places: Query<'w, 's, &'static Transform>,
     service: ServiceArms<'w>,
-    feedback: Feedback<'w>,
+    feedback: Feedback<'w, 's>,
     auto: crate::player::AutoMove<'w, 's>,
     player: Res<'w, crate::player::Player>,
 }
@@ -368,7 +369,9 @@ impl Dispatch<'_, '_> {
         if go_type == cursor_mode::GO_TYPE_MAILBOX {
             if in_reach {
                 debug!("right-click mailbox: open mail window {guid:#x}");
-                self.feedback.mail.click(guid);
+                self.feedback
+                    .windows
+                    .queue(move |world: &mut World| crate::ui_mail::open_mailbox(world, guid));
             } else {
                 self.walk_to_object(entity, guid, go_type, walk);
             }
@@ -379,11 +382,10 @@ impl Dispatch<'_, '_> {
         if go_type == cursor_mode::GO_TYPE_TEXT {
             if !in_reach {
                 self.walk_to_object(entity, guid, go_type, walk);
-            } else if self.feedback.item_text.toggle_closed(guid) {
+            } else if self.feedback.item_text.read_pages(guid) {
                 debug!("right-click text gameobject: re-click closes {guid:#x}");
             } else {
                 debug!("right-click text gameobject: read {guid:#x}");
-                self.feedback.item_text.open_pages(guid);
             }
             return;
         }
@@ -1458,6 +1460,39 @@ pub(crate) fn clear_target_requests(
     }
 }
 
+/// The UI shutdown's own deselect (`0x490bdf` → `SetSelection(0, 0)`), ahead of its
+/// active-player guard, so every shutdown root and a `/reload` drop the target: `true` when one
+/// was selected.
+pub(crate) fn deselect_on_ui_shutdown(
+    mut selection: ResMut<Selection>,
+    mut seam: crate::creature_anim::AttackSeam,
+    engaged: Query<(), (With<Engaged>, With<SelfPlayer>)>,
+    me: Query<&crate::net::ObjectStore, With<SelfPlayer>>,
+) -> bool {
+    // A charmed player's `SetSelection` returns at once (`0x493589`-`0x49359c`).
+    if me
+        .iter()
+        .next()
+        .is_some_and(|s| s.0.unit_charmed_by().is_some())
+    {
+        return false;
+    }
+    let had = selection.target.is_some();
+    deselect(&mut selection, &mut seam, !engaged.is_empty());
+    had
+}
+
+/// The UI shutdown's `SetSelection(0, 0)` after the world's teardown, with no object manager:
+/// the selection is stamped as the last target (`0x493622`) and cleared (`0x4939d3`), and
+/// `0x4939df` returns before the swing stop, the send and the event.
+pub(crate) fn clear_selection_on_world_teardown(mut selection: ResMut<Selection>) {
+    if selection.guid.is_some() {
+        selection.last = selection.guid;
+    }
+    selection.target = None;
+    selection.guid = None;
+}
+
 /// A deselect that applies only if the selection is this guid (`0x493910(guid, 1)`), raised by
 /// every loot close for a dead unit (`0x48f369`) and drained by [`clear_target_requests`].
 #[derive(bevy::ecs::message::Message, Clone, Copy, Debug)]
@@ -1908,21 +1943,30 @@ mod tests {
         assert!(!interaction_already_open_on(NPC, &idle));
         assert!(!interaction_already_open_on(OTHER, &idle));
 
-        // One opener per family (a menu, a quest panel, a specialized window) arms its own NPC.
+        // One opener per family (a menu, a quest panel, a specialized window) arms its own NPC,
+        // through the latch it registers on (`0x4930d0`).
         let with_gossip = armed(&|w| {
-            let mut g = crate::ui_gossip::GossipState::default();
-            g.npc = Some(NPC);
-            w.insert_resource(g);
+            w.init_resource::<crate::ui_gossip::GossipState>();
+            crate::ui_session::register(w, NPC);
+            w.resource_mut::<crate::ui_gossip::GossipState>().npc = Some(NPC);
         });
         let with_quest = armed(&|w| {
-            let mut q = crate::ui_quest::QuestGiver::default();
-            q.npc = Some(NPC);
-            w.insert_resource(q);
+            w.init_resource::<crate::ui_quest::QuestGiver>();
+            crate::ui_quest::open_panel(
+                w,
+                NPC,
+                crate::ui_quest::QuestView::Greeting(benilla_protocol::messages::QuestGiverList {
+                    npc: NPC,
+                    greeting: String::new(),
+                    emote_delay: 0,
+                    emote: 0,
+                    quests: Vec::new(),
+                }),
+            );
         });
         let with_trainer = armed(&|w| {
-            let mut t = crate::ui_trainer::TrainerOpen::default();
-            t.open(NPC, 0, Vec::new(), String::new());
-            w.insert_resource(t);
+            w.init_resource::<crate::ui_trainer::TrainerOpen>();
+            crate::ui_trainer::open_trainer(w, NPC, 0, Vec::new(), String::new());
         });
         for (what, armed) in [
             ("gossip", &with_gossip),
@@ -1944,10 +1988,9 @@ mod tests {
 
         // Closing the window disarms it, as the reference's `0x493310` zeroes the pair.
         let closed = armed(&|w| {
-            let mut t = crate::ui_trainer::TrainerOpen::default();
-            t.open(NPC, 0, Vec::new(), String::new());
-            t.clear();
-            w.insert_resource(t);
+            w.init_resource::<crate::ui_trainer::TrainerOpen>();
+            crate::ui_trainer::open_trainer(w, NPC, 0, Vec::new(), String::new());
+            crate::ui_trainer::close_core(w);
         });
         assert_eq!(closed.1, None);
         assert!(!interaction_already_open_on(NPC, &closed));
