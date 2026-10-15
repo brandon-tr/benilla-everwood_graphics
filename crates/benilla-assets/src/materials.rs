@@ -159,7 +159,12 @@ pub struct WowModelExt {
     /// `Depth`, which `Depth32Float` is). The image is created ONCE at app startup regardless of
     /// the cvars — an absent image would stall every model material's bind group on
     /// `RetryNextUpdate` and blank every model. Fragment-only, like static_gx's group 3.
-    #[texture(91, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        91,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(92, sampler_type = "comparison", visibility(fragment))]
     pub torch_depth: Handle<Image>,
     /// MONKEY (static torch cache): the ≤16-fixture torch TABLE — the same 6416-byte
@@ -523,7 +528,12 @@ pub struct TerrainExtension {
     ///
     /// Fragment-only, like the splat/alpha/shadow arrays above (Bevy 0.18 narrows textures and
     /// samplers but not uniforms) - the vertex stage only picks WHICH lights, it never samples.
-    #[texture(91, dimension = "2d_array", sample_type = "depth", visibility(fragment))]
+    #[texture(
+        91,
+        dimension = "2d_array",
+        sample_type = "depth",
+        visibility(fragment)
+    )]
     #[sampler(92, sampler_type = "comparison", visibility(fragment))]
     pub torch_depth: Handle<Image>,
     /// The 6416-byte `TorchTableUniform` bytes (count / positions[16] / view_projs[96]) as the same

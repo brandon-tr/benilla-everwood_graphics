@@ -18,7 +18,8 @@ pub mod coords;
 pub mod materials;
 mod water_depth;
 pub use water_depth::{
-    WaterColourImage, WaterDepthImage, WaterMirrorImage, WaterQuality, WaterReflections, WaterUniform,
+    WaterColourImage, WaterDepthImage, WaterMirrorImage, WaterQuality, WaterReflections,
+    WaterUniform,
 };
 pub mod minimap_grid;
 mod spatial_cache;
@@ -52,8 +53,14 @@ mod tex_filter;
 pub use tex_filter::{publish_tex_filter, tex_filter, TexFilterSetting, ANISO_RANGE};
 mod m2;
 pub use m2::{
-    EmitterBillboard, M2Model, M2ModelLoader, M2SequenceInfo, ModelEmitter, ModelLight,
-    ModelRibbon, PortraitCamera,
+    EmitterBillboard,
+    M2Model,
+    M2ModelLoader,
+    M2SequenceInfo,
+    ModelEmitter,
+    ModelLight,
+    ModelRibbon,
+    PortraitCamera,
     // MONKEY (spell light): what a spell/firework-derived light carries beyond the light itself
     // (its school and its onset) — see [`ModelLight::spell`].
     SpellLightInfo,

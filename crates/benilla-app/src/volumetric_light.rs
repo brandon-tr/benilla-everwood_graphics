@@ -41,17 +41,16 @@ use benilla_world::{
 };
 use bevy::{
     core_pipeline::{
-        FullscreenShader,
         core_3d::graph::{Core3d, Node3d},
+        FullscreenShader,
     },
     ecs::query::QueryItem,
     pbr::{
-        GpuLights, LightMeta, MAX_CASCADES_PER_LIGHT, MAX_DIRECTIONAL_LIGHTS,
-        ViewLightsUniformOffset, ViewShadowBindings,
+        GpuLights, LightMeta, ViewLightsUniformOffset, ViewShadowBindings, MAX_CASCADES_PER_LIGHT,
+        MAX_DIRECTIONAL_LIGHTS,
     },
     prelude::*,
     render::{
-        Render, RenderApp, RenderStartup, RenderSystems,
         camera::ExtractedCamera,
         diagnostic::RecordDiagnostics,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
@@ -62,6 +61,7 @@ use bevy::{
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::{CachedTexture, TextureCache},
         view::{Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+        Render, RenderApp, RenderStartup, RenderSystems,
     },
     shader::ShaderDefVal,
 };
@@ -259,7 +259,12 @@ fn update_views(
 ) {
     let tier = override_tier.tier(&video);
     let tune = tune.map_or(
-        VolLightTune { density: 1.0, height: HEIGHT_FALLOFF, gain: 1.0, debug: 0.0 },
+        VolLightTune {
+            density: 1.0,
+            height: HEIGHT_FALLOFF,
+            gain: 1.0,
+            debug: 0.0,
+        },
         |t| *t,
     );
     let strength = video.volumetric_light_strength.clamp(0.0, 2.0);
@@ -323,9 +328,14 @@ struct VolLightPipeline {
 /// Which of the three stages, plus the keys each is specialised on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum VolLightKey {
-    March { multisampled: bool },
+    March {
+        multisampled: bool,
+    },
     Blur,
-    Composite { format: TextureFormat, multisampled: bool },
+    Composite {
+        format: TextureFormat,
+        multisampled: bool,
+    },
 }
 
 #[derive(Component)]
@@ -444,7 +454,12 @@ impl SpecializedRenderPipeline for VolLightPipeline {
             }
             VolLightKey::Blur => {
                 defs.push("VL_BLUR".into());
-                ("vol_light_blur", self.blur_layout.clone(), "fs_blur", HALF_FORMAT)
+                (
+                    "vol_light_blur",
+                    self.blur_layout.clone(),
+                    "fs_blur",
+                    HALF_FORMAT,
+                )
             }
             VolLightKey::Composite {
                 format,
@@ -658,7 +673,13 @@ impl ViewNode for VolLightNode {
                 &march_bind,
                 &[view_offset.offset, light_offset.offset],
             ),
-            ("vol_light_blur", &half.blur.default_view, blur, &blur_bind, &[]),
+            (
+                "vol_light_blur",
+                &half.blur.default_view,
+                blur,
+                &blur_bind,
+                &[],
+            ),
             (
                 "vol_light_composite",
                 out.destination,
@@ -715,9 +736,15 @@ mod tests {
         let clear = extinction(720.0, 0.0, 1400.0);
         let foggy = extinction(720.0, 0.0, 120.0);
         assert!(foggy > clear * 2.0);
-        assert_eq!(extinction(720.0, 0.0, 0.0), crate::volumetric_fog::density(720.0, 0.0, false));
+        assert_eq!(
+            extinction(720.0, 0.0, 0.0),
+            crate::volumetric_fog::density(720.0, 0.0, false)
+        );
         let white = fog_tinted(Vec3::ONE, Vec3::new(0.5, 0.5, 0.5));
-        assert!((white - Vec3::ONE).length() < 1e-5, "a grey fog does not tint");
+        assert!(
+            (white - Vec3::ONE).length() < 1e-5,
+            "a grey fog does not tint"
+        );
         let blue = fog_tinted(Vec3::ONE, Vec3::new(0.2, 0.3, 0.8));
         assert!(blue.z > blue.x, "a blue fog leans the shafts blue");
     }
@@ -725,7 +752,11 @@ mod tests {
     #[test]
     fn tiers_disable_classic_and_the_override_wins() {
         let mut video = VideoConfig::default();
-        assert_eq!(VolLightOverride(None).tier(&video), 0, "registered default is off");
+        assert_eq!(
+            VolLightOverride(None).tier(&video),
+            0,
+            "registered default is off"
+        );
         video.volumetric_light = 2;
         assert_eq!(VolLightOverride(None).tier(&video), 2);
         assert_eq!(VolLightOverride(Some(1)).tier(&video), 1);

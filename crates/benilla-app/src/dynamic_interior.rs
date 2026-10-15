@@ -26,7 +26,8 @@
 //! Water quality and lava glow use the same guarded bridge into their renderer resources.
 use benilla_assets::WaterQuality;
 use benilla_world::lighting::{
-    DynamicInteriors, EmissiveTier, FireLightGain, LavaLightGain, MoonShadowStrength, SpellLightGain,
+    DynamicInteriors, EmissiveTier, FireLightGain, LavaLightGain, MoonShadowStrength,
+    SpellLightGain,
 };
 use bevy::prelude::*;
 
@@ -166,8 +167,14 @@ mod tests {
             .init_resource::<LavaLightGain>()
             .init_resource::<EmissiveTier>()
             .add_plugins(DynamicInteriorPlugin);
-        assert_eq!(app.world().resource::<WaterQuality>().0, VideoConfig::default().water_quality);
-        assert_eq!(app.world().resource::<LavaLightGain>().0, VideoConfig::default().lava_light_gain);
+        assert_eq!(
+            app.world().resource::<WaterQuality>().0,
+            VideoConfig::default().water_quality
+        );
+        assert_eq!(
+            app.world().resource::<LavaLightGain>().0,
+            VideoConfig::default().lava_light_gain
+        );
         app.update();
         for (water, lava) in [(0, 0.0), (2, 3.25), (1, 1.0)] {
             {

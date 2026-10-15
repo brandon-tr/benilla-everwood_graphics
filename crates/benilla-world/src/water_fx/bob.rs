@@ -190,8 +190,8 @@ fn apply_swim_bob(
                 // ramp is already zero there, so a swimmer never fades out mid-stroke.
                 let s = waves::swell(pos.xz(), t, waves::OCEAN_WAVE_ENERGY, ramp);
                 // The lean is for a body at rest; a stroking swimmer already has a swim pitch.
-                let rest = 1.0
-                    - ((speed - REST_SPEED.0) / (REST_SPEED.1 - REST_SPEED.0)).clamp(0.0, 1.0);
+                let rest =
+                    1.0 - ((speed - REST_SPEED.0) / (REST_SPEED.1 - REST_SPEED.0)).clamp(0.0, 1.0);
                 (s.height * BOB_GAIN * ramp, s.grad * rest * ramp)
             }
             // Out of the water (or Classic, or over a flat liquid): the target is FLAT, and the

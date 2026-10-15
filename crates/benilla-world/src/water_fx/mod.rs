@@ -402,7 +402,15 @@ fn drive_unit(
     if !oneshot && now < foam_state.ready {
         return;
     }
-    let Some(p) = foam_params(state, oneshot, scale, gate, depth, look, &mut foam_state.rng) else {
+    let Some(p) = foam_params(
+        state,
+        oneshot,
+        scale,
+        gate,
+        depth,
+        look,
+        &mut foam_state.rng,
+    ) else {
         return;
     };
     let heading = match (p.ring, state) {

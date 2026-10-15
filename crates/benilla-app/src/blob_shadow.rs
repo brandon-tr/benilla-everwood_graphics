@@ -41,9 +41,9 @@ use crate::net::{Embodied, NetEntity};
 use benilla_world::decal::{DecalFrame, WorldDecal};
 // MONKEY (moon shadows): the oval now yields to a NIGHT cast as well as a day one, so it needs the
 // same two numbers the packer weights that cast with.
-use benilla_world::lighting::ShadowHandover;
 use crate::character_shadow::CharacterShadowReady;
 use crate::shadow_core::{ShadowFrame, ShadowSet};
+use benilla_world::lighting::ShadowHandover;
 use benilla_world::particles::buffer::{begin_effect_frame, EffectVertex};
 use benilla_world::view::WorldCamera;
 use benilla_world::wmo_portal::UnitWmoRoom;
@@ -241,9 +241,14 @@ fn update_shadows(
         // nothing left to draw, so that stays the early-out the hard hide used to be.
         let indoors = room.is_some_and(|r| r.room().is_some());
         let mut lane_w = 1.0;
-        if video.character_shadows && !indoors
-            && shadow_frame.as_ref().is_some_and(|frame| frame.active && !frame.suspended)
-            && ready.as_ref().is_some_and(|ready| ready.0.contains(&shadow.owner))
+        if video.character_shadows
+            && !indoors
+            && shadow_frame
+                .as_ref()
+                .is_some_and(|frame| frame.active && !frame.suspended)
+            && ready
+                .as_ref()
+                .is_some_and(|ready| ready.0.contains(&shadow.owner))
         {
             let cam_dist = camera_pos.map_or(f32::INFINITY, |c| unit.translation.distance(c));
             lane_w = blob_weight(lane_strength, cam_dist, video.shadow_distance);
@@ -585,7 +590,10 @@ mod tests {
         for step in 0..=20 {
             let height = 0.25 - 0.25 * step as f32 / 20.0; // ~14° down to the horizon
             let w = blob_weight(sun_shadow_strength(height), 10.0, 70.0);
-            assert!(w >= prev - 1e-6, "dusk weight went backwards at step {step}");
+            assert!(
+                w >= prev - 1e-6,
+                "dusk weight went backwards at step {step}"
+            );
             assert!(w - prev < 0.35, "dusk weight jumped at step {step}");
             prev = w;
         }
@@ -609,7 +617,10 @@ mod tests {
         let night_sun = sun_shadow_strength(-0.3);
         assert_eq!(night_sun, 0.0);
         let full = blob_weight(night_sun, 10.0, 70.0);
-        assert_eq!(full, 1.0, "with the feature off the whole oval is still there");
+        assert_eq!(
+            full, 1.0,
+            "with the feature off the whole oval is still there"
+        );
         let under_moon = blob_weight(night_sun + 0.35, 10.0, 70.0);
         assert!(
             (under_moon - 0.65).abs() < 1e-6,
@@ -625,7 +636,10 @@ mod tests {
         let mut prev = 1.0;
         for step in 0..=20 {
             let w = blob_weight(night_sun + 0.35 * step as f32 / 20.0, 10.0, 70.0);
-            assert!(w <= prev + 1e-6, "the oval brightened as the moon rose, at step {step}");
+            assert!(
+                w <= prev + 1e-6,
+                "the oval brightened as the moon rose, at step {step}"
+            );
             prev = w;
         }
         assert!((prev - 0.65).abs() < 1e-6);

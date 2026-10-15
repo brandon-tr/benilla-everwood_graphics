@@ -54,8 +54,8 @@ use super::render::StaticGxView;
 // subsystem tag that keeps a building's own batches apart from the props standing in it.
 use crate::interact::WorldObject;
 use crate::model_render::ModelKind;
-use bevy::math::Affine3A;
 use benilla_assets::materials::TorchBinds;
+use bevy::math::Affine3A;
 
 /// MONKEY (live bank rank): each 512-square Depth32 face is 1 MiB. Sixteen static cubes plus
 /// eight compact live overlays cost 144 MiB; 384-square faces would cost 81 MiB.
@@ -341,8 +341,10 @@ pub fn new_torch_shared(
             format: TextureFormat::Depth32Float,
             // MONKEY (static torch cache): wgpu 27 transfer.rs permits partial ARRAY layers
             // for depth, provided x/y cover the entire mip. Banks are disjoint subresources.
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING
-                | TextureUsages::COPY_SRC | TextureUsages::COPY_DST,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC
+                | TextureUsages::COPY_DST,
             view_formats: &[],
         },
         // The receivers' `GreaterEqual` comparison sampler (reverse-Z: lit iff the fragment's own
@@ -370,7 +372,10 @@ pub fn new_torch_shared(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    (TorchDepthImage(images.add(image)), SharedTorchBuffer(buffer))
+    (
+        TorchDepthImage(images.add(image)),
+        SharedTorchBuffer(buffer),
+    )
 }
 
 /// MONKEY (static torch cache): byte-identical std140/std430 table in BOTH receiver shaders.
@@ -423,15 +428,17 @@ impl TorchTableUniform {
         // cvar clamp and belt-and-braces here, and `strength` cannot exceed 100. A strength of 0 is
         // MEANINGFUL (shadows off) and must survive the pack, which is why it gets no `max(1)`.
         let soft_pct = ((soft * 100.0).round() as i64).clamp(1, 0xffff) as u32;
-        let strength_pct = ((views.strength.clamp(0.0, 1.0) * 100.0).round() as i64)
-            .clamp(0, 100) as u32;
+        let strength_pct =
+            ((views.strength.clamp(0.0, 1.0) * 100.0).round() as i64).clamp(0, 100) as u32;
         table.soft_strength = (strength_pct << 16) | soft_pct;
         // MONKEY (outdoor torch shadows): the exterior receiver lane's live gate. Packed even when
         // `count` is 0 costs nothing and is simpler to reason about than a conditional flag.
         table.flags = if views.exterior { TORCH_EXT_LANE } else { 0 };
         for i in 0..count {
             table.positions[i] = views.positions[i].to_array();
-            if views.ready_mask & (1 << i) == 0 { table.positions[i][3] = 0.0; }
+            if views.ready_mask & (1 << i) == 0 {
+                table.positions[i][3] = 0.0;
+            }
             // Six cube faces per fixture: layer = fixture * 6 + face (the depth node renders and
             // the shaders' `torch_face` pick by the same index).
             for f in 0..CUBE_FACES {
@@ -469,9 +476,9 @@ fn upload_torch_table(
     // nothing to say. A `memcmp` of 6 KB is far cheaper than the copy it replaces, and the compare
     // is against what we WROTE, so it can never disagree with the buffer's real contents.
     let id = buffer.0.id();
-    let current = last.as_ref().is_some_and(|(b, t)| {
-        *b == id && bytemuck::bytes_of(t) == bytemuck::bytes_of(&table)
-    });
+    let current = last
+        .as_ref()
+        .is_some_and(|(b, t)| *b == id && bytemuck::bytes_of(t) == bytemuck::bytes_of(&table));
     if !current {
         queue.write_buffer(&buffer.0, 0, bytemuck::bytes_of(&table));
         *last = Some((id, table));
@@ -492,7 +499,11 @@ struct TorchUploadTrace {
 
 impl Default for TorchUploadTrace {
     fn default() -> Self {
-        Self { uploads: 0, frames: 0, since: std::time::Instant::now() }
+        Self {
+            uploads: 0,
+            frames: 0,
+            since: std::time::Instant::now(),
+        }
     }
 }
 
@@ -502,7 +513,10 @@ impl TorchUploadTrace {
             return;
         }
         if std::env::var_os("WOW_TORCH_TRACE").is_some() {
-            info!("torch-perf: table uploads {}/{} frames", self.uploads, self.frames);
+            info!(
+                "torch-perf: table uploads {}/{} frames",
+                self.uploads, self.frames
+            );
         }
         *self = Self::default();
     }
@@ -575,7 +589,10 @@ fn init_torch_depth(
         "torch_depth_view_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX,
-            (uniform_buffer_sized(false, Some(std::num::NonZero::new(64).unwrap())),),
+            (uniform_buffer_sized(
+                false,
+                Some(std::num::NonZero::new(64).unwrap()),
+            ),),
         ),
     );
     let shader: Handle<Shader> =
@@ -643,7 +660,9 @@ fn prepare_torch_depth(
     draw.count = 0;
     draw.rebuild_mask = 0;
     // MONKEY (static torch cache): fail closed until every prerequisite for this frame exists.
-    if let Some(views) = views.as_mut() { views.ready_mask = 0; }
+    if let Some(views) = views.as_mut() {
+        views.ready_mask = 0;
+    }
     // MONKEY (static torch cache): attachment views are allocated once per texture identity.
     let gpu_image = image.as_ref().and_then(|h| images.get(&h.0));
     match gpu_image {
@@ -683,17 +702,28 @@ fn prepare_torch_depth(
         return;
     }
     let mut views = views.expect("count > 0 implies views present");
-    if layers.texture.is_none() || pipeline_cache.get_render_pipeline(targets.pipeline).is_none() {
+    if layers.texture.is_none()
+        || pipeline_cache
+            .get_render_pipeline(targets.pipeline)
+            .is_none()
+    {
         return;
     }
     let cached = cache.0.lock().unwrap();
     let (ready_mask, rebuild_mask, dynamic_mask) = torch_cache_plan(
-        &*cached, &views.caster_meshes[..count], views.dynamic_mask, views.moving_mask,
-        |id| torch_mesh_ready(id, &meshes, &allocator));
+        &*cached,
+        &views.caster_meshes[..count],
+        views.dynamic_mask,
+        views.moving_mask,
+        |id| torch_mesh_ready(id, &meshes, &allocator),
+    );
     views.ready_mask = ready_mask;
     views.dynamic_mask = dynamic_mask;
     // If entity upload is late, bind the static bank for this frame, never last frame's overlay.
-    if !views.entity_mesh.is_some_and(|id| torch_mesh_ready(id, &meshes, &allocator)) {
+    if !views
+        .entity_mesh
+        .is_some_and(|id| torch_mesh_ready(id, &meshes, &allocator))
+    {
         views.dynamic_mask = 0;
     }
     let layout = pipeline_cache.get_bind_group_layout(&targets.view_layout);
@@ -702,7 +732,9 @@ fn prepare_torch_depth(
     for i in 0..layer_count {
         // MONKEY (static torch cache): fixture projections do not move with the camera.
         // Keep their buffers/bind groups too: zero resource allocation on a steady frame.
-        if draw.view_projs.get(i) == Some(&views.view_projs[i]) { continue; }
+        if draw.view_projs.get(i) == Some(&views.view_projs[i]) {
+            continue;
+        }
         let vp = views.view_projs[i].to_cols_array();
         let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("torch_depth_view"),
@@ -775,16 +807,22 @@ impl ViewNode for TorchDepthNode {
         let allocator = world.resource::<MeshAllocator>();
         let image = world.resource::<TorchDepthImage>();
         let images = world.resource::<RenderAssets<GpuImage>>();
-        let Some(gpu) = images.get(&image.0) else { return Ok(()) };
+        let Some(gpu) = images.get(&image.0) else {
+            return Ok(());
+        };
         let cache = world.resource::<TorchStaticCache>();
         let mut cached = cache.0.lock().unwrap();
         let trace = world.resource::<TorchCacheTrace>();
         let trace_on = std::env::var_os("WOW_TORCH_TRACE").is_some();
         let mut last_trace = trace.0.lock().unwrap();
         let trace_due = trace_on && last_trace.is_none_or(|t| t.elapsed().as_secs_f32() >= 1.0);
-        if trace_due { *last_trace = Some(std::time::Instant::now()); }
+        if trace_due {
+            *last_trace = Some(std::time::Instant::now());
+        }
         for slot in 0..count / CUBE_FACES {
-            if views.ready_mask & (1 << slot) == 0 { continue; }
+            if views.ready_mask & (1 << slot) == 0 {
+                continue;
+            }
             // MONKEY (moving fixture): same reasoning as `torch_cache_plan` — a live slot's mesh
             // id is stable by design, so the id comparison would veto every rebuild the plan just
             // granted it and freeze the map at the fixture's first position.
@@ -803,7 +841,10 @@ impl ViewNode for TorchDepthNode {
                         color_attachments: &[],
                         depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                             view: &layers.views[layer],
-                            depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
+                            depth_ops: Some(Operations {
+                                load: LoadOp::Clear(0.0),
+                                store: StoreOp::Store,
+                            }),
                             stencil_ops: None,
                         }),
                         timestamp_writes: None,
@@ -819,23 +860,40 @@ impl ViewNode for TorchDepthNode {
                     let live = MAX_TORCH_LAYERS + rank * CUBE_FACES + face;
                     render_context.command_encoder().copy_texture_to_texture(
                         TexelCopyTextureInfo {
-                            texture: &gpu.texture, mip_level: 0,
-                            origin: Origin3d { x: 0, y: 0, z: layer as u32 },
+                            texture: &gpu.texture,
+                            mip_level: 0,
+                            origin: Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer as u32,
+                            },
                             aspect: TextureAspect::DepthOnly,
                         },
                         TexelCopyTextureInfo {
-                            texture: &gpu.texture, mip_level: 0,
-                            origin: Origin3d { x: 0, y: 0, z: live as u32 },
+                            texture: &gpu.texture,
+                            mip_level: 0,
+                            origin: Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: live as u32,
+                            },
                             aspect: TextureAspect::DepthOnly,
                         },
-                        Extent3d { width: TORCH_MAP_EDGE, height: TORCH_MAP_EDGE, depth_or_array_layers: 1 },
+                        Extent3d {
+                            width: TORCH_MAP_EDGE,
+                            height: TORCH_MAP_EDGE,
+                            depth_or_array_layers: 1,
+                        },
                     );
                     let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                         label: Some("torch_dynamic_overlay"),
                         color_attachments: &[],
                         depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
                             view: &layers.views[live],
-                            depth_ops: Some(Operations { load: LoadOp::Load, store: StoreOp::Store }),
+                            depth_ops: Some(Operations {
+                                load: LoadOp::Load,
+                                store: StoreOp::Store,
+                            }),
                             stencil_ops: None,
                         }),
                         timestamp_writes: None,
@@ -846,12 +904,17 @@ impl ViewNode for TorchDepthNode {
                     draw_torch_mesh(&mut pass, views.entity_mesh, meshes, allocator);
                 }
             }
-            if rebuild { cached[slot] = views.caster_meshes[slot]; }
+            if rebuild {
+                cached[slot] = views.caster_meshes[slot];
+            }
             if trace_on && (trace_due || rebuild) {
-                info!("torch-cache: slot {slot} static {} dynamic {} live_rank {:?} live_base {:?}",
+                info!(
+                    "torch-cache: slot {slot} static {} dynamic {} live_rank {:?} live_base {:?}",
                     if rebuild { "rebuilt" } else { "cached" },
-                    if dynamic { "yes" } else { "no" }, live_rank,
-                    live_rank.map(|rank| MAX_TORCH_LAYERS + rank * CUBE_FACES));
+                    if dynamic { "yes" } else { "no" },
+                    live_rank,
+                    live_rank.map(|rank| MAX_TORCH_LAYERS + rank * CUBE_FACES)
+                );
             }
         }
         Ok(())
@@ -893,7 +956,9 @@ pub(super) fn build(app: &mut App) {
             Render,
             // MONKEY (static torch cache): ready/dynamic masks must be final before BOTH
             // the shared storage upload and static_gx's PrepareBindGroups uniform pack.
-            prepare_torch_depth.in_set(RenderSystems::PrepareResources).before(upload_torch_table),
+            prepare_torch_depth
+                .in_set(RenderSystems::PrepareResources)
+                .before(upload_torch_table),
         )
         .add_render_graph_node::<ViewNodeRunner<TorchDepthNode>>(Core3d, TorchDepthLabel)
         .add_render_graph_edges(
@@ -918,8 +983,13 @@ pub(super) fn build(app: &mut App) {
 // static map at whatever it last held; and a deferred moving rebuild is not a stale map but a
 // wrong one — the table republishes its six projections from the live fixture position each frame
 // while the depth still holds the old one, i.e. a shadow drawn from where the light no longer is.
-fn torch_cache_plan<T: Copy + Eq>(cached: &[Option<T>], requested: &[Option<T>], dynamic_mask: u32,
-    moving_mask: u32, mut mesh_ready: impl FnMut(T) -> bool) -> (u32, u32, u32) {
+fn torch_cache_plan<T: Copy + Eq>(
+    cached: &[Option<T>],
+    requested: &[Option<T>],
+    dynamic_mask: u32,
+    moving_mask: u32,
+    mut mesh_ready: impl FnMut(T) -> bool,
+) -> (u32, u32, u32) {
     let (mut ready, mut rebuild) = (0u32, 0u32);
     let mut budget = 2usize;
     let mut moving_budget = TORCH_MOVING_MAX;
@@ -935,7 +1005,11 @@ fn torch_cache_plan<T: Copy + Eq>(cached: &[Option<T>], requested: &[Option<T>],
             ready |= 1 << i;
             continue;
         }
-        let lane = if moving { &mut moving_budget } else { &mut budget };
+        let lane = if moving {
+            &mut moving_budget
+        } else {
+            &mut budget
+        };
         if *lane > 0 && mesh_ready(id) {
             *lane -= 1;
             rebuild |= 1 << i;
@@ -946,36 +1020,68 @@ fn torch_cache_plan<T: Copy + Eq>(cached: &[Option<T>], requested: &[Option<T>],
     // does. Bound even malformed resource masks to eight cubes so no copy can escape the bank.
     let eligible = dynamic_mask & ready;
     let dynamic = (0..MAX_TORCH_MAPS).fold(0, |mask, slot| {
-        if eligible & (1 << slot) != 0 && TorchShadowViews::live_rank(eligible, slot) < MAX_TORCH_DYNAMIC {
+        if eligible & (1 << slot) != 0
+            && TorchShadowViews::live_rank(eligible, slot) < MAX_TORCH_DYNAMIC
+        {
             mask | (1 << slot)
-        } else { mask }
+        } else {
+            mask
+        }
     });
     (ready, rebuild, dynamic)
 }
 
 // MONKEY (static torch cache): an empty mesh is a valid all-clear cube. A nonempty mesh without
 // allocator slices is still uploading, and MUST NOT become a permanently cached empty shadow.
-fn torch_mesh_ready(id: AssetId<Mesh>, meshes: &RenderAssets<RenderMesh>, allocator: &MeshAllocator) -> bool {
-    let Some(mesh) = meshes.get(id) else { return false };
+fn torch_mesh_ready(
+    id: AssetId<Mesh>,
+    meshes: &RenderAssets<RenderMesh>,
+    allocator: &MeshAllocator,
+) -> bool {
+    let Some(mesh) = meshes.get(id) else {
+        return false;
+    };
     match mesh.buffer_info {
-        RenderMeshBufferInfo::Indexed { count, .. } => count == 0
-            || (allocator.mesh_vertex_slice(&id).is_some() && allocator.mesh_index_slice(&id).is_some()),
+        RenderMeshBufferInfo::Indexed { count, .. } => {
+            count == 0
+                || (allocator.mesh_vertex_slice(&id).is_some()
+                    && allocator.mesh_index_slice(&id).is_some())
+        }
         _ => false,
     }
 }
 
 fn draw_torch_mesh<'a>(
-    pass: &mut bevy::render::render_phase::TrackedRenderPass<'a>, id: Option<AssetId<Mesh>>,
-    meshes: &'a RenderAssets<RenderMesh>, allocator: &'a MeshAllocator,
+    pass: &mut bevy::render::render_phase::TrackedRenderPass<'a>,
+    id: Option<AssetId<Mesh>>,
+    meshes: &'a RenderAssets<RenderMesh>,
+    allocator: &'a MeshAllocator,
 ) {
     let Some(id) = id else { return };
     let Some(mesh) = meshes.get(id) else { return };
-    let RenderMeshBufferInfo::Indexed { index_format, count } = mesh.buffer_info else { return };
-    if count == 0 { return; }
-    let (Some(v), Some(i)) = (allocator.mesh_vertex_slice(&id), allocator.mesh_index_slice(&id)) else { return };
+    let RenderMeshBufferInfo::Indexed {
+        index_format,
+        count,
+    } = mesh.buffer_info
+    else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    let (Some(v), Some(i)) = (
+        allocator.mesh_vertex_slice(&id),
+        allocator.mesh_index_slice(&id),
+    ) else {
+        return;
+    };
     pass.set_vertex_buffer(0, v.buffer.slice(..));
     pass.set_index_buffer(i.buffer.slice(..), index_format);
-    pass.draw_indexed(i.range.clone(), i32::try_from(v.range.start).unwrap_or(0), 0..1);
+    pass.draw_indexed(
+        i.range.clone(),
+        i32::try_from(v.range.start).unwrap_or(0),
+        0..1,
+    );
 }
 
 impl super::StaticGx {
@@ -986,19 +1092,40 @@ impl super::StaticGx {
     /// MONKEY (torch owner exclusion): returns how many in-range items were dropped as the
     /// FIXTURE'S OWN BODY — the `WOW_TORCH_TRACE` counter, and the one number that says whether
     /// this fix is doing anything for a given slot.
-    pub fn append_torch_triangles(&self, center: Vec3, reach: f32, owner: Option<LightOwner>,
-        positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) -> u32 {
+    pub fn append_torch_triangles(
+        &self,
+        center: Vec3,
+        reach: f32,
+        owner: Option<LightOwner>,
+        positions: &mut Vec<[f32; 3]>,
+        indices: &mut Vec<u32>,
+    ) -> u32 {
         let mut excluded = 0;
-        for cell in self.cells.values().chain(self.wmos.values()).chain(self.props.values()) {
+        for cell in self
+            .cells
+            .values()
+            .chain(self.wmos.values())
+            .chain(self.props.values())
+        {
             for item in &cell.items {
-                if !torch_item_in_range(item, center, reach) { continue; }
-                if torch_item_is_emitter(item, center, owner) { excluded += 1; continue; }
+                if !torch_item_in_range(item, center, reach) {
+                    continue;
+                }
+                if torch_item_is_emitter(item, center, owner) {
+                    excluded += 1;
+                    continue;
+                }
                 let base = positions.len() as u32;
-                positions.extend(item.geometry.positions.iter().map(|p|
-                    item.transform.transform_point(benilla_assets::coords::wow_to_bevy(*p)).to_array()));
+                positions.extend(item.geometry.positions.iter().map(|p| {
+                    item.transform
+                        .transform_point(benilla_assets::coords::wow_to_bevy(*p))
+                        .to_array()
+                }));
                 let added = positions.len() as u32 - base;
                 for tri in item.geometry.indices.chunks_exact(3) {
-                    if tri.iter().all(|i| *i < added) { indices.extend(tri.iter().map(|i| base + *i)); }
+                    if tri.iter().all(|i| *i < added) {
+                        indices.extend(tri.iter().map(|i| base + *i));
+                    }
                 }
             }
         }
@@ -1021,7 +1148,12 @@ impl super::StaticGx {
     /// either of them moves.
     pub fn torch_residency_generation(&self) -> u64 {
         let mut sum = 0u64;
-        for cell in self.cells.values().chain(self.wmos.values()).chain(self.props.values()) {
+        for cell in self
+            .cells
+            .values()
+            .chain(self.wmos.values())
+            .chain(self.props.values())
+        {
             let mut hash = std::collections::hash_map::DefaultHasher::new();
             cell.last_change.hash(&mut hash);
             cell.items.len().hash(&mut hash);
@@ -1036,16 +1168,29 @@ impl super::StaticGx {
     /// THIS fixture's sphere invalidate it even when neither camera nor fixture moves.
     pub fn torch_geometry_key(&self, center: Vec3, reach: f32, owner: Option<LightOwner>) -> u64 {
         let mut sum = 0u64;
-        for cell in self.cells.values().chain(self.wmos.values()).chain(self.props.values()) {
+        for cell in self
+            .cells
+            .values()
+            .chain(self.wmos.values())
+            .chain(self.props.values())
+        {
             for item in &cell.items {
-                if !torch_item_in_range(item, center, reach) { continue; }
-                if torch_item_is_emitter(item, center, owner) { continue; }
+                if !torch_item_in_range(item, center, reach) {
+                    continue;
+                }
+                if torch_item_is_emitter(item, center, owner) {
+                    continue;
+                }
                 let mut hash = std::collections::hash_map::DefaultHasher::new();
                 // MONKEY (static torch cache): source residency stamp prevents allocator address
                 // reuse after unload/reload from impersonating the previous geometry Arc.
                 cell.last_change.hash(&mut hash);
                 (std::sync::Arc::as_ptr(&item.geometry) as usize).hash(&mut hash);
-                item.transform.to_matrix().to_cols_array().map(f32::to_bits).hash(&mut hash);
+                item.transform
+                    .to_matrix()
+                    .to_cols_array()
+                    .map(f32::to_bits)
+                    .hash(&mut hash);
                 sum = sum.wrapping_add(hash.finish());
             }
         }
@@ -1093,8 +1238,12 @@ fn torch_item_is_emitter(item: &super::GxItem, center: Vec3, owner: Option<Light
 /// `pub` and taking an `Affine3A` because BOTH caster lanes need the identical rule and they hold
 /// their pose in different shapes: the retained lane has a `Transform`, the entity lane a
 /// `GlobalTransform`. Two copies of a heuristic that decides "does this cast" would drift.
-pub fn torch_flame_inside_bounds(world_from_local: Affine3A, local_center: Vec3,
-    half_extents: Vec3, light: Vec3) -> bool {
+pub fn torch_flame_inside_bounds(
+    world_from_local: Affine3A,
+    local_center: Vec3,
+    half_extents: Vec3,
+    light: Vec3,
+) -> bool {
     let m = world_from_local.matrix3;
     // The basis columns' lengths ARE the scale, whatever rotation is folded in with them.
     let scale = Vec3::new(m.x_axis.length(), m.y_axis.length(), m.z_axis.length());
@@ -1109,16 +1258,30 @@ pub fn torch_flame_inside_bounds(world_from_local: Affine3A, local_center: Vec3,
 }
 
 /// The retained lane's shape of [`torch_flame_inside_bounds`].
-fn torch_bound_contains(transform: &Transform, local_center: Vec3, half_extents: Vec3,
-    light: Vec3) -> bool {
-    torch_flame_inside_bounds(transform.compute_affine(), local_center, half_extents, light)
+fn torch_bound_contains(
+    transform: &Transform,
+    local_center: Vec3,
+    half_extents: Vec3,
+    light: Vec3,
+) -> bool {
+    torch_flame_inside_bounds(
+        transform.compute_affine(),
+        local_center,
+        half_extents,
+        light,
+    )
 }
 
 /// The proximity half of [`torch_item_is_emitter`], split out exactly as `torch_bound_in_range`
 /// is: the transformed bounding sphere lies WHOLLY inside `radius` of the fixture. `radius <= 0`
 /// contains nothing.
-fn torch_bound_contained(transform: &Transform, local_center: Vec3, half_extents: Vec3,
-    center: Vec3, radius: f32) -> bool {
+fn torch_bound_contained(
+    transform: &Transform,
+    local_center: Vec3,
+    half_extents: Vec3,
+    center: Vec3,
+    radius: f32,
+) -> bool {
     if radius <= 0.0 {
         return false;
     }
@@ -1130,12 +1293,25 @@ fn torch_bound_contained(transform: &Transform, local_center: Vec3, half_extents
 // MONKEY (static torch cache): a conservative transformed bounding sphere, independent of
 // portal visibility. Missing bounds admit the source rather than silently losing a wall.
 fn torch_item_in_range(item: &super::GxItem, center: Vec3, reach: f32) -> bool {
-    !item.cutout && item.local_aabb.is_none_or(|aabb| torch_bound_in_range(
-        &item.transform, aabb.center.into(), aabb.half_extents.into(), center, reach))
+    !item.cutout
+        && item.local_aabb.is_none_or(|aabb| {
+            torch_bound_in_range(
+                &item.transform,
+                aabb.center.into(),
+                aabb.half_extents.into(),
+                center,
+                reach,
+            )
+        })
 }
 
-fn torch_bound_in_range(transform: &Transform, local_center: Vec3, half_extents: Vec3,
-    center: Vec3, reach: f32) -> bool {
+fn torch_bound_in_range(
+    transform: &Transform,
+    local_center: Vec3,
+    half_extents: Vec3,
+    center: Vec3,
+    reach: f32,
+) -> bool {
     let origin = transform.transform_point(local_center);
     let radius = (half_extents * transform.scale.abs()).length();
     origin.distance_squared(center) <= (reach + radius) * (reach + radius)
@@ -1150,12 +1326,27 @@ mod tests {
     #[test]
     fn cache_plan_reuses_and_limits_rebuilds() {
         let cached = [Some(10), Some(11), None, Some(13)];
-        assert_eq!(torch_cache_plan(&cached, &cached, 0xf, 0, |_| false), (0b1011, 0, 0b1011));
+        assert_eq!(
+            torch_cache_plan(&cached, &cached, 0xf, 0, |_| false),
+            (0b1011, 0, 0b1011)
+        );
         let requested = [Some(20), Some(11), Some(12), Some(23)];
-        assert_eq!(torch_cache_plan(&cached, &requested, 0xf, 0, |_| true), (0b0111, 0b0101, 0b0111));
-        assert_eq!(torch_cache_plan(&cached, &requested, 0xf, 0, |id| id == 23), (0b1010, 0b1000, 0b1010));
-        assert_eq!(torch_cache_plan(&cached, &[None, Some(11)], 0xf, 0, |_| true), (0b10, 0, 0b10));
-        assert_eq!(torch_cache_plan(&[None; 4], &requested, 0, 0, |_| true), (0b11, 0b11, 0));
+        assert_eq!(
+            torch_cache_plan(&cached, &requested, 0xf, 0, |_| true),
+            (0b0111, 0b0101, 0b0111)
+        );
+        assert_eq!(
+            torch_cache_plan(&cached, &requested, 0xf, 0, |id| id == 23),
+            (0b1010, 0b1000, 0b1010)
+        );
+        assert_eq!(
+            torch_cache_plan(&cached, &[None, Some(11)], 0xf, 0, |_| true),
+            (0b10, 0, 0b10)
+        );
+        assert_eq!(
+            torch_cache_plan(&[None; 4], &requested, 0, 0, |_| true),
+            (0b11, 0b11, 0)
+        );
     }
 
     // MONKEY (moving fixture): a moving slot rebuilds out of its OWN budget, so two moving
@@ -1166,11 +1357,20 @@ mod tests {
         let cached = [None, None, None, None];
         let requested = [Some(1), Some(2), Some(3), Some(4)];
         // No moving slots: the historical two-rebuild ceiling, untouched.
-        assert_eq!(torch_cache_plan(&cached, &requested, 0, 0, |_| true).1, 0b0011);
+        assert_eq!(
+            torch_cache_plan(&cached, &requested, 0, 0, |_| true).1,
+            0b0011
+        );
         // Slots 0 and 1 moving: they take the moving budget and slots 2/3 still get the static one.
-        assert_eq!(torch_cache_plan(&cached, &requested, 0, 0b0011, |_| true).1, 0b1111);
+        assert_eq!(
+            torch_cache_plan(&cached, &requested, 0, 0b0011, |_| true).1,
+            0b1111
+        );
         // Three moving: the third waits (it fast-fades app-side rather than showing a wrong map).
-        assert_eq!(torch_cache_plan(&cached, &requested, 0, 0b0111, |_| true).1, 0b1011);
+        assert_eq!(
+            torch_cache_plan(&cached, &requested, 0, 0b0111, |_| true).1,
+            0b1011
+        );
     }
 
     // MONKEY (shadow floor): the two dials share one word; neither may corrupt the other, and a
@@ -1185,7 +1385,12 @@ mod tests {
             (0.0, 2.0, 100, 100),
             (0.5, -1.0, 50, 0),
         ] {
-            let views = TorchShadowViews { count: 1, soft, strength, ..Default::default() };
+            let views = TorchShadowViews {
+                count: 1,
+                soft,
+                strength,
+                ..Default::default()
+            };
             let word = TorchTableUniform::pack(Some(&views)).soft_strength;
             assert_eq!(word & 0xffff, soft_pct, "soft {soft}");
             assert_eq!(word >> 16, strength_pct, "strength {strength}");
@@ -1212,7 +1417,12 @@ mod tests {
         let mut requested = cached;
         requested[0] = None;
         let (ready, _, dynamic) = torch_cache_plan(&cached, &requested, 0x8001, 0, |_| false);
-        let views = TorchShadowViews { count: 16, ready_mask: ready, dynamic_mask: dynamic, ..Default::default() };
+        let views = TorchShadowViews {
+            count: 16,
+            ready_mask: ready,
+            dynamic_mask: dynamic,
+            ..Default::default()
+        };
         let table = TorchTableUniform::pack(Some(&views));
         assert_eq!(dynamic, 0x8000);
         assert_eq!(table.dynamic_mask, dynamic);
@@ -1222,10 +1432,20 @@ mod tests {
     #[test]
     fn torch_bounds_include_remote_building_batches() {
         let transform = Transform::from_xyz(200.0, 0.0, 0.0).with_scale(Vec3::splat(2.0));
-        assert!(torch_bound_in_range(&transform, Vec3::new(-100.0, 0.0, 0.0),
-            Vec3::splat(10.0), Vec3::ZERO, 48.0));
-        assert!(!torch_bound_in_range(&transform, Vec3::ZERO,
-            Vec3::splat(10.0), Vec3::ZERO, 48.0));
+        assert!(torch_bound_in_range(
+            &transform,
+            Vec3::new(-100.0, 0.0, 0.0),
+            Vec3::splat(10.0),
+            Vec3::ZERO,
+            48.0
+        ));
+        assert!(!torch_bound_in_range(
+            &transform,
+            Vec3::ZERO,
+            Vec3::splat(10.0),
+            Vec3::ZERO,
+            48.0
+        ));
     }
 
     // MONKEY (static torch cache): protect uniform/storage byte agreement and sparse-slot bank
@@ -1235,8 +1455,12 @@ mod tests {
         assert_eq!(std::mem::size_of::<TorchTableUniform>(), 6416);
         assert_eq!(std::mem::offset_of!(TorchTableUniform, positions), 16);
         assert_eq!(std::mem::offset_of!(TorchTableUniform, view_projs), 272);
-        let mut views = TorchShadowViews { count: 16, dynamic_mask: (1 << 15) | 1,
-            ready_mask: 1 << 15, ..Default::default() };
+        let mut views = TorchShadowViews {
+            count: 16,
+            dynamic_mask: (1 << 15) | 1,
+            ready_mask: 1 << 15,
+            ..Default::default()
+        };
         views.positions[0] = Vec4::ONE;
         views.positions[15] = Vec4::ONE;
         let table = TorchTableUniform::pack(Some(&views));
@@ -1253,7 +1477,11 @@ mod tests {
         assert_eq!(table.flags, 0, "not exterior by default");
         views.exterior = true;
         assert_eq!(TorchTableUniform::pack(Some(&views)).flags, TORCH_EXT_LANE);
-        assert_eq!(TorchTableUniform::pack(None).flags, 0, "no resource = no lane");
+        assert_eq!(
+            TorchTableUniform::pack(None).flags,
+            0,
+            "no resource = no lane"
+        );
     }
 
     // MONKEY (outdoor torch shadows): EMITTER-OWNER EXCLUSION. A campfire's own logs must leave
@@ -1263,8 +1491,15 @@ mod tests {
     // a fence that merely passes the fire casting normally.
     #[test]
     fn only_the_fire_s_own_body_leaves_its_caster_gather() {
-        let excluded = |x: f32, half: f32, radius: f32| torch_bound_contained(
-            &Transform::from_xyz(x, 0.0, 0.0), Vec3::ZERO, Vec3::splat(half), Vec3::ZERO, radius);
+        let excluded = |x: f32, half: f32, radius: f32| {
+            torch_bound_contained(
+                &Transform::from_xyz(x, 0.0, 0.0),
+                Vec3::ZERO,
+                Vec3::splat(half),
+                Vec3::ZERO,
+                radius,
+            )
+        };
         // The campfire prop itself: centred on the flame, ~1 yd across.
         assert!(excluded(0.2, 0.5, 2.5));
         // A crate two yards off: its centre is inside 2.5, its sphere is not.
@@ -1275,7 +1510,13 @@ mod tests {
         assert!(!excluded(0.0, 0.1, 0.0));
         // Scale is applied to the extents, exactly as `torch_bound_in_range` applies it.
         let scaled = Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::splat(4.0));
-        assert!(!torch_bound_contained(&scaled, Vec3::ZERO, Vec3::splat(0.5), Vec3::ZERO, 2.5));
+        assert!(!torch_bound_contained(
+            &scaled,
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            Vec3::ZERO,
+            2.5
+        ));
     }
 
     // MONKEY (torch owner exclusion): the IDENTITY key. Both caster lanes have to agree on it while
@@ -1295,13 +1536,22 @@ mod tests {
         // The entity lane's CLONE of the same identity still matches (a pointer key would not).
         assert!(owner.owns(&lantern.clone()));
         // Same building, different prop model — a WMO prop shares its building's uniqueId.
-        let barrel = WorldObject { label: "world/generic/barrel01.m2".into(), ..lantern.clone() };
+        let barrel = WorldObject {
+            label: "world/generic/barrel01.m2".into(),
+            ..lantern.clone()
+        };
         assert!(!owner.owns(&barrel));
         // Same model, different placement: the lantern down the street still casts.
-        let other = WorldObject { id: 4243, ..lantern.clone() };
+        let other = WorldObject {
+            id: 4243,
+            ..lantern.clone()
+        };
         assert!(!owner.owns(&other));
         // The BUILDING itself is a different subsystem, so a prop light can never delete its shell.
-        let building = WorldObject { kind: ModelKind::Wmo, ..lantern.clone() };
+        let building = WorldObject {
+            kind: ModelKind::Wmo,
+            ..lantern.clone()
+        };
         assert!(!owner.owns(&building));
         // An entity-hosted light names a frame, and never claims a placement by accident.
         assert!(!LightOwner::Instance(Entity::from_raw_u32(7).unwrap()).owns(&lantern));
@@ -1322,31 +1572,76 @@ mod tests {
         let post_half = Vec3::new(0.4, 1.6, 0.4);
         let flame = Vec3::new(0.0, 3.0, 0.0);
         assert!(torch_bound_contains(&at(0.0, 0.0), post, post_half, flame));
-        assert!(!torch_bound_contained(&at(0.0, 0.0), post, post_half, flame, TORCH_SELF_TINY),
-            "the retired proximity rule never saw it");
+        assert!(
+            !torch_bound_contained(&at(0.0, 0.0), post, post_half, flame, TORCH_SELF_TINY),
+            "the retired proximity rule never saw it"
+        );
         // The crate 1.5 yd away keeps casting — that shadow is the whole point of the feature.
-        assert!(!torch_bound_contains(&at(1.5, 0.3), Vec3::ZERO, Vec3::splat(0.5), flame));
+        assert!(!torch_bound_contains(
+            &at(1.5, 0.3),
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            flame
+        ));
         // A room-sized wall batch holds the candle but is NOT fixture-sized: excluding it would
         // delete the room's shadows and leak the candle through its own walls.
-        assert!(!torch_bound_contains(&at(0.0, 0.0), Vec3::ZERO, Vec3::splat(20.0), flame));
-        assert!(!torch_bound_contains(&at(0.0, 0.0), Vec3::ZERO,
-            Vec3::splat(TORCH_SELF_MAX_EXTENT), flame), "at the cap, still a building");
+        assert!(!torch_bound_contains(
+            &at(0.0, 0.0),
+            Vec3::ZERO,
+            Vec3::splat(20.0),
+            flame
+        ));
+        assert!(
+            !torch_bound_contains(
+                &at(0.0, 0.0),
+                Vec3::ZERO,
+                Vec3::splat(TORCH_SELF_MAX_EXTENT),
+                flame
+            ),
+            "at the cap, still a building"
+        );
         // The pad reaches a flame sitting just proud of its housing, and stops well short of the
         // next prop along.
         let head = Vec3::new(0.0, 0.0, 0.0);
         let head_half = Vec3::splat(0.25);
-        assert!(torch_bound_contains(&at(0.0, 0.0), head, head_half, Vec3::new(0.0, 0.5, 0.0)));
-        assert!(!torch_bound_contains(&at(0.0, 0.0), head, head_half, Vec3::new(0.0, 0.9, 0.0)));
+        assert!(torch_bound_contains(
+            &at(0.0, 0.0),
+            head,
+            head_half,
+            Vec3::new(0.0, 0.5, 0.0)
+        ));
+        assert!(!torch_bound_contains(
+            &at(0.0, 0.0),
+            head,
+            head_half,
+            Vec3::new(0.0, 0.9, 0.0)
+        ));
         // Scale applies to the box AND to the pad (a world-space pad in model units).
         let big = Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::splat(4.0));
-        assert!(torch_bound_contains(&big, Vec3::ZERO, Vec3::splat(0.3), Vec3::new(0.0, 1.2, 0.0)));
-        assert!(!torch_bound_contains(&big, Vec3::ZERO, Vec3::splat(2.0), Vec3::ZERO),
-            "scaled past the fixture cap");
+        assert!(torch_bound_contains(
+            &big,
+            Vec3::ZERO,
+            Vec3::splat(0.3),
+            Vec3::new(0.0, 1.2, 0.0)
+        ));
+        assert!(
+            !torch_bound_contains(&big, Vec3::ZERO, Vec3::splat(2.0), Vec3::ZERO),
+            "scaled past the fixture cap"
+        );
         // A rotated post is tested against its own box, not its circumsphere.
         let spun = Transform::from_xyz(0.0, 0.0, 0.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
-        assert!(torch_bound_contains(&spun, Vec3::new(0.0, 1.5, 2.0), post_half,
-            Vec3::new(2.0, 3.0, 0.0)));
-        assert!(!torch_bound_contains(&spun, Vec3::new(0.0, 1.5, 2.0), post_half, flame));
+        assert!(torch_bound_contains(
+            &spun,
+            Vec3::new(0.0, 1.5, 2.0),
+            post_half,
+            Vec3::new(2.0, 3.0, 0.0)
+        ));
+        assert!(!torch_bound_contains(
+            &spun,
+            Vec3::new(0.0, 1.5, 2.0),
+            post_half,
+            flame
+        ));
     }
 }

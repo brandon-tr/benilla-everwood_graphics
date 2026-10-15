@@ -116,7 +116,11 @@ impl SkyRig {
         let n = skeleton.bones.len();
         let mut rig = SkyRig {
             parents: skeleton.bones.iter().map(|b| b.parent).collect(),
-            pivots: skeleton.bones.iter().map(|b| wow_to_bevy(b.pivot)).collect(),
+            pivots: skeleton
+                .bones
+                .iter()
+                .map(|b| wow_to_bevy(b.pivot))
+                .collect(),
             tracks: vec![BoneTracks::default(); n],
             duration: 0.0,
             seq_slot: None,
@@ -309,7 +313,8 @@ impl SkyRig {
                 _ => c.sample(band_t, blend),
             }
         }
-        let tr = at(&t.g_translation, &t.translation, band_t, gseq_now, lerp3).unwrap_or(Vec3::ZERO);
+        let tr =
+            at(&t.g_translation, &t.translation, band_t, gseq_now, lerp3).unwrap_or(Vec3::ZERO);
         let rot = at(&t.g_rotation, &t.rotation, band_t, gseq_now, slerp)
             .unwrap_or(Quat::IDENTITY)
             .normalize();
@@ -388,16 +393,8 @@ impl SkyMatLane {
                 lane.uv = Some((slot, seed, uv));
             }
         }
-        let rot = sub
-            .uv_rot_seq
-            .as_ref()
-            .and_then(|s| s.seq(None))
-            .cloned();
-        let scale = sub
-            .uv_scale_seq
-            .as_ref()
-            .and_then(|s| s.seq(None))
-            .cloned();
+        let rot = sub.uv_rot_seq.as_ref().and_then(|s| s.seq(None)).cloned();
+        let scale = sub.uv_scale_seq.as_ref().and_then(|s| s.seq(None)).cloned();
         if rot.is_some() || scale.is_some() {
             if let Some(slot) = table.alloc() {
                 write(materials, &|m| m.extension.anim_slots.z = f32::from(slot));
@@ -470,10 +467,9 @@ impl SkyMatLane {
             );
         }
         if let Some((slot, loops)) = &self.affine {
-            let q = loops
-                .rot
-                .as_ref()
-                .map_or([0.0, 0.0, 0.0, 1.0], |l| l.sample(l.clock(band_t, gseq_now)));
+            let q = loops.rot.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |l| {
+                l.sample(l.clock(band_t, gseq_now))
+            });
             let s = loops
                 .scale
                 .as_ref()
@@ -493,10 +489,9 @@ impl SkyMatLane {
             );
         }
         if let Some((slot, loops)) = &self.stage1_affine {
-            let q = loops
-                .rot
-                .as_ref()
-                .map_or([0.0, 0.0, 0.0, 1.0], |l| l.sample(l.clock(band_t, gseq_now)));
+            let q = loops.rot.as_ref().map_or([0.0, 0.0, 0.0, 1.0], |l| {
+                l.sample(l.clock(band_t, gseq_now))
+            });
             let s = loops
                 .scale
                 .as_ref()
@@ -505,10 +500,7 @@ impl SkyMatLane {
         }
         if let Some((slot, seed, a)) = &self.tint {
             let c = benilla_assets::quant255(a.sample(a.clock(band_t, gseq_now)));
-            table.set(
-                *slot,
-                [c[0] - seed[0], c[1] - seed[1], c[2] - seed[2], 0.0],
-            );
+            table.set(*slot, [c[0] - seed[0], c[1] - seed[1], c[2] - seed[2], 0.0]);
         }
     }
 }
@@ -527,7 +519,10 @@ mod tests {
                 rotation: Channel {
                     keys: vec![
                         (0.0, Quat::IDENTITY),
-                        (4.0, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 * 1.5)),
+                        (
+                            4.0,
+                            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 * 1.5),
+                        ),
                     ],
                     linear: true,
                 },
@@ -577,10 +572,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!rig.animates());
-        assert!(rig
-            .pose(1.0, 1.0)
-            .iter()
-            .all(|m| *m == Affine3A::IDENTITY));
+        assert!(rig.pose(1.0, 1.0).iter().all(|m| *m == Affine3A::IDENTITY));
     }
 
     /// The Caverns of Time belts: the general rig reproduces the rigid spin the old lane drew.

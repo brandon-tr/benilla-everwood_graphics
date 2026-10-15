@@ -458,7 +458,11 @@ pub(crate) fn track_carried_light_motion(
     time: Res<Time>,
     mut lights: Query<
         (Entity, &GlobalTransform, Option<&mut CarriedLightMotion>),
-        (With<WorldPointLight>, With<ChildOf>, Without<ShadowProxyLight>),
+        (
+            With<WorldPointLight>,
+            With<ChildOf>,
+            Without<ShadowProxyLight>,
+        ),
     >,
 ) {
     let dt = time.delta_secs();
@@ -856,7 +860,10 @@ pub(crate) fn claim_carried_light_rooms(
         if had_room != Some(want) {
             match want {
                 Some(room) => {
-                    e.insert(LightRooms::new(WmoGroupVis::single(room.instance, room.group)));
+                    e.insert(LightRooms::new(WmoGroupVis::single(
+                        room.instance,
+                        room.group,
+                    )));
                 }
                 // Back outdoors (or the anchor went away): drop the claim rather than leave a
                 // stale room, which would gate the light on a building it has walked out of.
@@ -882,7 +889,11 @@ pub(crate) fn claim_carried_light_rooms(
         match claimed.as_mut() {
             Some(c) => {
                 let (applied, lane) = (c.applied, c.lane);
-                c.set_if_neq(ClaimedRoom { applied, seen, lane });
+                c.set_if_neq(ClaimedRoom {
+                    applied,
+                    seen,
+                    lane,
+                });
                 c.applied = want;
                 c.lane = want_lane;
             }
@@ -962,12 +973,7 @@ mod tests {
 
         let mut spawned: Vec<(Entity, Vec3, Entity)> = app
             .world_mut()
-            .query::<(
-                Entity,
-                &WorldPointLight,
-                &Transform,
-                &ChildOf,
-            )>()
+            .query::<(Entity, &WorldPointLight, &Transform, &ChildOf)>()
             .iter(app.world())
             .map(|(e, _, t, c)| (e, t.translation, c.parent()))
             .collect();
@@ -1112,8 +1118,10 @@ mod tests {
         assert!(settled(&app, light), "held still past STILL_HOLD");
 
         // One stride and it is disqualified again, with no credit for the second it banked.
-        *app.world_mut().entity_mut(light).get_mut::<GlobalTransform>().unwrap() =
-            GlobalTransform::from_translation(Vec3::new(1.0, 0.0, 0.0));
+        *app.world_mut()
+            .entity_mut(light)
+            .get_mut::<GlobalTransform>()
+            .unwrap() = GlobalTransform::from_translation(Vec3::new(1.0, 0.0, 0.0));
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs_f32(1.0 / 60.0));
@@ -1158,10 +1166,7 @@ mod tests {
             !held.fresh(held.at, 8, room(3)),
             "a placement streamed in or out: the claim's instance key may be stale"
         );
-        assert!(
-            !held.fresh(held.at, 7, room(4)),
-            "the bearer changed room"
-        );
+        assert!(!held.fresh(held.at, 7, room(4)), "the bearer changed room");
         assert!(
             !held.fresh(held.at, 7, None),
             "the bearer left the building"

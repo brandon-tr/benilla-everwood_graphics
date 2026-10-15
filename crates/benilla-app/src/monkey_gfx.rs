@@ -12,9 +12,9 @@
 
 use benilla_world::ffx_glow::SkyDither;
 use benilla_world::lighting::FogModelSetting;
+use benilla_world::weather::RainSurfaces;
 use benilla_world::wind::{FoliageWind, FoliageWindStrength};
-use bevy::prelude::*;
-use benilla_world::weather::RainSurfaces; // MONKEY (wet)
+use bevy::prelude::*; // MONKEY (wet)
 
 /// The programme's cvar observer (registered by [`MonkeyGfxPlugin`]).
 pub(crate) fn on_cvar(
@@ -37,7 +37,9 @@ pub(crate) fn on_cvar(
         "foliagewind" => {
             // Capture-only A/B pin (MONKEY reviewfix-a: gated like `capture_daylight` — dev
             // build AND `WOW_CAPTURE`). Player runs obey the live CVar exactly.
-            let requested = foliage_wind_pin().map(f32::from).unwrap_or_else(|| ev.num());
+            let requested = foliage_wind_pin()
+                .map(f32::from)
+                .unwrap_or_else(|| ev.num());
             let want = requested.clamp(0.0, 2.0) as u8;
             if foliage_wind.0 != want {
                 foliage_wind.0 = want;

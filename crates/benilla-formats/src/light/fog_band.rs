@@ -198,7 +198,9 @@ mod tests {
         let id = 11 * FOG_BANDS_PER_PARAM + 7 + 1;
         let c = FogBandCatalog::from_rows(&[(id, &[(0, 1.0)])]);
         // Base 13 (no rows → fallback strength 0), then param 12 at weight 0.25.
-        let out = c.sample_chain(&[(13, 1.0), (12, 0.25)], 100, &neutral()).unwrap();
+        let out = c
+            .sample_chain(&[(13, 1.0), (12, 0.25)], 100, &neutral())
+            .unwrap();
         assert!((out.sun_strength - 0.25).abs() < 1e-6);
     }
 }

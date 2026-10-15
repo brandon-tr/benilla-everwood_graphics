@@ -362,29 +362,48 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // MONKEY (volumetric fog): UI proof uses the same live page selection as a player.
     Scenario {
-        name: "ui-options-advanced", map: Some(MAP_AZEROTH),
-        eye: GROUND_EYE, look: GROUND_LOOK, minute: 720,
+        name: "ui-options-advanced",
+        map: Some(MAP_AZEROTH),
+        eye: GROUND_EYE,
+        look: GROUND_LOOK,
+        minute: 720,
         ui: Some(UiFixture::OptionsAdvancedGraphics),
     },
     // MONKEY (volumetric fog): reproducible dawn trees, moonlit lamps and the inn's common room.
     Scenario {
-        name: "volfog-dawn", map: Some(MAP_AZEROTH),
-        eye: [-9460.0, 70.0, 58.0], look: [-9410.0, 120.0, 67.0], minute: 390, ui: None,
+        name: "volfog-dawn",
+        map: Some(MAP_AZEROTH),
+        eye: [-9460.0, 70.0, 58.0],
+        look: [-9410.0, 120.0, 67.0],
+        minute: 390,
+        ui: None,
     },
     Scenario {
-        name: "volfog-night", map: Some(MAP_AZEROTH),
-        eye: [-9460.0, 70.0, 58.0], look: [-9450.0, 20.0, 61.0], minute: 0, ui: None,
+        name: "volfog-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-9460.0, 70.0, 58.0],
+        look: [-9450.0, 20.0, 61.0],
+        minute: 0,
+        ui: None,
     },
     // MONKEY (volumetric fog): celestial_sun_direction(420) has WoW azimuth
     // 45 degrees and elevation 12.20778 degrees: dz = hypot(70,70)*tan(elevation).
     // The Goldshire lake bank has sunlit air behind the gaps between the trees.
     Scenario {
-        name: "volfog-sun", map: Some(MAP_AZEROTH),
-        eye: WATER_EYE, look: [-9457.0, -240.6, 92.21753], minute: 420, ui: None,
+        name: "volfog-sun",
+        map: Some(MAP_AZEROTH),
+        eye: WATER_EYE,
+        look: [-9457.0, -240.6, 92.21753],
+        minute: 420,
+        ui: None,
     },
     Scenario {
-        name: "volfog-inn", map: Some(MAP_AZEROTH),
-        eye: INN_EYE, look: INN_LOOK, minute: 390, ui: None,
+        name: "volfog-inn",
+        map: Some(MAP_AZEROTH),
+        eye: INN_EYE,
+        look: INN_LOOK,
+        minute: 390,
+        ui: None,
     },
     // WOW_CAPTURE_WATER_T=<seconds>: fixed Enhanced water phase (read once, default 0).
     // Compare 0 and 1.5; Classic and non-water animation stay frozen.
@@ -1183,47 +1202,79 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         look: LAVA_RIVER_LOOK,
         minute: 0,
         ui: None,
-    },    // MONKEY (daylight): city interiors by day and terrain torch shadows at night. World coords
+    }, // MONKEY (daylight): city interiors by day and terrain torch shadows at night. World coords
     // from the census (`lighting::daylight::census`, Stormwind uid 10047, Ironforge uid 7706).
     // The Gilded Rose ground floor (group g268, portal + aperture seeds).
     Scenario {
-        name: "daylight-sw-inn", map: Some(MAP_AZEROTH),
-        eye: [-8871.0, 681.0, 99.8], look: [-8858.0, 668.0, 98.6], minute: 720, ui: None,
+        name: "daylight-sw-inn",
+        map: Some(MAP_AZEROTH),
+        eye: [-8871.0, 681.0, 99.8],
+        look: [-8858.0, 668.0, 98.6],
+        minute: 720,
+        ui: None,
     },
     // The Cathedral of Light nave (groups g135/g146, lit only by two EXT-class window batches).
     Scenario {
-        name: "daylight-sw-cathedral", map: Some(MAP_AZEROTH),
-        eye: [-8556.0, 826.0, 109.0], look: [-8515.0, 862.0, 112.0], minute: 720, ui: None,
+        name: "daylight-sw-cathedral",
+        map: Some(MAP_AZEROTH),
+        eye: [-8556.0, 826.0, 109.0],
+        look: [-8515.0, 862.0, 112.0],
+        minute: 720,
+        ui: None,
     },
     // A Trade District house (group g68 NEH02, one exterior portal).
     Scenario {
-        name: "daylight-sw-shop", map: Some(MAP_AZEROTH),
-        eye: [-8799.0, 696.0, 104.3], look: [-8786.0, 707.0, 103.0], minute: 720, ui: None,
+        name: "daylight-sw-shop",
+        map: Some(MAP_AZEROTH),
+        eye: [-8799.0, 696.0, 104.3],
+        look: [-8786.0, 707.0, 103.0],
+        minute: 720,
+        ui: None,
     },
     // Ironforge: the Great Forge hall (g64, no opening to the sky) and the gate hall (g7, the
     // city's one exterior portal).
     Scenario {
-        name: "daylight-if-forge", map: Some(MAP_AZEROTH),
-        eye: [-4930.0, -945.0, 503.5], look: [-4890.0, -985.0, 503.0], minute: 720, ui: None,
+        name: "daylight-if-forge",
+        map: Some(MAP_AZEROTH),
+        eye: [-4930.0, -945.0, 503.5],
+        look: [-4890.0, -985.0, 503.0],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "daylight-if-gate", map: Some(MAP_AZEROTH),
-        eye: [-4975.0, -895.0, 503.5], look: [-5005.0, -852.0, 506.0], minute: 720, ui: None,
-    },    // Goldshire's lamps at midnight: terrain receiving (and, with `torchTerrainShadows`, casting)
+        name: "daylight-if-gate",
+        map: Some(MAP_AZEROTH),
+        eye: [-4975.0, -895.0, 503.5],
+        look: [-5005.0, -852.0, 506.0],
+        minute: 720,
+        ui: None,
+    }, // Goldshire's lamps at midnight: terrain receiving (and, with `torchTerrainShadows`, casting)
     // torch cube shadows.
     Scenario {
-        name: "daylight-torch-goldshire", map: Some(MAP_AZEROTH),
-        eye: [-9460.0, 70.0, 58.0], look: [-9450.0, 20.0, 61.0], minute: 0, ui: None,
-    },    // Two Elwynn road lampposts whose own light the terrain blocks most (the census's
+        name: "daylight-torch-goldshire",
+        map: Some(MAP_AZEROTH),
+        eye: [-9460.0, 70.0, 58.0],
+        look: [-9450.0, 20.0, 61.0],
+        minute: 0,
+        ui: None,
+    }, // Two Elwynn road lampposts whose own light the terrain blocks most (the census's
     // `lamp_terrain_occlusion_scan`: 18 % and 16 % of the ground within 25 yd), at midnight, framed
     // across the lamp toward the blocked side.
     Scenario {
-        name: "daylight-torch-hill-a", map: Some(MAP_AZEROTH),
-        eye: [-9314.8, 134.1, 70.0], look: [-9320.4, 165.6, 64.0], minute: 0, ui: None,
+        name: "daylight-torch-hill-a",
+        map: Some(MAP_AZEROTH),
+        eye: [-9314.8, 134.1, 70.0],
+        look: [-9320.4, 165.6, 64.0],
+        minute: 0,
+        ui: None,
     },
     Scenario {
-        name: "daylight-torch-hill-b", map: Some(MAP_AZEROTH),
-        eye: [-9163.1, 181.1, 77.0], look: [-9147.1, 153.4, 71.0], minute: 0, ui: None,
+        name: "daylight-torch-hill-b",
+        map: Some(MAP_AZEROTH),
+        eye: [-9163.1, 181.1, 77.0],
+        look: [-9147.1, 153.4, 71.0],
+        minute: 0,
+        ui: None,
     },
     // MONKEY (post): lane-specific A/B and perf viewpoints. Kept at the end for merge isolation.
     Scenario {
@@ -1264,85 +1315,153 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // scenes above). Raw WoW coords, map per scenario; noon = 720, dusk = 1170, night = 0.
     // Elwynn from the Goldshire road toward the lake and the forest: sky, fog and trees.
     Scenario {
-        name: "elwynn-noon", map: Some(MAP_AZEROTH),
-        eye: GFX_ELWYNN_EYE, look: GFX_ELWYNN_LOOK, minute: 720, ui: None,
+        name: "elwynn-noon",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_ELWYNN_EYE,
+        look: GFX_ELWYNN_LOOK,
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "elwynn-dusk", map: Some(MAP_AZEROTH),
-        eye: GFX_ELWYNN_EYE, look: GFX_ELWYNN_LOOK, minute: 1170, ui: None,
+        name: "elwynn-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_ELWYNN_EYE,
+        look: GFX_ELWYNN_LOOK,
+        minute: 1170,
+        ui: None,
     },
     Scenario {
-        name: "elwynn-night", map: Some(MAP_AZEROTH),
-        eye: GFX_ELWYNN_EYE, look: GFX_ELWYNN_LOOK, minute: 0, ui: None,
+        name: "elwynn-night",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_ELWYNN_EYE,
+        look: GFX_ELWYNN_LOOK,
+        minute: 0,
+        ui: None,
     },
     // The same Elwynn view for rain. Capture has no weather field: run it with
     // `WOW_WEATHER=1,0.8` (kind 1 rain, grade 0.8; `weather::parse_env_script`).
     Scenario {
-        name: "elwynn-rain", map: Some(MAP_AZEROTH),
-        eye: GFX_ELWYNN_EYE, look: GFX_ELWYNN_LOOK, minute: 720, ui: None,
+        name: "elwynn-rain",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_ELWYNN_EYE,
+        look: GFX_ELWYNN_LOOK,
+        minute: 720,
+        ui: None,
     },
     // Westfall: a farmstead, fields and the dry palette.
     Scenario {
-        name: "westfall-farm", map: Some(MAP_AZEROTH),
-        eye: [-10080.0, 1000.0, 58.0], look: [-10140.0, 1070.0, 38.0], minute: 720, ui: None,
+        name: "westfall-farm",
+        map: Some(MAP_AZEROTH),
+        eye: [-10080.0, 1000.0, 58.0],
+        look: [-10140.0, 1070.0, 38.0],
+        minute: 720,
+        ui: None,
     },
     // Redridge: Lake Everstill from above Lakeshire, a wider frame than `water-lake`.
     Scenario {
-        name: "redridge-lake", map: Some(MAP_AZEROTH),
-        eye: [-9350.0, -2340.0, 82.0], look: [-9500.0, -2650.0, 50.0], minute: 720, ui: None,
+        name: "redridge-lake",
+        map: Some(MAP_AZEROTH),
+        eye: [-9350.0, -2340.0, 82.0],
+        look: [-9500.0, -2650.0, 50.0],
+        minute: 720,
+        ui: None,
     },
     // MONKEY (gfx-1009 unlit): Lakeshire's report sites. The sunken `lionstatue.mdx` (MDDF uid
     // 83242, (-9355.5, -2246.1, 47.9), ~8 yd under the 56.16 surface) seen from the water surface
     // and from under it, and the gryphon master's two `gryphonroost01.mdx` (uids 325784/325785).
     Scenario {
-        name: "lakeshire-statue", map: Some(MAP_AZEROTH),
-        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 720, ui: None,
+        name: "lakeshire-statue",
+        map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0],
+        look: [-9356.0, -2247.0, 49.0],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "lakeshire-statue-dusk", map: Some(MAP_AZEROTH),
-        eye: [-9318.0, -2238.0, 59.0], look: [-9356.0, -2247.0, 49.0], minute: 1170, ui: None,
+        name: "lakeshire-statue-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-9318.0, -2238.0, 59.0],
+        look: [-9356.0, -2247.0, 49.0],
+        minute: 1170,
+        ui: None,
     },
     Scenario {
-        name: "lakeshire-statue-under", map: Some(MAP_AZEROTH),
-        eye: [-9343.0, -2254.0, 52.0], look: [-9356.0, -2246.0, 48.5], minute: 720, ui: None,
+        name: "lakeshire-statue-under",
+        map: Some(MAP_AZEROTH),
+        eye: [-9343.0, -2254.0, 52.0],
+        look: [-9356.0, -2246.0, 48.5],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "lakeshire-gryphons", map: Some(MAP_AZEROTH),
-        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 720, ui: None,
+        name: "lakeshire-gryphons",
+        map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5],
+        look: [-9422.5, -2237.0, 69.5],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "lakeshire-gryphons-dusk", map: Some(MAP_AZEROTH),
-        eye: [-9407.0, -2250.0, 72.5], look: [-9422.5, -2237.0, 69.5], minute: 1170, ui: None,
+        name: "lakeshire-gryphons-dusk",
+        map: Some(MAP_AZEROTH),
+        eye: [-9407.0, -2250.0, 72.5],
+        look: [-9422.5, -2237.0, 69.5],
+        minute: 1170,
+        ui: None,
     },
     // Duskwood: the road into Darkshire, the zone's short dark fog.
     Scenario {
-        name: "duskwood-road", map: Some(MAP_AZEROTH),
-        eye: [-10560.0, -1000.0, 50.0], look: [-10570.0, -1200.0, 32.0], minute: 720, ui: None,
+        name: "duskwood-road",
+        map: Some(MAP_AZEROTH),
+        eye: [-10560.0, -1000.0, 50.0],
+        look: [-10570.0, -1200.0, 32.0],
+        minute: 720,
+        ui: None,
     },
     // Burning Steppes: the ash plain and the sky a skybox would replace.
     Scenario {
-        name: "burning-steppes", map: Some(MAP_AZEROTH),
-        eye: [-7700.0, -2100.0, 200.0], look: [-7900.0, -1700.0, 150.0], minute: 720, ui: None,
+        name: "burning-steppes",
+        map: Some(MAP_AZEROTH),
+        eye: [-7700.0, -2100.0, 200.0],
+        look: [-7900.0, -1700.0, 150.0],
+        minute: 720,
+        ui: None,
     },
     // Blasted Lands: the Dark Portal from the north.
     Scenario {
-        name: "blasted-lands-portal", map: Some(MAP_AZEROTH),
-        eye: [-11700.0, -3200.0, 20.0], look: [-11900.0, -3208.0, 0.0], minute: 720, ui: None,
+        name: "blasted-lands-portal",
+        map: Some(MAP_AZEROTH),
+        eye: [-11700.0, -3200.0, 20.0],
+        look: [-11900.0, -3208.0, 0.0],
+        minute: 720,
+        ui: None,
     },
     // Mount Hyjal (Kalimdor), inside Light.dbc sphere 270.
     Scenario {
-        name: "hyjal-mount", map: Some(MAP_KALIMDOR),
-        eye: GFX_HYJAL_EYE, look: GFX_HYJAL_LOOK, minute: 720, ui: None,
+        name: "hyjal-mount",
+        map: Some(MAP_KALIMDOR),
+        eye: GFX_HYJAL_EYE,
+        look: GFX_HYJAL_LOOK,
+        minute: 720,
+        ui: None,
     },
     // Stormwind: the Cathedral of Light's nave (interior WMO lighting).
     Scenario {
-        name: "stormwind-cathedral-interior", map: Some(MAP_AZEROTH),
-        eye: GFX_CATHEDRAL_EYE, look: GFX_CATHEDRAL_LOOK, minute: 720, ui: None,
+        name: "stormwind-cathedral-interior",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_CATHEDRAL_EYE,
+        look: GFX_CATHEDRAL_LOOK,
+        minute: 720,
+        ui: None,
     },
     // Ironforge: the Great Forge (lava, fire light, a huge interior).
     Scenario {
-        name: "ironforge-forge", map: Some(MAP_AZEROTH),
-        eye: GFX_FORGE_EYE, look: GFX_FORGE_LOOK, minute: 720, ui: None,
+        name: "ironforge-forge",
+        map: Some(MAP_AZEROTH),
+        eye: GFX_FORGE_EYE,
+        look: GFX_FORGE_LOOK,
+        minute: 720,
+        ui: None,
     },
     // MONKEY (sky): the sky lane's fixtures, from 80 yd above Northshire (clear of the canopy).
     // Dusk faces the low sun (az 45°, elev ≈5° at 20:00); night faces away from the moon at 01:00
@@ -1458,38 +1577,68 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // `WOW_WEATHER=1,0.8 WOW_WETNESS=1 WOW_WET_T=3`, and A/B with `WOW_RAIN_SURFACES=0|1`.
     // Goldshire's square: the road, the grass, the inn's roofs and walls.
     Scenario {
-        name: "wet-goldshire", map: Some(MAP_AZEROTH),
-        eye: [-9460.0, 70.0, 59.5], look: [-9452.0, 30.0, 55.0], minute: 720, ui: None,
+        name: "wet-goldshire",
+        map: Some(MAP_AZEROTH),
+        eye: [-9460.0, 70.0, 59.5],
+        look: [-9452.0, 30.0, 55.0],
+        minute: 720,
+        ui: None,
     },
     // The Elwynn river bank, close enough (< 25 yd) for the rain rings.
     Scenario {
-        name: "wet-river", map: Some(MAP_AZEROTH),
-        eye: [-9514.0, -330.0, 64.0], look: [-9500.0, -352.0, 61.4], minute: 720, ui: None,
+        name: "wet-river",
+        map: Some(MAP_AZEROTH),
+        eye: [-9514.0, -330.0, 64.0],
+        look: [-9500.0, -352.0, 61.4],
+        minute: 720,
+        ui: None,
     },
     // A Stormwind Trade District street: exterior WMO paving, walls, eaves.
     Scenario {
-        name: "wet-stormwind", map: Some(MAP_AZEROTH),
-        eye: [-8833.38, 628.63, 98.5], look: [-8815.0, 662.0, 93.5], minute: 720, ui: None,
+        name: "wet-stormwind",
+        map: Some(MAP_AZEROTH),
+        eye: [-8833.38, 628.63, 98.5],
+        look: [-8815.0, 662.0, 93.5],
+        minute: 720,
+        ui: None,
     },
     // MONKEY (fix-wet): the wet-stormwind framing at midnight: lit windows must stay lit in rain.
     Scenario {
-        name: "wet-stormwind-night", map: Some(MAP_AZEROTH),
-        eye: [-8833.38, 628.63, 98.5], look: [-8815.0, 662.0, 93.5], minute: 0, ui: None,
+        name: "wet-stormwind-night",
+        map: Some(MAP_AZEROTH),
+        eye: [-8833.38, 628.63, 98.5],
+        look: [-8815.0, 662.0, 93.5],
+        minute: 0,
+        ui: None,
     },
     // MONKEY (ao): contact-shadow subjects. Goldshire's street (props against walls, eaves),
     // an Elwynn forest floor (trunks, bushes, grass cutouts) and a close unit on open ground.
     Scenario {
-        name: "ao-goldshire", map: Some(MAP_AZEROTH),
-        eye: [-9430.0, 50.0, 61.0], look: [-9462.0, 30.0, 57.5], minute: 720, ui: None,
+        name: "ao-goldshire",
+        map: Some(MAP_AZEROTH),
+        eye: [-9430.0, 50.0, 61.0],
+        look: [-9462.0, 30.0, 57.5],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "ao-forest", map: Some(MAP_AZEROTH),
-        eye: [-9560.0, 60.0, 62.0], look: [-9600.0, 90.0, 58.0], minute: 720, ui: None,
+        name: "ao-forest",
+        map: Some(MAP_AZEROTH),
+        eye: [-9560.0, 60.0, 62.0],
+        look: [-9600.0, 90.0, 58.0],
+        minute: 720,
+        ui: None,
     },
     Scenario {
-        name: "ao-character", map: Some(MAP_AZEROTH),
-        eye: [-9495.2, 60.8, 59.0], look: [-9500.00, 56.00, 56.9], minute: 720,
-        ui: Some(UiFixture::Subject { kind: SubjectKind::Creature, at: SUBJECT_SUN }),
+        name: "ao-character",
+        map: Some(MAP_AZEROTH),
+        eye: [-9495.2, 60.8, 59.0],
+        look: [-9500.00, 56.00, 56.9],
+        minute: 720,
+        ui: Some(UiFixture::Subject {
+            kind: SubjectKind::Creature,
+            at: SUBJECT_SUN,
+        }),
     },
     // MONKEY (lampfog): lampFog 0/2 A/B set. Kept at the END so parallel lane tables merge cleanly.
     // Goldshire square: the Lion's Pride fixtures and outdoor lamps share one night frame.

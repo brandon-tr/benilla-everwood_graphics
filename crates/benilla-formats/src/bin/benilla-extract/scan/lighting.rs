@@ -324,7 +324,10 @@ pub fn m2firescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         };
         scanned += 1;
         // The authored block wins entirely — same gate the asset bake applies.
-        if benilla_formats::parse_m2_lights(&bytes).iter().any(|l| l.casts()) {
+        if benilla_formats::parse_m2_lights(&bytes)
+            .iter()
+            .any(|l| l.casts())
+        {
             authored += 1;
             continue;
         }
@@ -332,9 +335,9 @@ pub fn m2firescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
         // MONKEY (lamp lights): route 1 is the flame emitter; routes 2/3 read the model's RENDER
         // BATCHES, so the submesh parse only runs where the flame route found nothing (which is
         // most of the corpus, but the parse is the same one the asset bake does anyway).
-        let (route, color, intensity, bucket, detail) = match
-            benilla_formats::synthesize_fire_light(&name, &emitters)
-        {
+        let (route, color, intensity, bucket, detail) = match benilla_formats::synthesize_fire_light(
+            &name, &emitters,
+        ) {
             Some(fire) => {
                 let e = &emitters[fire.emitter];
                 let detail = format!(
@@ -359,8 +362,10 @@ pub fn m2firescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                 let Ok(subs) = benilla_formats::parse_m2_render_submeshes(&bytes, "", &[]) else {
                     continue;
                 };
-                let batches: Vec<benilla_formats::EmissiveBatch<'_>> =
-                    subs.iter().map(benilla_formats::EmissiveBatch::from).collect();
+                let batches: Vec<benilla_formats::EmissiveBatch<'_>> = subs
+                    .iter()
+                    .map(benilla_formats::EmissiveBatch::from)
+                    .collect();
                 let bounds = benilla_formats::parse_m2_bounds(&bytes).ok();
                 let bbox = bounds.as_ref().map(|b| (b.bbox_min, b.bbox_max));
                 let Some(lamp) = benilla_formats::synthesize_lamp_light(&name, &batches, bbox)
@@ -379,7 +384,9 @@ pub fn m2firescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
                     lamp.batch
                         .and_then(|i| subs[i].texture.as_deref())
                         .unwrap_or("(bbox top centre)"),
-                    lamp.position[0], lamp.position[1], lamp.position[2],
+                    lamp.position[0],
+                    lamp.position[1],
+                    lamp.position[2],
                     lamp.position[2] - base,
                     lamp.bone,
                 );
@@ -395,12 +402,18 @@ pub fn m2firescan(chain: &mut Chain, prefix: Option<&str>) -> Result<()> {
             (color[1] * 100.0).round() as i32,
             (color[2] * 100.0).round() as i32,
         );
-        color_tally.entry(key).or_insert_with(|| (0, name.clone())).0 += 1;
+        color_tally
+            .entry(key)
+            .or_insert_with(|| (0, name.clone()))
+            .0 += 1;
         rows.push(format!(
             "{name}\n    [{:<8}] rgb ({:.3}, {:.3}, {:.3})  {:<11} x{:.2}  {detail}",
             route.label(),
-            color[0], color[1], color[2],
-            bucket, intensity,
+            color[0],
+            color[1],
+            color[2],
+            bucket,
+            intensity,
         ));
     }
 
@@ -627,14 +640,15 @@ fn batch_class_table(
             continue;
         };
         // The MOGP batch-section counts — the SAME two reads `build_wmo_group_submeshes` makes.
-        let (trans_n, int_n) = mogp_payload(&gbytes)
-            .filter(|m| m.len() >= 0x2c)
-            .map_or((0usize, 0usize), |m| {
-                (
-                    u16::from_le_bytes([m[0x28], m[0x29]]) as usize,
-                    u16::from_le_bytes([m[0x2a], m[0x2b]]) as usize,
-                )
-            });
+        let (trans_n, int_n) =
+            mogp_payload(&gbytes)
+                .filter(|m| m.len() >= 0x2c)
+                .map_or((0usize, 0usize), |m| {
+                    (
+                        u16::from_le_bytes([m[0x28], m[0x29]]) as usize,
+                        u16::from_le_bytes([m[0x2a], m[0x2b]]) as usize,
+                    )
+                });
         // The colours AS UPLOADED (doorway fade applied), so the alpha printed is the alpha the
         // shader interpolates. BGRA — index 3 is alpha.
         let colors = benilla_formats::wmo_group_fixed_colors(&gbytes, root);
@@ -708,7 +722,11 @@ fn batch_class_table(
                     }
                     seen.push(g);
                     let p = &group.vertex_positions[g];
-                    let c = colors.as_ref().and_then(|c| c.get(g)).copied().unwrap_or([255; 4]);
+                    let c = colors
+                        .as_ref()
+                        .and_then(|c| c.get(g))
+                        .copied()
+                        .unwrap_or([255; 4]);
                     let a = c[3];
                     println!(
                         "          v{g:<5} ({:>7.2},{:>7.2},{:>6.2})  a {a:>3} ({:.3})  rgb ({:>3},{:>3},{:>3})",
@@ -717,7 +735,13 @@ fn batch_class_table(
                 }
                 print!("          tris");
                 for t in idx.chunks(3) {
-                    print!(" [{}]", t.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+                    print!(
+                        " [{}]",
+                        t.iter()
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
                 }
                 println!();
             }
@@ -865,8 +889,10 @@ pub fn wmolights(chain: &mut Chain, raw_path: &str, verts: Option<usize>) -> Res
     // on ([`benilla_formats::room_claim::SPLIT_PORTAL_MIN_AREA`]) — a doorway is small, a room the
     // artist cut in half is not — so it prints beside the groups each portal joins and a `SPLIT`
     // marker for the ones a containment claim now crosses at full weight instead of fading.
-    println!("=== portals (polygon area vs SPLIT_PORTAL_MIN_AREA = {:.0} yd^2) ===",
-        benilla_formats::room_claim::SPLIT_PORTAL_MIN_AREA);
+    println!(
+        "=== portals (polygon area vs SPLIT_PORTAL_MIN_AREA = {:.0} yd^2) ===",
+        benilla_formats::room_claim::SPLIT_PORTAL_MIN_AREA
+    );
     let graph = rr.graph();
     for pi in 0..rr.portals.infos.len() {
         let area = benilla_formats::room_claim::portal_area(&graph, pi as u16).unwrap_or(0.0);
@@ -905,7 +931,8 @@ pub fn wmolights(chain: &mut Chain, raw_path: &str, verts: Option<usize>) -> Res
             });
         let (diag, ctr) = pbox.map_or((0.0, [0.0; 3]), |(lo, hi)| {
             (
-                ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt(),
+                ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2))
+                    .sqrt(),
                 [
                     0.5 * (lo[0] + hi[0]),
                     0.5 * (lo[1] + hi[1]),
@@ -1225,7 +1252,10 @@ pub fn wmolamps(chain: &mut Chain, prefix: Option<&str>, detail: Option<&str>) -
             .collect();
         if detail.is_some_and(|d| root_path.contains(&d.to_ascii_lowercase())) && !dark.is_empty() {
             let names: Vec<String> = dark.iter().map(|g| format!("g{g}")).collect();
-            println!("{root_path}: interior groups still unlit: {}", names.join(" "));
+            println!(
+                "{root_path}: interior groups still unlit: {}",
+                names.join(" ")
+            );
         }
         rows.push(LampRow {
             path: root_path.clone(),

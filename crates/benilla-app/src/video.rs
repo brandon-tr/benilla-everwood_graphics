@@ -545,8 +545,7 @@ pub(crate) fn on_cvar(
         // `0` is MEANINGFUL on both rate rows (the pre-cvar every-frame rebuild), so they floor at
         // 0 rather than at 1 — the shadow off-switches are `characterShadows` / `worldShadows`.
         "charactershadowrate" => {
-            cfg.character_shadow_rate =
-                (v.max(0.0) as u32).min(crate::shadow_core::MAX_SHADOW_RATE)
+            cfg.character_shadow_rate = (v.max(0.0) as u32).min(crate::shadow_core::MAX_SHADOW_RATE)
         }
         "worldshadowrate" => {
             cfg.world_shadow_rate = (v.max(0.0) as u32).min(crate::shadow_core::MAX_SHADOW_RATE)

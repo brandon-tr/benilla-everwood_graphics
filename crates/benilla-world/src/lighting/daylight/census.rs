@@ -272,8 +272,8 @@ fn city_daylight_census() {
 #[test]
 #[ignore = "instrument: needs WOW_DATA; run by hand with --ignored --nocapture"]
 fn lamp_terrain_occlusion_scan() {
-    let spec = std::env::var("WOW_LAMP_SCAN")
-        .unwrap_or_else(|_| "Azeroth,-9300,150,1,lamppost".into());
+    let spec =
+        std::env::var("WOW_LAMP_SCAN").unwrap_or_else(|_| "Azeroth,-9300,150,1,lamppost".into());
     let p: Vec<&str> = spec.split(',').collect();
     let (map, cx, cy, r, filter) = (
         p[0],
@@ -339,7 +339,13 @@ fn lamp_terrain_occlusion_scan() {
             }
         }
         if total > 0 {
-            rows.push((blocked as f32 / total as f32, l, best, near, h(l[0], l[1]).unwrap_or(f32::NAN)));
+            rows.push((
+                blocked as f32 / total as f32,
+                l,
+                best,
+                near,
+                h(l[0], l[1]).unwrap_or(f32::NAN),
+            ));
         }
     }
     rows.sort_by(|a, b| b.3.cmp(&a.3).then(b.0.total_cmp(&a.0)));

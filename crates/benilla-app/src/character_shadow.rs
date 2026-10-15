@@ -6,8 +6,8 @@
 //! the per-frame facts the rig publishes ([`ShadowFrame`]). It does not know [`super::world_shadow`]
 //! exists — remove either lane and the other is untouched.
 
-use bevy::pbr::MeshMaterial3d;
 use bevy::ecs::entity::EntityHashSet;
+use bevy::pbr::MeshMaterial3d;
 use bevy::prelude::*;
 
 use benilla_assets::materials::WowModelMaterial;
@@ -128,7 +128,10 @@ fn collect_character_shadows(
     // whose idle animation is breathing has an unchanged `GlobalTransform` and changed VERTICES.
     // Gating on the transform would freeze exactly the poses this lane exists to draw. The rate cap
     // is the honest saving, and it is bounded work rather than a guess about content.
-    if !lane.rate.due(time.elapsed_secs(), video.character_shadow_rate) {
+    if !lane
+        .rate
+        .due(time.elapsed_secs(), video.character_shadow_rate)
+    {
         return;
     }
     if let Some(handle) = lane.mesh.clone() {

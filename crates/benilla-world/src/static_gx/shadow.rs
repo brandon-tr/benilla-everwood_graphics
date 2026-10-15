@@ -136,7 +136,8 @@ impl StaticGx {
                 if !item.cutout {
                     continue;
                 }
-                let (Some(texture_id), Some(texture)) = (item.texture, item.texture_handle.as_ref())
+                let (Some(texture_id), Some(texture)) =
+                    (item.texture, item.texture_handle.as_ref())
                 else {
                     continue;
                 };

@@ -37,7 +37,14 @@ use crate::{OverLife, ParticleBlend, ParticleEmitterDef};
 /// same reason from the other side: they ride real fires as SECOND emitters, and letting one win
 /// would put the light at the smoke column's height in ash grey.
 pub const FIRE_TEXTURE_KEYS: [&str; 8] = [
-    "FLAMELICK", "BONFIRE", "BRAZIER", "CANDLE", "TORCH", "FLAME", "EMBER", "FIRE",
+    "FLAMELICK",
+    "BONFIRE",
+    "BRAZIER",
+    "CANDLE",
+    "TORCH",
+    "FLAME",
+    "EMBER",
+    "FIRE",
 ];
 
 /// The fallback hue for a fire whose over-life ramp is all-but-white (an emitter that tints from
@@ -224,12 +231,13 @@ pub fn synthesize_fire_light<'a>(
         // A hand-rolled max rather than `max_by`, which keeps the LAST maximum on a tie: the
         // FIRST-wins arm (`>=` on the incumbent) is what makes the pick stable when a model
         // authors two identical flames, and the ties are real (mirrored torch pairs).
-        .fold(None, |best: Option<(usize, &ParticleEmitterDef, f32)>, cur| {
-            match best {
+        .fold(
+            None,
+            |best: Option<(usize, &ParticleEmitterDef, f32)>, cur| match best {
                 Some(b) if b.2 >= cur.2 => Some(b),
                 _ => Some(cur),
-            }
-        })?;
+            },
+        )?;
     let (intensity, bucket) = fire_intensity(strength);
     Some(SyntheticFire {
         emitter,
@@ -666,7 +674,11 @@ pub fn lamp_position(
         return None;
     }
     let (lo, hi) = bounds?;
-    Some((None, [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, hi[2]], 0))
+    Some((
+        None,
+        [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, hi[2]],
+        0,
+    ))
 }
 
 /// Derive **at most one** light for a model that authors neither a casting light block nor a flame
@@ -693,10 +705,7 @@ pub fn synthesize_lamp_light(
     batches: &[EmissiveBatch<'_>],
     bounds: Option<([f32; 3], [f32; 3])>,
 ) -> Option<SyntheticLamp> {
-    if is_spell_path(path)
-        || is_broken_or_off(path)
-        || is_light_beam(path)
-        || !lamp_family_ok(path)
+    if is_spell_path(path) || is_broken_or_off(path) || is_light_beam(path) || !lamp_family_ok(path)
     {
         return None;
     }
@@ -1099,12 +1108,13 @@ pub fn synthesize_spell_light<'a>(
         .map(|(i, d)| (i, d, spell_strength(d)))
         // First-wins on a tie, as in [`synthesize_fire_light`] — mirrored emitter pairs are real
         // here too (a firework shell authors three identical bursts on three bones).
-        .fold(None, |best: Option<(usize, &ParticleEmitterDef, f32)>, cur| {
-            match best {
+        .fold(
+            None,
+            |best: Option<(usize, &ParticleEmitterDef, f32)>, cur| match best {
                 Some(b) if b.2 >= cur.2 => Some(b),
                 _ => Some(cur),
-            }
-        })?;
+            },
+        )?;
     let ramp = spell_color(&def.over_life);
     // The NAME wins over the HUE wherever both speak: an artist naming a model `Frostbolt` has
     // said more about it than one warm key in its ramp has. The hue decides for the unnamed
@@ -1372,13 +1382,31 @@ mod tests {
         let keys = [[1.0, 0.3, 0.0, 1.0]; 3];
         let fire = |t: Option<&str>, b| def(t, b, keys, 0.3, 20.0);
 
-        assert!(fire_emitter(&fire(Some("X\\FLAMELICKSMALL.BLP"), ParticleBlend::Add)));
-        assert!(fire_emitter(&fire(Some("X\\CANDLEFLAME.BLP"), ParticleBlend::Add)));
-        assert!(fire_emitter(&fire(Some("X\\TORCHFIRE.BLP"), ParticleBlend::Add)));
+        assert!(fire_emitter(&fire(
+            Some("X\\FLAMELICKSMALL.BLP"),
+            ParticleBlend::Add
+        )));
+        assert!(fire_emitter(&fire(
+            Some("X\\CANDLEFLAME.BLP"),
+            ParticleBlend::Add
+        )));
+        assert!(fire_emitter(&fire(
+            Some("X\\TORCHFIRE.BLP"),
+            ParticleBlend::Add
+        )));
         // Art that is not fire.
-        assert!(!fire_emitter(&fire(Some("X\\GLOW.BLP"), ParticleBlend::Add)));
-        assert!(!fire_emitter(&fire(Some("X\\SPELLGLOW32.BLP"), ParticleBlend::Add)));
-        assert!(!fire_emitter(&fire(Some("X\\SMOKE01.BLP"), ParticleBlend::Add)));
+        assert!(!fire_emitter(&fire(
+            Some("X\\GLOW.BLP"),
+            ParticleBlend::Add
+        )));
+        assert!(!fire_emitter(&fire(
+            Some("X\\SPELLGLOW32.BLP"),
+            ParticleBlend::Add
+        )));
+        assert!(!fire_emitter(&fire(
+            Some("X\\SMOKE01.BLP"),
+            ParticleBlend::Add
+        )));
         assert!(!fire_emitter(&fire(None, ParticleBlend::Add)));
         // Fire art on a NON-additive emitter is the same model's smoke plume, not its flame.
         assert!(!fire_emitter(&fire(
@@ -1461,10 +1489,11 @@ mod tests {
         );
         // The `NoOmni` twin DOES synthesise — it is Orgrimmar's street lighting (123 placed);
         // only the absence of a flame emitter keeps a brazier cold.
-        assert!(
-            synthesize_fire_light("World\\Generic\\Orc\\Braziers\\TallBrazierNoOmni01.m2", [&flame])
-                .is_some()
-        );
+        assert!(synthesize_fire_light(
+            "World\\Generic\\Orc\\Braziers\\TallBrazierNoOmni01.m2",
+            [&flame]
+        )
+        .is_some());
         assert_eq!(synthesize_fire_light("WORLD\\X.M2", [&smoke]), None);
     }
 
@@ -1506,7 +1535,12 @@ mod tests {
         ];
         let batches = [
             batch(Some("X\\STREETLAMP.BLP"), false, false, &post),
-            batch(Some("DUNGEONS\\STORMWINDLAMPGLASS.BLP"), true, false, &glass),
+            batch(
+                Some("DUNGEONS\\STORMWINDLAMPGLASS.BLP"),
+                true,
+                false,
+                &glass,
+            ),
         ];
         let got = synthesize_lamp_light(
             "World\\Generic\\Human\\Passive Doodads\\Lamps\\StormwindStreetlamp01.m2",
@@ -1674,16 +1708,28 @@ mod tests {
     /// the artist wrote into the filename precisely because the warm default would be wrong there.
     #[test]
     fn lamp_kind_colour_and_intensity() {
-        assert_eq!(lamp_kind("x\\KarazanChandelier_01.m2"), Some(LampKind::Chandelier));
-        assert_eq!(lamp_kind("x\\Scholme_Candelabra.m2"), Some(LampKind::Candle));
+        assert_eq!(
+            lamp_kind("x\\KarazanChandelier_01.m2"),
+            Some(LampKind::Chandelier)
+        );
+        assert_eq!(
+            lamp_kind("x\\Scholme_Candelabra.m2"),
+            Some(LampKind::Candle)
+        );
         assert_eq!(lamp_kind("x\\SkullCandle01.m2"), Some(LampKind::Candle));
         assert_eq!(lamp_kind("x\\DuskwoodLamppost.m2"), Some(LampKind::Lamp));
-        assert_eq!(lamp_kind("x\\GeneralHangingLantern01.m2"), Some(LampKind::Lamp));
+        assert_eq!(
+            lamp_kind("x\\GeneralHangingLantern01.m2"),
+            Some(LampKind::Lamp)
+        );
         assert_eq!(lamp_kind("x\\UldamanBrazier01.m2"), Some(LampKind::Brazier));
         assert_eq!(lamp_kind("x\\NA_Torch01.m2"), Some(LampKind::Torch));
         assert_eq!(lamp_kind("x\\BE_Banner02.m2"), None);
 
-        assert_eq!(lamp_intensity(Some(LampKind::Chandelier)), (2.0, "chandelier"));
+        assert_eq!(
+            lamp_intensity(Some(LampKind::Chandelier)),
+            (2.0, "chandelier")
+        );
         assert_eq!(lamp_intensity(Some(LampKind::Candle)), (0.6, "candle"));
         assert_eq!(lamp_intensity(Some(LampKind::Lamp)), (1.5, "lamp"));
         assert_eq!(lamp_intensity(None), (1.5, "lamp"));
@@ -1697,13 +1743,19 @@ mod tests {
             Some(LampKind::Torch),
         ] {
             let i = lamp_intensity(k).0;
-            assert!([0.6f32, 1.5, 2.0, 3.0].contains(&i), "off-rung intensity {i}");
+            assert!(
+                [0.6f32, 1.5, 2.0, 3.0].contains(&i),
+                "off-rung intensity {i}"
+            );
         }
 
         assert_eq!(lamp_color("x\\StormwindStreetlamp01.m2"), DEFAULT_LAMP);
         assert_eq!(lamp_color("x\\NE_LanternBlue01.m2"), [0.45, 0.65, 1.0]);
         assert_eq!(lamp_color("x\\BE_lantern_red_001.m2"), [1.0, 0.35, 0.25]);
-        assert_eq!(lamp_color("x\\Scholme_GreenCandelabra.m2"), [0.40, 1.0, 0.45]);
+        assert_eq!(
+            lamp_color("x\\Scholme_GreenCandelabra.m2"),
+            [0.40, 1.0, 0.45]
+        );
         // No lamp word at all ⇒ the open-flame default, shared with the particle route.
         assert_eq!(lamp_color("x\\Scholme_Wax03.m2"), DEFAULT_WARM);
     }
@@ -1751,7 +1803,10 @@ mod tests {
             0.3167,
             60.0,
         );
-        assert_eq!(synthesize_spell_light("Spells\\Frostbolt.m2", [&frostbolt]), None);
+        assert_eq!(
+            synthesize_spell_light("Spells\\Frostbolt.m2", [&frostbolt]),
+            None
+        );
 
         // Holy Light's strongest emitter: every saturated key is authored INVISIBLE, so the ramp
         // yields nothing and the holy default (warm white) stands in. A most-saturated-key rule
@@ -1777,7 +1832,11 @@ mod tests {
         let shadow = def(
             Some("Spells\\Clouds8x8.blp"),
             ParticleBlend::Add,
-            [[0.4, 0.0, 0.6, 1.0], [0.2, 0.0, 0.4, 1.0], [0.1, 0.0, 0.2, 0.0]],
+            [
+                [0.4, 0.0, 0.6, 1.0],
+                [0.2, 0.0, 0.4, 1.0],
+                [0.1, 0.0, 0.2, 0.0],
+            ],
             0.5,
             60.0,
         );
@@ -1798,7 +1857,10 @@ mod tests {
             synthesize_spell_light("Spells\\EntanglingRoots_State.m2", [&green]),
             None
         );
-        assert_eq!(synthesize_spell_light("Spells\\Wrath_Missile.m2", [&green]), None);
+        assert_eq!(
+            synthesize_spell_light("Spells\\Wrath_Missile.m2", [&green]),
+            None
+        );
 
         // The imp's Firebolt: NAMED fire (the `FIRE` key), and its green ramp still supplies the
         // colour — a green flame is a flame with odd chemistry, exactly as the world route holds.
@@ -1902,8 +1964,14 @@ mod tests {
             spell_name_kind("Spells\\HolyLight_Impact_Head.m2"),
             Some(SpellLightKind::Holy)
         );
-        assert_eq!(spell_name_kind("Spells\\Immolate_State.m2"), Some(SpellLightKind::Fire));
-        assert_eq!(spell_name_kind("Spells\\ArcaneExplosion_Base.m2"), Some(SpellLightKind::None));
+        assert_eq!(
+            spell_name_kind("Spells\\Immolate_State.m2"),
+            Some(SpellLightKind::Fire)
+        );
+        assert_eq!(
+            spell_name_kind("Spells\\ArcaneExplosion_Base.m2"),
+            Some(SpellLightKind::None)
+        );
         assert_eq!(spell_name_kind("Spells\\Doomguard_Summon.m2"), None); // hue decides
 
         // A FROST effect carrying one warm spark stays dark — the name arm is unconditional.
@@ -1914,7 +1982,10 @@ mod tests {
             0.5,
             60.0,
         );
-        assert_eq!(synthesize_spell_light("Spells\\FrostNova_Base.m2", [&spark]), None);
+        assert_eq!(
+            synthesize_spell_light("Spells\\FrostNova_Base.m2", [&spark]),
+            None
+        );
         // …the same emitter under an unnamed model lights, by hue alone.
         assert_eq!(
             synthesize_spell_light("Spells\\Doomguard_Summon.m2", [&spark])
@@ -1930,10 +2001,26 @@ mod tests {
         assert_eq!(spell_hue_kind([1.0, 0.55, 0.2]), SpellLightKind::Fire);
         assert_eq!(spell_hue_kind([1.0, 0.95, 0.78]), SpellLightKind::Holy);
         assert_eq!(spell_hue_kind([0.2, 1.0, 0.2]), SpellLightKind::Fel);
-        assert_eq!(spell_hue_kind([0.1, 0.44, 0.93]), SpellLightKind::None, "frost");
-        assert_eq!(spell_hue_kind([0.71, 0.87, 0.98]), SpellLightKind::None, "ice white-blue");
-        assert_eq!(spell_hue_kind([0.7, 0.4, 1.0]), SpellLightKind::None, "arcane violet");
-        assert_eq!(spell_hue_kind([0.3, 0.3, 0.3]), SpellLightKind::None, "grey");
+        assert_eq!(
+            spell_hue_kind([0.1, 0.44, 0.93]),
+            SpellLightKind::None,
+            "frost"
+        );
+        assert_eq!(
+            spell_hue_kind([0.71, 0.87, 0.98]),
+            SpellLightKind::None,
+            "ice white-blue"
+        );
+        assert_eq!(
+            spell_hue_kind([0.7, 0.4, 1.0]),
+            SpellLightKind::None,
+            "arcane violet"
+        );
+        assert_eq!(
+            spell_hue_kind([0.3, 0.3, 0.3]),
+            SpellLightKind::None,
+            "grey"
+        );
     }
 
     /// The gates: a non-spell path never reaches the route (the world routes own it), a
@@ -1960,7 +2047,10 @@ mod tests {
             0.5,
             60.0,
         );
-        assert_eq!(synthesize_spell_light("Spells\\Fire_Nova.m2", [&smoke]), None);
+        assert_eq!(
+            synthesize_spell_light("Spells\\Fire_Nova.m2", [&smoke]),
+            None
+        );
         let sparks = def(
             Some("Spells\\Clouds8x8.blp"),
             ParticleBlend::Add,
@@ -1968,7 +2058,10 @@ mod tests {
             0.02,
             60.0,
         );
-        assert_eq!(synthesize_spell_light("Spells\\Fire_Nova.m2", [&sparks]), None);
+        assert_eq!(
+            synthesize_spell_light("Spells\\Fire_Nova.m2", [&sparks]),
+            None
+        );
         assert_eq!(synthesize_spell_light("Spells\\Fire_Nova.m2", []), None);
         // A constant-rate emitter has no fuse: the light is up at t=0.
         assert_eq!(emit_onset(&flame), 0.0);
@@ -2059,9 +2152,15 @@ mod tests {
         );
         // A school veto beats a warm ramp: a frost model with one red spark stays dark even where
         // its path says nothing.
-        assert_eq!(area_light_kind("spells\\noname_area.m2", FROST, Some(F)), Dark);
+        assert_eq!(
+            area_light_kind("spells\\noname_area.m2", FROST, Some(F)),
+            Dark
+        );
         // …and with nothing to go on at all, dark is the answer (the reference's own behaviour).
-        assert_eq!(area_light_kind("spells\\noname_area.m2", PHYSICAL, None), Dark);
+        assert_eq!(
+            area_light_kind("spells\\noname_area.m2", PHYSICAL, None),
+            Dark
+        );
     }
 
     /// The `\FLARE_` key is anchored to a path separator so it takes the hunter's Flare and NOT the

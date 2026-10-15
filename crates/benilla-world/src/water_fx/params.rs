@@ -292,14 +292,32 @@ mod tests {
                 speed: 7.0,
                 heading: 0.0,
             };
-            let p = foam_params(translating, false, 1.0, 1.0, 0.3, FoamLook::CLASSIC, &mut rng).unwrap();
+            let p = foam_params(
+                translating,
+                false,
+                1.0,
+                1.0,
+                0.3,
+                FoamLook::CLASSIC,
+                &mut rng,
+            )
+            .unwrap();
             assert!(!p.ring);
             assert!((0.3..=0.37).contains(&p.size0), "wake size0 {}", p.size0);
             assert!((2.8..=4.2).contains(&p.growth), "wake growth {}", p.growth);
             assert!((0.6..0.7).contains(&p.lifetime));
             assert!((p.peak - 1.0).abs() < 1e-6);
 
-            let p = foam_params(WadeState::Standing, false, 1.0, 1.0, 0.3, FoamLook::CLASSIC, &mut rng).unwrap();
+            let p = foam_params(
+                WadeState::Standing,
+                false,
+                1.0,
+                1.0,
+                0.3,
+                FoamLook::CLASSIC,
+                &mut rng,
+            )
+            .unwrap();
             assert!(p.ring);
             assert!((0.16..=0.23).contains(&p.size0), "ring size0 {}", p.size0);
             assert!(
@@ -310,7 +328,16 @@ mod tests {
             assert!((0.6..0.7).contains(&p.lifetime), "ring life {}", p.lifetime);
             assert!((p.peak - 0.8).abs() < 1e-6);
 
-            let p = foam_params(translating, true, 1.0, 1.0, 0.3, FoamLook::CLASSIC, &mut rng).unwrap();
+            let p = foam_params(
+                translating,
+                true,
+                1.0,
+                1.0,
+                0.3,
+                FoamLook::CLASSIC,
+                &mut rng,
+            )
+            .unwrap();
             assert!(p.ring, "a one-shot is ring-category");
             assert!(
                 (0.3..=0.377).contains(&p.size0),
@@ -341,10 +368,37 @@ mod tests {
     #[test]
     fn depth_gate_and_attenuation() {
         let mut rng = 7u32;
-        assert!(foam_params(WadeState::Standing, false, 1.0, 1.0, 1.05, FoamLook::CLASSIC, &mut rng).is_none());
-        assert!(foam_params(WadeState::Standing, false, 1.0, 1.0, -0.1, FoamLook::CLASSIC, &mut rng).is_none());
+        assert!(foam_params(
+            WadeState::Standing,
+            false,
+            1.0,
+            1.0,
+            1.05,
+            FoamLook::CLASSIC,
+            &mut rng
+        )
+        .is_none());
+        assert!(foam_params(
+            WadeState::Standing,
+            false,
+            1.0,
+            1.0,
+            -0.1,
+            FoamLook::CLASSIC,
+            &mut rng
+        )
+        .is_none());
         // Near the gate depth, k → 0.5: a standing ring's peak → 6 × (0.8/6 × ~0.5) ≈ 0.4.
-        let deep = foam_params(WadeState::Standing, false, 1.0, 1.0, 0.99, FoamLook::CLASSIC, &mut rng).unwrap();
+        let deep = foam_params(
+            WadeState::Standing,
+            false,
+            1.0,
+            1.0,
+            0.99,
+            FoamLook::CLASSIC,
+            &mut rng,
+        )
+        .unwrap();
         assert!((deep.peak - 0.8 * 0.505).abs() < 0.02, "peak {}", deep.peak);
     }
 
@@ -407,7 +461,11 @@ mod tests {
             assert!((splash_e.size0 / splash_c.size0 - 1.8).abs() < 1e-5);
             assert!((splash_e.growth / splash_c.growth - 1.3).abs() < 1e-5);
         }
-        assert_eq!(foam_gain(false), 1.0, "Classic draws at the authored colour");
+        assert_eq!(
+            foam_gain(false),
+            1.0,
+            "Classic draws at the authored colour"
+        );
         assert!((foam_gain(true) - 3.5).abs() < 1e-6);
     }
 
@@ -460,7 +518,10 @@ mod tests {
         assert_eq!(swim_ramp(-1.0, h), 0.0, "dry");
         assert_eq!(swim_ramp(0.0, h), 0.0);
         assert_eq!(swim_ramp(0.5 * h, h), 0.0, "knee-deep is not swimming");
-        assert!(swim_ramp(0.75 * h, h) > 0.7, "the verified latch is mostly in");
+        assert!(
+            swim_ramp(0.75 * h, h) > 0.7,
+            "the verified latch is mostly in"
+        );
         assert_eq!(swim_ramp(0.9 * h, h), 1.0, "past the band, saturated");
         assert_eq!(swim_ramp(10.0, h), 1.0);
         let mut prev = 0.0;

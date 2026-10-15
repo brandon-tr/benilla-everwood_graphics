@@ -15,18 +15,17 @@ use benilla_world::{
 use bevy::{
     camera::primitives::{Frustum, Sphere as CullSphere},
     core_pipeline::{
-        FullscreenShader,
         core_3d::graph::{Core3d, Node3d},
+        FullscreenShader,
     },
     ecs::query::QueryItem,
     light::VolumetricLight,
     pbr::{
-        GpuLights, LightMeta, MAX_CASCADES_PER_LIGHT, MAX_DIRECTIONAL_LIGHTS,
-        ViewLightsUniformOffset, ViewShadowBindings,
+        GpuLights, LightMeta, ViewLightsUniformOffset, ViewShadowBindings, MAX_CASCADES_PER_LIGHT,
+        MAX_DIRECTIONAL_LIGHTS,
     },
     prelude::*,
     render::{
-        Render, RenderApp, RenderStartup, RenderSystems,
         diagnostic::RecordDiagnostics,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_graph::{
@@ -35,6 +34,7 @@ use bevy::{
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, RenderQueue},
         view::{Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
+        Render, RenderApp, RenderStartup, RenderSystems,
     },
     shader::ShaderDefVal,
 };
@@ -101,16 +101,17 @@ impl Plugin for VolumetricFogPlugin {
             .filter(|v| *v <= 2);
         // Dev capture instrument: isolate shafts without changing surface shadows or haze.
         // MONKEY (integration): the dev door is `run_mode` (decision 1179).
-        let shaft_gain = if crate::run_mode::dev_affordances() && std::env::var_os("WOW_CAPTURE").is_some() {
-            std::env::var("WOW_VOLFOG_SHAFT_GAIN")
-                .ok()
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| v.is_finite())
-                .unwrap_or(2.0)
-                .clamp(0.0, 8.0)
-        } else {
-            2.0
-        };
+        let shaft_gain =
+            if crate::run_mode::dev_affordances() && std::env::var_os("WOW_CAPTURE").is_some() {
+                std::env::var("WOW_VOLFOG_SHAFT_GAIN")
+                    .ok()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(2.0)
+                    .clamp(0.0, 8.0)
+            } else {
+                2.0
+            };
         app.insert_resource(FogOverride {
             fog: value,
             lamp,
@@ -323,10 +324,17 @@ fn update_fog(
                 && water
                     .iter()
                     .any(|w| w.ocean_within(eye[0], eye[1], SEA_PLANE_REACH));
-            if over && tier != 0 { 1.0 } else { 0.0 }
+            if over && tier != 0 {
+                1.0
+            } else {
+                0.0
+            }
         });
         // MONKEY (fog): rows 1-3 as packed for the light buffer.
-        let rows = monkey.as_ref().map_or([[0.0; 4]; benilla_world::lighting::MONKEY_FRAME_ROWS], |m| m.pack(0.0, 0.0));
+        let rows = monkey.as_ref().map_or(
+            [[0.0; 4]; benilla_world::lighting::MONKEY_FRAME_ROWS],
+            |m| m.pack(0.0, 0.0),
+        );
         commands.entity(entity).insert(FogView {
             mf_fog1: Vec4::from_array(rows[1]),
             mf_fog2: Vec4::from_array(rows[2]),
@@ -339,14 +347,13 @@ fn update_fog(
                     crate::post::grading::rendered_minute(&clock, rendered.as_deref()),
                     weather_amount,
                     interior.0.is_some(),
-                )
-                    * if tier == 0 {
-                        0.0
-                    } else if tier == 2 {
-                        1.6
-                    } else {
-                        1.0
-                    },
+                ) * if tier == 0 {
+                    0.0
+                } else if tier == 2 {
+                    1.6
+                } else {
+                    1.0
+                },
             ),
             sun_strength: Vec3::from_array(lighting.diffuse)
                 .lerp(Vec3::ONE, 0.5)
@@ -485,7 +492,11 @@ fn prepare_pipelines(
     // compile happens under the entry cover and never live when the player turns the row on.
     // (Named in `pipe_warm/menagerie.rs`'s custom-lane census.)
     for (target, msaa) in &all_views {
-        specialized.specialize(&cache, &pipeline, (target.main_texture_format(), msaa.samples() > 1));
+        specialized.specialize(
+            &cache,
+            &pipeline,
+            (target.main_texture_format(), msaa.samples() > 1),
+        );
     }
     for (entity, target, msaa) in &views {
         let id = specialized.specialize(

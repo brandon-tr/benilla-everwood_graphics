@@ -52,34 +52,32 @@ use bevy::render::extract_resource::ExtractResourcePlugin;
 
 use bevy::pbr::MeshMaterial3d;
 
-use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::coords::wow_to_bevy;
+use benilla_assets::materials::WowModelMaterial;
 use benilla_formats::ModelBlend;
 use benilla_world::billboard::BillboardCard;
 // MONKEY (torch owner exclusion): the placement identity an entity-lane caster part carries, and
 // the model-local bound the containment fallback is decided on.
 use benilla_world::interact::{PickMesh, WorldObject};
-use bevy::camera::primitives::Aabb;
 use benilla_world::lighting::{
     interior_reach, m2_light_reach, DaylightFixture, DynamicInteriors, FireLightGain, LightLane,
     LightLitRooms, LightReach, LightRooms, ShadowDistance, ShadowProxyLight, SyntheticFireLight,
     WorldPointLight, WowLighting,
 };
+use bevy::camera::primitives::Aabb;
 // MONKEY (carried light stability): the settle verdict a carried light earns by standing still.
 // MONKEY (outdoor torch shadows): …and the marker that says a light is CARRIED BY A BODY.
 use crate::entities::{CarriedLightMotion, HeldLight};
 use benilla_world::model_render::{ModelKind, ModelPart, ShadowOccluder};
 use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
-use benilla_world::static_gx::{
-    torch_flame_inside_bounds, LightOwner, StaticGx, TorchShadowViews,
-};
+use benilla_world::static_gx::{torch_flame_inside_bounds, LightOwner, StaticGx, TorchShadowViews};
 use benilla_world::view::WorldCamera;
 
 use crate::char_select::ClientState;
 use crate::net::SelfPlayer;
 use crate::shadow_core::{
-    empty_shadow_mesh, restore_mesh_buffers, take_mesh_buffers,
-    ShadowDemand, ShadowFrame, ShadowSet,
+    empty_shadow_mesh, restore_mesh_buffers, take_mesh_buffers, ShadowDemand, ShadowFrame,
+    ShadowSet,
 };
 use crate::video::VideoConfig;
 
@@ -384,7 +382,11 @@ fn fixture_score(intensity: f32, d: f32, r: f32) -> f32 {
     let r0 = (INTERIOR_CORE_FRAC * r).max(1e-3);
     let atten = INTERIOR_CORE_GAIN / (1.0 + (d / r0) * (d / r0));
     let extent = TORCH_ELIGIBLE_REACH_MULT * r + TORCH_ELIGIBLE_SLACK;
-    let w = (1.0 - (d / extent.max(1e-4)).clamp(0.0, 1.0).powf(INTERIOR_DIRECT_POW)).clamp(0.0, 1.0);
+    let w = (1.0
+        - (d / extent.max(1e-4))
+            .clamp(0.0, 1.0)
+            .powf(INTERIOR_DIRECT_POW))
+    .clamp(0.0, 1.0);
     intensity * atten * w * w
 }
 
@@ -393,8 +395,13 @@ fn fixture_score(intensity: f32, d: f32, r: f32) -> f32 {
 /// exterior fixture must score zero before it can evict a useful caster. Reach still uses the
 /// authored intensity, so dimming a flame changes its contribution without moving its pool.
 fn candidate_score(
-    intensity: f32, d: f32, r: f32, lane: Option<&LightLane>, has_rooms: bool,
-    synthetic: bool, fire_gain: f32,
+    intensity: f32,
+    d: f32,
+    r: f32,
+    lane: Option<&LightLane>,
+    has_rooms: bool,
+    synthetic: bool,
+    fire_gain: f32,
 ) -> f32 {
     if !lane.map_or(has_rooms, |l| l.interior) {
         return 0.0;
@@ -421,8 +428,11 @@ fn exterior_fixture_score(intensity: f32, d: f32) -> f32 {
     // score to exactly zero at the edge instead of stepping it there. It is the interior lane's
     // constant because it is the same shoulder, not because this is an interior term; the
     // attenuation above is the exterior receivers' own and shares nothing with that lane.
-    let w = (1.0 - (d / TORCH_EXT_ELIGIBLE_YD).clamp(0.0, 1.0).powf(INTERIOR_DIRECT_POW))
-        .clamp(0.0, 1.0);
+    let w = (1.0
+        - (d / TORCH_EXT_ELIGIBLE_YD)
+            .clamp(0.0, 1.0)
+            .powf(INTERIOR_DIRECT_POW))
+    .clamp(0.0, 1.0);
     intensity * atten * w * w
 }
 
@@ -506,8 +516,16 @@ fn map_publishable(built_at: Option<Vec3>, pos: Vec3) -> bool {
 fn moving_budget(mut movers: Vec<(usize, f32)>) -> (Vec<usize>, Vec<usize>) {
     movers.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     (
-        movers.iter().take(TORCH_MOVING_MAX).map(|(i, _)| *i).collect(),
-        movers.iter().skip(TORCH_MOVING_MAX).map(|(i, _)| *i).collect(),
+        movers
+            .iter()
+            .take(TORCH_MOVING_MAX)
+            .map(|(i, _)| *i)
+            .collect(),
+        movers
+            .iter()
+            .skip(TORCH_MOVING_MAX)
+            .map(|(i, _)| *i)
+            .collect(),
     )
 }
 
@@ -516,10 +534,16 @@ fn moving_budget(mut movers: Vec<(usize, f32)>) -> (Vec<usize>, Vec<usize>) {
 /// subset is independent of contribution ranking and never moves the resident static maps.
 fn dynamic_set(fixtures: &[(usize, Vec3)], anchor: Vec3, budget: usize) -> u32 {
     let mut nearest = fixtures.to_vec();
-    nearest.sort_by(|a, b| a.1.distance_squared(anchor).total_cmp(&b.1.distance_squared(anchor))
-        .then(a.0.cmp(&b.0)));
+    nearest.sort_by(|a, b| {
+        a.1.distance_squared(anchor)
+            .total_cmp(&b.1.distance_squared(anchor))
+            .then(a.0.cmp(&b.0))
+    });
     // MONKEY (live bank rank): also clamp resource values that bypass the cvar setter.
-    nearest.iter().take(budget.clamp(1, MAX_TORCH_DYNAMIC)).fold(0, |mask, (i, _)| mask | (1 << i))
+    nearest
+        .iter()
+        .take(budget.clamp(1, MAX_TORCH_DYNAMIC))
+        .fold(0, |mask, (i, _)| mask | (1 << i))
 }
 
 /// MONKEY (torch lane perf): the radius the MOVING-caster gather admits parts inside, for a
@@ -537,7 +561,9 @@ fn entity_gather_radius(reach: f32) -> f32 {
 /// UNION that replaced "48 yd of every dynamic fixture". Split out as a pure function because it is
 /// the whole admission rule of the gather and the one part of it worth a test.
 fn within_any_reach(fixtures: &[GatherFixture], origin: Vec3) -> bool {
-    fixtures.iter().any(|(_, p, r, _)| p.distance_squared(origin) <= r * r)
+    fixtures
+        .iter()
+        .any(|(_, p, r, _)| p.distance_squared(origin) <= r * r)
 }
 
 /// MONKEY (torch owner exclusion): is this entity-lane caster part the fixture's OWN body?
@@ -568,10 +594,17 @@ fn within_any_reach(fixtures: &[GatherFixture], origin: Vec3) -> bool {
 /// is covered by rule 1 instead, which is exact — `entities::carried_light` tags every one of
 /// those lights with the frame it hangs under.
 fn part_is_own_body(
-    ents: &EntityCasters, fixtures: &[GatherFixture], entity: Entity, kind: ModelKind,
-    object: Option<&WorldObject>, global: Option<&GlobalTransform>, aabb: Option<&Aabb>,
+    ents: &EntityCasters,
+    fixtures: &[GatherFixture],
+    entity: Entity,
+    kind: ModelKind,
+    object: Option<&WorldObject>,
+    global: Option<&GlobalTransform>,
+    aabb: Option<&Aabb>,
 ) -> bool {
-    let bound = (kind != ModelKind::Creature).then_some(()).and(global.zip(aabb));
+    let bound = (kind != ModelKind::Creature)
+        .then_some(())
+        .and(global.zip(aabb));
     fixtures.iter().any(|(_, pos, _, owner)| {
         let owned = match owner.map(|o| (o, o.instance())) {
             Some((_, Some(frame))) => hangs_under(ents, entity, frame),
@@ -593,7 +626,9 @@ fn hangs_under(ents: &EntityCasters, entity: Entity, frame: Entity) -> bool {
         if at == frame {
             return true;
         }
-        let Ok(parent) = ents.parents.get(at) else { return false };
+        let Ok(parent) = ents.parents.get(at) else {
+            return false;
+        };
         at = parent.parent();
     }
     false
@@ -658,11 +693,13 @@ struct EntityCasters<'w, 's> {
 /// The cvar `torchTerrainShadows`, or `WOW_TORCH_TERRAIN=0|1` (read once) for hermetic captures.
 fn terrain_casters_on(video: &VideoConfig) -> bool {
     static ENV: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    ENV.get_or_init(|| match std::env::var("WOW_TORCH_TERRAIN").ok().as_deref() {
-        Some("1") => Some(true),
-        Some("0") => Some(false),
-        _ => None,
-    })
+    ENV.get_or_init(
+        || match std::env::var("WOW_TORCH_TERRAIN").ok().as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        },
+    )
     .unwrap_or(video.torch_terrain_shadows)
 }
 
@@ -760,9 +797,20 @@ fn update_torch_shadows(
     // `entities::carried_light`). It rides the candidate and then the slot, because the caster
     // gathers need it and they run far downstream of this query.
     torches: Query<
-        (Entity, &GlobalTransform, &WorldPointLight, Option<&LightReach>, Option<&LightLane>,
-         Has<LightRooms>, Has<LightLitRooms>, Has<SyntheticFireLight>, Has<ChildOf>,
-         Has<HeldLight>, Option<&crate::entities::CarriedLightMotion>, Option<&LightOwner>),
+        (
+            Entity,
+            &GlobalTransform,
+            &WorldPointLight,
+            Option<&LightReach>,
+            Option<&LightLane>,
+            Has<LightRooms>,
+            Has<LightLitRooms>,
+            Has<SyntheticFireLight>,
+            Has<ChildOf>,
+            Has<HeldLight>,
+            Option<&crate::entities::CarriedLightMotion>,
+            Option<&LightOwner>,
+        ),
         // MONKEY (daylight fixtures): a doorway's daylight source is NOT a caster candidate. It is
         // an AREA source the width of the opening, standing in a hole in a wall — a point-cube
         // shadow of it would be wrong in kind (hard radial wedges from a soft sky) — and being
@@ -839,93 +887,107 @@ fn update_torch_shadows(
     // MONKEY (outdoor torch shadows): the candidate tuple carries its LANE (`true` = exterior).
     let mut cands: Vec<Candidate> = torches
         .iter()
-        .filter_map(|(e, gt, pl, reach, light_lane, has_rooms, has_lit, synthetic, carried,
-                      held, motion, owner)| {
-            // MONKEY (carried light stability): a CARRIED light (`ChildOf` — a pet's hand flame,
-            // an NPC's torch, a transport's deck brazier) used to cast ONLY while standing still,
-            // because a cached cube is valid only while its fixture stays within
-            // `TORCH_STALE_DRIFT_SQ` of where it was baked ([`map_publishable`]) and a moving one
-            // toggled a full-strength shadow at frame rate.
-            //
-            // MONKEY (moving fixture): that ban is lifted, because the lane can now RE-RENDER a
-            // moving fixture's whole cube every frame instead of republishing a frozen one (see
-            // [`TorchSlot::moving`]). What survives of the old rule is its arithmetic: only
-            // [`TORCH_MOVING_MAX`] fixtures can be afforded that way, so a moving carried light is
-            // admitted as a candidate only if it already HOLDS one of those budgets or one is free.
-            // Doing it here, at candidacy, rather than by promoting it and evicting it a moment
-            // later, is what stops a third walking pet from churning the slot machinery: it never
-            // enters `cands`, so nothing downstream has to fade it out and refill after it.
-            //
-            // The stationary members of the same `ChildOf` family are untouched — a placed brazier
-            // GameObject or a campfire is `settled` and takes the ordinary cached path.
-            if carried
-                && !motion.is_some_and(CarriedLightMotion::settled)
-                && !live_held.contains(&e)
-                && live_held.len() >= TORCH_MOVING_MAX
-            {
-                return None;
-            }
-            let p = gt.translation();
-            let d = p.distance(anchor);
-            if p.distance(cam) > TORCH_SEARCH_RADIUS.max(ents.distance.0) {
-                return None;
-            }
-            // The packer's own recovery of authored colour x intensity (`spawn_point_light`
-            // premultiplied 4*pi), and the packer's own reach: the authored MOLT end where there is
-            // one, the intensity bucket otherwise, times the live `interiorAttenScale`.
-            let base = pl.intensity / (4.0 * std::f32::consts::PI);
-            let authored = reach
-                .map(|r| r.0)
-                .filter(|r| *r > 0.5)
-                .unwrap_or_else(|| m2_light_reach(base));
-            let r = interior_reach(authored, interiors.atten_scale);
-            // MONKEY (outdoor torch shadows): the `4R + slack` eligibility test moved DOWN into the
-            // interior arm (unchanged there). It cannot be shared: `r` is an INTERIOR reach — the
-            // authored MOLT end or the M2 intensity bucket times `interiorAttenScale` — and an
-            // exterior entry packs no reach at all, so applying it out here would size an outdoor
-            // campfire's promotion window off a number no exterior receiver ever reads.
-            let c = pl.color;
-            // Rec.709 luminance of the committed colour: ONE scalar for "how much light is this",
-            // so a dim blue magic brazier cannot outrank a bright hearth on channel count.
-            let lum = (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).max(0.0) * base.max(0.0);
-            // MONKEY (outdoor torch shadows): the lane split. It is the SAME verdict the light
-            // packer writes into the colour row's `.w` (`LightLane` — a light is interior iff it
-            // physically stands in an interior-class WMO group, with the old `LightRooms` rule as
-            // the pre-classification fallback), because that is what decides which receiver family
-            // reads it and therefore which shadow lane can ever be sampled for it.
-            let interior = light_lane.map_or(has_rooms, |l| l.interior);
-            if interior {
-                // The interior arm, unchanged — including the retired query filter's own
-                // membership test, so this candidate set is identical member-for-member to the one
-                // `Or<(With<LightRooms>, With<LightLitRooms>)>` produced.
-                if !interior_on || !(has_rooms || has_lit) {
+        .filter_map(
+            |(
+                e,
+                gt,
+                pl,
+                reach,
+                light_lane,
+                has_rooms,
+                has_lit,
+                synthetic,
+                carried,
+                held,
+                motion,
+                owner,
+            )| {
+                // MONKEY (carried light stability): a CARRIED light (`ChildOf` — a pet's hand flame,
+                // an NPC's torch, a transport's deck brazier) used to cast ONLY while standing still,
+                // because a cached cube is valid only while its fixture stays within
+                // `TORCH_STALE_DRIFT_SQ` of where it was baked ([`map_publishable`]) and a moving one
+                // toggled a full-strength shadow at frame rate.
+                //
+                // MONKEY (moving fixture): that ban is lifted, because the lane can now RE-RENDER a
+                // moving fixture's whole cube every frame instead of republishing a frozen one (see
+                // [`TorchSlot::moving`]). What survives of the old rule is its arithmetic: only
+                // [`TORCH_MOVING_MAX`] fixtures can be afforded that way, so a moving carried light is
+                // admitted as a candidate only if it already HOLDS one of those budgets or one is free.
+                // Doing it here, at candidacy, rather than by promoting it and evicting it a moment
+                // later, is what stops a third walking pet from churning the slot machinery: it never
+                // enters `cands`, so nothing downstream has to fade it out and refill after it.
+                //
+                // The stationary members of the same `ChildOf` family are untouched — a placed brazier
+                // GameObject or a campfire is `settled` and takes the ordinary cached path.
+                if carried
+                    && !motion.is_some_and(CarriedLightMotion::settled)
+                    && !live_held.contains(&e)
+                    && live_held.len() >= TORCH_MOVING_MAX
+                {
                     return None;
                 }
-                if !fixture_eligible(d, p.distance(cam), r, ents.distance.0) {
+                let p = gt.translation();
+                let d = p.distance(anchor);
+                if p.distance(cam) > TORCH_SEARCH_RADIUS.max(ents.distance.0) {
                     return None;
                 }
-                let score =
-                    candidate_score(lum, d, r, light_lane, has_rooms, synthetic, fire_gain.0);
-                // MONKEY (torch lane perf): `r` rides along — the moving-caster gather sizes its
-                // radius off the light that will be sampled, not off the cube's 48 yd far plane.
-                return (score > 0.0).then_some((e, p, score, false, r, owner.copied()));
-            }
-            // The EXTERIOR arm — a campfire, a brazier, a lamppost, a bonfire.
-            if !exterior_on || held {
-                return None;
-            }
-            if !exterior_eligible(d, p.distance(cam), ents.distance.0) {
-                return None;
-            }
-            // Same synthetic-gain fold as the interior arm (and as the packer): dimming the
-            // invented lights with `fireLightGain 0` must take their shadows with them, or a fire
-            // that lights nothing would still carve a black wedge across the ground.
-            let gain = if synthetic { fire_gain.0.max(0.0) } else { 1.0 };
-            let score = exterior_fixture_score(lum * gain, d);
-            // MONKEY (torch lane perf): an exterior entry packs no reach and its receivers apply an
-            // un-windowed falloff, so the cube's own range is the only honest gather radius here.
-            (score > 0.0).then_some((e, p, score, true, TORCH_RANGE, owner.copied()))
-        })
+                // The packer's own recovery of authored colour x intensity (`spawn_point_light`
+                // premultiplied 4*pi), and the packer's own reach: the authored MOLT end where there is
+                // one, the intensity bucket otherwise, times the live `interiorAttenScale`.
+                let base = pl.intensity / (4.0 * std::f32::consts::PI);
+                let authored = reach
+                    .map(|r| r.0)
+                    .filter(|r| *r > 0.5)
+                    .unwrap_or_else(|| m2_light_reach(base));
+                let r = interior_reach(authored, interiors.atten_scale);
+                // MONKEY (outdoor torch shadows): the `4R + slack` eligibility test moved DOWN into the
+                // interior arm (unchanged there). It cannot be shared: `r` is an INTERIOR reach — the
+                // authored MOLT end or the M2 intensity bucket times `interiorAttenScale` — and an
+                // exterior entry packs no reach at all, so applying it out here would size an outdoor
+                // campfire's promotion window off a number no exterior receiver ever reads.
+                let c = pl.color;
+                // Rec.709 luminance of the committed colour: ONE scalar for "how much light is this",
+                // so a dim blue magic brazier cannot outrank a bright hearth on channel count.
+                let lum = (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]).max(0.0) * base.max(0.0);
+                // MONKEY (outdoor torch shadows): the lane split. It is the SAME verdict the light
+                // packer writes into the colour row's `.w` (`LightLane` — a light is interior iff it
+                // physically stands in an interior-class WMO group, with the old `LightRooms` rule as
+                // the pre-classification fallback), because that is what decides which receiver family
+                // reads it and therefore which shadow lane can ever be sampled for it.
+                let interior = light_lane.map_or(has_rooms, |l| l.interior);
+                if interior {
+                    // The interior arm, unchanged — including the retired query filter's own
+                    // membership test, so this candidate set is identical member-for-member to the one
+                    // `Or<(With<LightRooms>, With<LightLitRooms>)>` produced.
+                    if !interior_on || !(has_rooms || has_lit) {
+                        return None;
+                    }
+                    if !fixture_eligible(d, p.distance(cam), r, ents.distance.0) {
+                        return None;
+                    }
+                    let score =
+                        candidate_score(lum, d, r, light_lane, has_rooms, synthetic, fire_gain.0);
+                    // MONKEY (torch lane perf): `r` rides along — the moving-caster gather sizes its
+                    // radius off the light that will be sampled, not off the cube's 48 yd far plane.
+                    return (score > 0.0).then_some((e, p, score, false, r, owner.copied()));
+                }
+                // The EXTERIOR arm — a campfire, a brazier, a lamppost, a bonfire.
+                if !exterior_on || held {
+                    return None;
+                }
+                if !exterior_eligible(d, p.distance(cam), ents.distance.0) {
+                    return None;
+                }
+                // Same synthetic-gain fold as the interior arm (and as the packer): dimming the
+                // invented lights with `fireLightGain 0` must take their shadows with them, or a fire
+                // that lights nothing would still carve a black wedge across the ground.
+                let gain = if synthetic { fire_gain.0.max(0.0) } else { 1.0 };
+                let score = exterior_fixture_score(lum * gain, d);
+                // MONKEY (torch lane perf): an exterior entry packs no reach and its receivers apply an
+                // un-windowed falloff, so the cube's own range is the only honest gather radius here.
+                (score > 0.0).then_some((e, p, score, true, TORCH_RANGE, owner.copied()))
+            },
+        )
         .collect();
     cands.sort_by(|a, b| b.2.total_cmp(&a.2));
     let ext_cap = exterior_budget(want);
@@ -995,7 +1057,11 @@ fn update_torch_shadows(
     let step = TORCH_FADE_RATE * dt;
     for slot in lane.slots.iter_mut() {
         // MONKEY (moving fixture): a dropped mover leaves five times faster — see the const.
-        let step = if slot.fast_fade { TORCH_MOVING_FADE_RATE * dt } else { step };
+        let step = if slot.fast_fade {
+            TORCH_MOVING_FADE_RATE * dt
+        } else {
+            step
+        };
         slot.w = if slot.evicting {
             (slot.w - step).max(0.0)
         } else {
@@ -1005,7 +1071,9 @@ fn update_torch_shadows(
     lane.slots.retain(|s| {
         let release = s.evicting && s.w <= 0.0;
         if release {
-            if let Some(mesh) = &s.mesh { meshes.remove(mesh.id()); }
+            if let Some(mesh) = &s.mesh {
+                meshes.remove(mesh.id());
+            }
         }
         !release
     });
@@ -1023,7 +1091,8 @@ fn update_torch_shadows(
             break;
         };
         let cache_slot = (0..MAX_TORCH_CASTERS)
-            .find(|i| !lane.slots.iter().any(|s| s.cache_slot == *i)).unwrap();
+            .find(|i| !lane.slots.iter().any(|s| s.cache_slot == *i))
+            .unwrap();
         promotions += 1;
         lane.slots.push(TorchSlot {
             cache_slot,
@@ -1100,8 +1169,11 @@ fn update_torch_shadows(
         .iter()
         .filter(|s| s.moving_live)
         .fold(0u32, |mask, s| mask | (1 << s.cache_slot));
-    let dynamic = dynamic_set(&fixture_positions, anchor, video.interior_shadow_dynamic as usize)
-        | moving_mask;
+    let dynamic = dynamic_set(
+        &fixture_positions,
+        anchor,
+        video.interior_shadow_dynamic as usize,
+    ) | moving_mask;
     let mut rebuilt = 0;
     // MONKEY (moving fixture): the live slots' own rebuild allowance, kept apart from `rebuilt`.
     let mut moving_rebuilt = 0;
@@ -1111,7 +1183,11 @@ fn update_torch_shadows(
     // loop, so the counter cannot live on it until the loop has finished).
     let mut lane_scans = 0u32;
     let mut published = TorchShadowViews {
-        count: promoted.iter().map(|(i, ..)| *i as u32 + 1).max().unwrap_or(0),
+        count: promoted
+            .iter()
+            .map(|(i, ..)| *i as u32 + 1)
+            .max()
+            .unwrap_or(0),
         soft: video.interior_shadow_soft,
         // MONKEY (shadow floor): the direct-term floor, packed beside `soft` in `count.y`.
         strength: video.torch_shadow_strength,
@@ -1166,7 +1242,13 @@ fn update_torch_shadows(
         .slots
         .iter()
         .position(|s| s.checked.is_none())
-        .unwrap_or_else(|| if slot_count == 0 { 0 } else { lane.rebuild_cursor % slot_count });
+        .unwrap_or_else(|| {
+            if slot_count == 0 {
+                0
+            } else {
+                lane.rebuild_cursor % slot_count
+            }
+        });
     let scan = slot_count.min(TORCH_SCAN_PER_FRAME);
     // MONKEY (moving fixture): a live slot is scanned EVERY frame, in addition to (and ahead of)
     // the cursor's window. It cannot wait its turn in a rotation that takes a dozen frames to come
@@ -1200,7 +1282,11 @@ fn update_torch_shadows(
         // does not matter, but this slot pays it EVERY frame, and an imp's flame reaches ~10 yd
         // where the cube reaches 48 (a hundredth of the volume). Settled slots keep the full range
         // verbatim, so no cached key or mesh changes meaning.
-        let range = if moving { entity_gather_radius(slot.reach) } else { TORCH_RANGE };
+        let range = if moving {
+            entity_gather_radius(slot.reach)
+        } else {
+            TORCH_RANGE
+        };
         // MONKEY (torch lane perf): the skip. The fixture's own position joins the census because
         // it is hashed INTO the fingerprint (a carried torch moves without the world changing),
         // and a slot is only ever stamped once its key is actually committed below — a rebuild
@@ -1223,19 +1309,35 @@ fn update_torch_shadows(
             .hash(&mut hash);
         let mut entity_key = 0u64;
         for (entity, pick, part, global, rig, occluder, _, object, aabb) in &ents.parts {
-            if !static_part(part, rig.is_some()) || !occluder.0 { continue; }
+            if !static_part(part, rig.is_some()) || !occluder.0 {
+                continue;
+            }
             let Some(global) = global else { continue };
-            if global.translation().distance_squared(slot.pos) > range * range { continue; }
+            if global.translation().distance_squared(slot.pos) > range * range {
+                continue;
+            }
             // The same exclusion the gather below applies, or the key would certify a mesh that
             // was never built from this set.
-            if part_is_own_body(&ents, &gather, entity, part.kind, object, Some(global), aabb) {
+            if part_is_own_body(
+                &ents,
+                &gather,
+                entity,
+                part.kind,
+                object,
+                Some(global),
+                aabb,
+            ) {
                 continue;
             }
             // Arc identity catches geometry replacement, transform bits catch moved furniture.
             let mut part_hash = std::collections::hash_map::DefaultHasher::new();
             entity.hash(&mut part_hash);
             (std::sync::Arc::as_ptr(&pick.0) as usize).hash(&mut part_hash);
-            global.to_matrix().to_cols_array().map(f32::to_bits).hash(&mut part_hash);
+            global
+                .to_matrix()
+                .to_cols_array()
+                .map(f32::to_bits)
+                .hash(&mut part_hash);
             entity_key = entity_key.wrapping_add(part_hash.finish());
         }
         entity_key.hash(&mut hash);
@@ -1247,7 +1349,10 @@ fn update_torch_shadows(
             // re-rendered every exterior slot on any stream event anywhere.
             if let (Some(t), Some(a)) = (&ents.terrain, &ents.adt_tiles) {
                 (benilla_world::terrain_stream::terrain_torch_generation_near(
-                    t, a, slot.pos, TORCH_RANGE,
+                    t,
+                    a,
+                    slot.pos,
+                    TORCH_RANGE,
                 ) ^ 0x7e44_a1d0)
                     .hash(&mut hash);
             }
@@ -1260,7 +1365,11 @@ fn update_torch_shadows(
         // MONKEY (moving fixture): two budgets, not one. A moving slot asks to rebuild every
         // frame, so sharing the resident slots' two would let one walking pet freeze every static
         // map in the room for as long as it walked.
-        let afford = if moving { moving_rebuilt < TORCH_MOVING_MAX } else { rebuilt < 2 };
+        let afford = if moving {
+            moving_rebuilt < TORCH_MOVING_MAX
+        } else {
+            rebuilt < 2
+        };
         if dirty && afford {
             // MONKEY (moving fixture): recycle THIS slot's own buffers when it is live, so a
             // fixture that rebuilds sixty times a second does not allocate two Vecs a frame.
@@ -1272,8 +1381,7 @@ fn update_torch_shadows(
                 .map(take_mesh_buffers)
                 .unwrap_or_default();
             let gx_excluded = gx.as_ref().map_or(0, |gx| {
-                gx.append_torch_triangles(
-                    slot.pos, range, owner, &mut positions, &mut indices)
+                gx.append_torch_triangles(slot.pos, range, owner, &mut positions, &mut indices)
             });
             let (_, part_excluded) =
                 collect_torch_entities(&ents, true, &gather, &mut positions, &mut indices);
@@ -1281,7 +1389,13 @@ fn update_torch_shadows(
                 if let (Some(t), Some(a)) = (&ents.terrain, &ents.adt_tiles) {
                     let t0 = std::time::Instant::now();
                     let tris = benilla_world::terrain_stream::append_terrain_torch_triangles(
-                        t, a, slot.pos, range, &mut positions, &mut indices);
+                        t,
+                        a,
+                        slot.pos,
+                        range,
+                        &mut positions,
+                        &mut indices,
+                    );
                     if std::env::var_os("WOW_TORCH_TRACE").is_some() {
                         info!("torch-terrain: slot {i} +{tris} ground tris within {range:.0} yd in {:.3} ms",
                             t0.elapsed().as_secs_f64() * 1e3);
@@ -1297,18 +1411,29 @@ fn update_torch_shadows(
             // turns into a zero cross-fade weight: the shadow would blink off on exactly the frames
             // the fixture is moving. With the id stable the mesh is always ready, and the render
             // plan rebuilds a `moving_mask` slot unconditionally instead of on an id change.
-            match slot.mesh.as_ref().filter(|_| moving).and_then(|h| meshes.get_mut(h)) {
+            match slot
+                .mesh
+                .as_ref()
+                .filter(|_| moving)
+                .and_then(|h| meshes.get_mut(h))
+            {
                 Some(mesh) => restore_mesh_buffers(mesh, positions, indices),
                 None => {
                     let mut mesh = empty_shadow_mesh();
                     restore_mesh_buffers(&mut mesh, positions, indices);
-                    if let Some(old) = slot.mesh.replace(meshes.add(mesh)) { meshes.remove(old.id()); }
+                    if let Some(old) = slot.mesh.replace(meshes.add(mesh)) {
+                        meshes.remove(old.id());
+                    }
                 }
             }
             slot.geometry_key = Some(key);
             slot.built_at = Some(slot.pos);
             slot.checked = Some((census.gx, census.parts, slot.pos));
-            if moving { moving_rebuilt += 1 } else { rebuilt += 1 }
+            if moving {
+                moving_rebuilt += 1
+            } else {
+                rebuilt += 1
+            }
             static_rebuilt |= 1 << i;
         }
     }
@@ -1371,7 +1496,9 @@ fn update_torch_shadows(
     // casters were skinned at; it never removes a shadow.
     if dynamic != 0 {
         let fresh = lane.entity_mesh.is_none();
-        if fresh { lane.entity_mesh = Some(meshes.add(empty_shadow_mesh())); }
+        if fresh {
+            lane.entity_mesh = Some(meshes.add(empty_shadow_mesh()));
+        }
         // MONKEY (moving fixture): a live slot overrides the cadence. `interiorShadowEntityRate`
         // ages the POSE of the moving casters, which is invisible on a fixture that is standing
         // still (the shadow is in the right place either way, a frame's stride out of date at
@@ -1391,7 +1518,12 @@ fn update_torch_shadows(
             if let Some(mesh) = lane.entity_mesh.as_ref().and_then(|h| meshes.get_mut(h)) {
                 let (mut positions, mut indices) = take_mesh_buffers(mesh);
                 (lane.trace_parts, _) = collect_torch_entities(
-                    &ents, false, &dynamic_positions, &mut positions, &mut indices);
+                    &ents,
+                    false,
+                    &dynamic_positions,
+                    &mut positions,
+                    &mut indices,
+                );
                 restore_mesh_buffers(mesh, positions, indices);
             }
             lane.trace_gathers += 1;
@@ -1401,7 +1533,10 @@ fn update_torch_shadows(
         published.entity_mesh = lane.entity_mesh.as_ref().map(Handle::id);
     }
     lane.trace_scans += lane_scans;
-    lane.trace_reach = dynamic_positions.iter().map(|(_, _, r, _)| *r).fold(0.0, f32::max);
+    lane.trace_reach = dynamic_positions
+        .iter()
+        .map(|(_, _, r, _)| *r)
+        .fold(0.0, f32::max);
     *views = published;
 
     // `WOW_TORCH_TRACE=1` — once a second, what the lane published: fixture distances + whether a
@@ -1505,21 +1640,31 @@ fn static_part(part: &ModelPart, rigged: bool) -> bool {
 /// MONKEY (torch owner exclusion): …and the owner, which drops the fixture's own body
 /// ([`part_is_own_body`]). Returns `(admitted, excluded-as-own-body)` — the second is trace only.
 fn collect_torch_entities(
-    ents: &EntityCasters, want_static: bool, fixtures: &[GatherFixture],
-    positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>,
+    ents: &EntityCasters,
+    want_static: bool,
+    fixtures: &[GatherFixture],
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
 ) -> (u32, u32) {
     let mut admitted = 0;
     let mut excluded = 0;
     for (entity, pick, part, global, rig_part, occluder, _, object, aabb) in &ents.parts {
-        if !occluder.0 || static_part(part, rig_part.is_some()) != want_static { continue; }
+        if !occluder.0 || static_part(part, rig_part.is_some()) != want_static {
+            continue;
+        }
         let solid = part.blend == ModelBlend::Opaque
             || (part.kind == ModelKind::Creature && part.blend == ModelBlend::AlphaTest);
-        if !solid { continue; }
+        if !solid {
+            continue;
+        }
         let rig = rig_part.and_then(|r| ents.rigs.get(r.0).ok());
-        let origin = global.map(GlobalTransform::translation)
+        let origin = global
+            .map(GlobalTransform::translation)
             .or_else(|| rig.and_then(|r| ents.palettes.slot_origin(r.slot)));
         let Some(origin) = origin else { continue };
-        if !within_any_reach(fixtures, origin) { continue; }
+        if !within_any_reach(fixtures, origin) {
+            continue;
+        }
         // After the cheap window, before the expensive CPU skin: this is the lamp's own housing,
         // the brazier's own bowl, the lantern post the light hangs off.
         if part_is_own_body(ents, fixtures, entity, part.kind, object, global, aabb) {
@@ -1528,11 +1673,20 @@ fn collect_torch_entities(
         }
         let base = positions.len() as u32;
         if let Some(rig) = rig {
-            let Some(palette) = ents.palettes.world_palette(rig.slot, rig.bones() as usize) else { continue };
+            let Some(palette) = ents.palettes.world_palette(rig.slot, rig.bones() as usize) else {
+                continue;
+            };
             for (v, p) in pick.0.positions.iter().enumerate() {
                 let p = wow_to_bevy(*p);
-                let (Some(joints), Some(weights)) = (pick.0.joints.get(v), pick.0.weights.get(v)) else {
-                    positions.push(palette.first().map(|m| m.transform_point3(p)).unwrap_or(origin).to_array());
+                let (Some(joints), Some(weights)) = (pick.0.joints.get(v), pick.0.weights.get(v))
+                else {
+                    positions.push(
+                        palette
+                            .first()
+                            .map(|m| m.transform_point3(p))
+                            .unwrap_or(origin)
+                            .to_array(),
+                    );
                     continue;
                 };
                 let mut skinned = Vec3::ZERO;
@@ -1547,13 +1701,22 @@ fn collect_torch_entities(
             }
         } else if rig_part.is_none() {
             if let Some(global) = global {
-                positions.extend(pick.0.positions.iter().map(|p| global.transform_point(wow_to_bevy(*p)).to_array()));
+                positions.extend(
+                    pick.0
+                        .positions
+                        .iter()
+                        .map(|p| global.transform_point(wow_to_bevy(*p)).to_array()),
+                );
             }
         }
         let added = positions.len() as u32 - base;
-        if added == 0 { continue; }
+        if added == 0 {
+            continue;
+        }
         for tri in pick.0.indices.chunks_exact(3) {
-            if tri.iter().all(|i| *i < added) { indices.extend(tri.iter().map(|i| base + *i)); }
+            if tri.iter().all(|i| *i < added) {
+                indices.extend(tri.iter().map(|i| base + *i));
+            }
         }
         admitted += 1;
     }
@@ -1573,13 +1736,19 @@ fn collect_torch_entities(
 fn static_part_census(ents: &EntityCasters) -> u64 {
     let mut census = 0u64;
     for (entity, pick, part, global, rig, occluder, ..) in &ents.parts {
-        if !occluder.0 || !static_part(part, rig.is_some()) { continue; }
+        if !occluder.0 || !static_part(part, rig.is_some()) {
+            continue;
+        }
         let Some(global) = global else { continue };
         let a = global.affine();
         let mut mix = entity.to_bits() ^ (std::sync::Arc::as_ptr(&pick.0) as usize as u64);
         for v in [
-            a.translation.x, a.translation.y, a.translation.z,
-            a.matrix3.x_axis.x, a.matrix3.x_axis.y, a.matrix3.x_axis.z,
+            a.translation.x,
+            a.translation.y,
+            a.translation.z,
+            a.matrix3.x_axis.x,
+            a.matrix3.x_axis.y,
+            a.matrix3.x_axis.z,
         ] {
             mix = mix.rotate_left(11) ^ u64::from(v.to_bits());
         }
@@ -1591,9 +1760,13 @@ fn static_part_census(ents: &EntityCasters) -> u64 {
 /// Tear down the caster mesh and clear the published views (the lane went off, or we left the world).
 fn teardown(lane: &mut TorchLane, meshes: &mut Assets<Mesh>, views: &mut TorchShadowViews) {
     for slot in &mut lane.slots {
-        if let Some(handle) = slot.mesh.take() { meshes.remove(handle.id()); }
+        if let Some(handle) = slot.mesh.take() {
+            meshes.remove(handle.id());
+        }
     }
-    if let Some(handle) = lane.entity_mesh.take() { meshes.remove(handle.id()); }
+    if let Some(handle) = lane.entity_mesh.take() {
+        meshes.remove(handle.id());
+    }
     // MONKEY (torch caster selection): the slot table goes with them — an incumbent kept across a
     // teardown would come back at full weight in a room it is no longer in.
     lane.slots.clear();
@@ -1618,16 +1791,34 @@ mod tests {
         let exterior = LightLane::carried(false);
         let authored = candidate_score(1.0, 10.0, 10.0, Some(&interior), true, false, 0.0);
         assert!(authored > 0.0);
-        assert_eq!(candidate_score(100.0, 1.0, 10.0, Some(&exterior), true, false, 1.0), 0.0);
+        assert_eq!(
+            candidate_score(100.0, 1.0, 10.0, Some(&exterior), true, false, 1.0),
+            0.0
+        );
         for gain in [0.0, -1.0] {
-            assert_eq!(candidate_score(100.0, 1.0, 10.0, Some(&interior), true, true, gain), 0.0);
+            assert_eq!(
+                candidate_score(100.0, 1.0, 10.0, Some(&interior), true, true, gain),
+                0.0
+            );
         }
-        assert_eq!(candidate_score(1.0, 10.0, 10.0, Some(&interior), true, true, 0.5), authored * 0.5);
+        assert_eq!(
+            candidate_score(1.0, 10.0, 10.0, Some(&interior), true, true, 0.5),
+            authored * 0.5
+        );
         // No MOLR is needed once a containment-only fixture resolves interior; before resolution
         // the old LightRooms fallback is shared with build_light_data, in both directions.
-        assert_eq!(candidate_score(1.0, 10.0, 10.0, Some(&interior), false, false, 0.0), authored);
-        assert_eq!(candidate_score(1.0, 10.0, 10.0, None, true, false, 0.0), authored);
-        assert_eq!(candidate_score(1.0, 10.0, 10.0, None, false, false, 0.0), 0.0);
+        assert_eq!(
+            candidate_score(1.0, 10.0, 10.0, Some(&interior), false, false, 0.0),
+            authored
+        );
+        assert_eq!(
+            candidate_score(1.0, 10.0, 10.0, None, true, false, 0.0),
+            authored
+        );
+        assert_eq!(
+            candidate_score(1.0, 10.0, 10.0, None, false, false, 0.0),
+            0.0
+        );
     }
 
     #[test]
@@ -1646,12 +1837,19 @@ mod tests {
     // MONKEY (live bank rank): sparse slots, tie stability and both ends of the live budget.
     #[test]
     fn dynamic_subset_is_nearest_and_deterministic() {
-        let fixtures = [(15, Vec3::X), (8, -Vec3::X), (2, Vec3::X * 20.0), (4, Vec3::ZERO)];
+        let fixtures = [
+            (15, Vec3::X),
+            (8, -Vec3::X),
+            (2, Vec3::X * 20.0),
+            (4, Vec3::ZERO),
+        ];
         assert_eq!(dynamic_set(&fixtures, Vec3::ZERO, 2), (1 << 4) | (1 << 8));
         assert_eq!(dynamic_set(&fixtures, Vec3::X * 20.0, 1), 1 << 2);
         assert_eq!(dynamic_set(&fixtures, Vec3::ZERO, 0), 1 << 4);
         assert_eq!(dynamic_set(&fixtures, Vec3::ZERO, 16).count_ones(), 4);
-        let all: Vec<_> = (0..MAX_TORCH_CASTERS).map(|i| (i, Vec3::X * i as f32)).collect();
+        let all: Vec<_> = (0..MAX_TORCH_CASTERS)
+            .map(|i| (i, Vec3::X * i as f32))
+            .collect();
         assert_eq!(dynamic_set(&all, Vec3::ZERO, 16), 0xff);
         assert_eq!(dynamic_set(&[], Vec3::ZERO, 1), 0);
     }
@@ -1684,7 +1882,10 @@ mod tests {
         // The falloff's pole at d = 0 is floored, so a fixture the player is standing on cannot
         // score infinity, take a slot for one frame and hand it straight back.
         let at_zero = exterior_fixture_score(1.0, 0.0);
-        assert!(at_zero.is_finite() && at_zero <= 1.0 / 0.73 + 1e-3, "{at_zero}");
+        assert!(
+            at_zero.is_finite() && at_zero <= 1.0 / 0.73 + 1e-3,
+            "{at_zero}"
+        );
         // …and inside the window it IS the receivers' falloff: 1/(0.7d + 0.03d^2) at 1 yd.
         assert!((exterior_fixture_score(1.0, 1.0) - 1.0 / 0.73).abs() < 1e-2);
     }
@@ -1727,26 +1928,51 @@ mod tests {
     fn the_exterior_budget_is_half_and_caps_only_its_own_lane() {
         assert_eq!(exterior_budget(12), 6);
         assert_eq!(exterior_budget(16), 8);
-        assert_eq!(exterior_budget(1), 1, "the smallest budget still gets one outdoor shadow");
+        assert_eq!(
+            exterior_budget(1),
+            1,
+            "the smallest budget still gets one outdoor shadow"
+        );
         let mut cands: Vec<Candidate> = (0..8)
             .map(|i| {
-                (Entity::from_raw_u32(i).unwrap(), Vec3::ZERO, 8.0 - i as f32, i % 2 == 0, 10.0,
-                 None)
+                (
+                    Entity::from_raw_u32(i).unwrap(),
+                    Vec3::ZERO,
+                    8.0 - i as f32,
+                    i % 2 == 0,
+                    10.0,
+                    None,
+                )
             })
             .collect();
         cap_exterior_candidates(&mut cands, 2);
         // Identified by score, which is also their rank: 8,7,6,5,4,3,2,1 with the even ranks
         // exterior. Capped at two, ranks 8 and 6 (the best two fires) survive; 4 and 2 do not.
-        let kept: Vec<(u32, bool)> =
-            cands.iter().map(|(_, _, sc, x, ..)| (*sc as u32, *x)).collect();
+        let kept: Vec<(u32, bool)> = cands
+            .iter()
+            .map(|(_, _, sc, x, ..)| (*sc as u32, *x))
+            .collect();
         assert_eq!(
             kept,
-            vec![(8, true), (7, false), (6, true), (5, false), (3, false), (1, false)],
+            vec![
+                (8, true),
+                (7, false),
+                (6, true),
+                (5, false),
+                (3, false),
+                (1, false)
+            ],
             "the two best exterior fires survive; every interior candidate does"
         );
         // A cap of zero is a lane switched off, and it takes nothing else with it.
-        let mut all_ext: Vec<Candidate> =
-            vec![(Entity::from_raw_u32(0).unwrap(), Vec3::ZERO, 1.0, true, 10.0, None)];
+        let mut all_ext: Vec<Candidate> = vec![(
+            Entity::from_raw_u32(0).unwrap(),
+            Vec3::ZERO,
+            1.0,
+            true,
+            10.0,
+            None,
+        )];
         cap_exterior_candidates(&mut all_ext, 0);
         assert!(all_ext.is_empty());
     }
@@ -1758,12 +1984,23 @@ mod tests {
     #[test]
     fn the_entity_gather_radius_is_the_fixtures_own_reach() {
         assert_eq!(entity_gather_radius(12.0), 12.0 + TORCH_ENTITY_REACH_MARGIN);
-        assert!(entity_gather_radius(12.0) < TORCH_RANGE, "a candle sweeps far less than 48 yd");
-        assert_eq!(entity_gather_radius(TORCH_RANGE), TORCH_RANGE, "clamped to the cube range");
+        assert!(
+            entity_gather_radius(12.0) < TORCH_RANGE,
+            "a candle sweeps far less than 48 yd"
+        );
+        assert_eq!(
+            entity_gather_radius(TORCH_RANGE),
+            TORCH_RANGE,
+            "clamped to the cube range"
+        );
         assert_eq!(entity_gather_radius(1e9), TORCH_RANGE);
         assert_eq!(entity_gather_radius(0.0), TORCH_ENTITY_REACH_MARGIN);
         assert_eq!(entity_gather_radius(-5.0), TORCH_ENTITY_REACH_MARGIN);
-        assert_eq!(entity_gather_radius(f32::NAN), TORCH_RANGE, "never a silent zero radius");
+        assert_eq!(
+            entity_gather_radius(f32::NAN),
+            TORCH_RANGE,
+            "never a silent zero radius"
+        );
     }
 
     // …and the gather admits the UNION of those radii, not one shared radius: a tight candle and a
@@ -1774,11 +2011,23 @@ mod tests {
     fn the_gather_admits_the_union_of_the_fixture_reaches() {
         let candle = entity_gather_radius(8.0);
         let hearth = entity_gather_radius(30.0);
-        let set = [(0usize, Vec3::ZERO, candle, None), (1usize, Vec3::X * 60.0, hearth, None)];
+        let set = [
+            (0usize, Vec3::ZERO, candle, None),
+            (1usize, Vec3::X * 60.0, hearth, None),
+        ];
         assert!(within_any_reach(&set, Vec3::X * 5.0), "inside the candle");
-        assert!(within_any_reach(&set, Vec3::X * 40.0), "inside the hearth, not the candle");
-        assert!(!within_any_reach(&set, Vec3::X * 20.0), "between the two, lit by neither");
-        assert!(!within_any_reach(&[], Vec3::ZERO), "an empty dynamic set admits nothing");
+        assert!(
+            within_any_reach(&set, Vec3::X * 40.0),
+            "inside the hearth, not the candle"
+        );
+        assert!(
+            !within_any_reach(&set, Vec3::X * 20.0),
+            "between the two, lit by neither"
+        );
+        assert!(
+            !within_any_reach(&[], Vec3::ZERO),
+            "an empty dynamic set admits nothing"
+        );
         // The margin is what keeps a body whose ORIGIN sits just outside the pool casting.
         assert!(within_any_reach(&set, Vec3::X * (8.0 + 1.0)));
     }
@@ -1789,7 +2038,12 @@ mod tests {
     // frame into an alternating 1/3-frame stutter.
     // MONKEY (moving fixture): a slot for the motion tests — everything but the four fields the
     // verdict reads is inert.
-    fn moving_slot(owner: Option<LightOwner>, built_at: Vec3, pos: Vec3, still_since: f64) -> TorchSlot {
+    fn moving_slot(
+        owner: Option<LightOwner>,
+        built_at: Vec3,
+        pos: Vec3,
+        still_since: f64,
+    ) -> TorchSlot {
         TorchSlot {
             cache_slot: 0,
             mesh: None,
@@ -1828,14 +2082,21 @@ mod tests {
             slot.monkey_track_motion(12.5);
             assert!(slot.moving(12.5));
             slot.monkey_track_motion(13.0);
-            assert!(!slot.moving(13.0), "a stationary fixture returns to the cache");
+            assert!(
+                !slot.moving(13.0),
+                "a stationary fixture returns to the cache"
+            );
         }
     }
 
     #[test]
     fn a_fixture_is_moving_only_while_it_is_actually_moving() {
         let pet = Some(LightOwner::Instance(Entity::PLACEHOLDER));
-        let wall = Some(LightOwner::Placement { kind: ModelKind::Wmo, id: 7, label: 0 });
+        let wall = Some(LightOwner::Placement {
+            kind: ModelKind::Wmo,
+            id: 7,
+            label: 0,
+        });
         let now = 100.0;
         // A pet's flame that moved this frame: live.
         assert!(moving_slot(pet, Vec3::ZERO, Vec3::ZERO, now).moving(now));
@@ -1867,18 +2128,33 @@ mod tests {
         // Equal scores resolve by slot order, both ways round, so the set cannot alternate.
         let tied = vec![(5, 1.0), (2, 1.0), (9, 1.0)];
         assert_eq!(moving_budget(tied.clone()).0, vec![2, 5]);
-        assert_eq!(moving_budget(tied.into_iter().rev().collect()).0, vec![2, 5]);
+        assert_eq!(
+            moving_budget(tied.into_iter().rev().collect()).0,
+            vec![2, 5]
+        );
         assert_eq!(TORCH_MOVING_MAX, 2, "the cap the render plan budgets for");
     }
 
     #[test]
     fn the_entity_gather_cadence_is_a_rate_not_a_gate() {
         assert!(entity_gather_due(0, 0.0, 1, 1), "rate 0 = every frame");
-        assert!(!entity_gather_due(30, 0.0, 1, 1), "same set, no time passed");
+        assert!(
+            !entity_gather_due(30, 0.0, 1, 1),
+            "same set, no time passed"
+        );
         assert!(!entity_gather_due(30, 0.02, 1, 1), "still inside 1/30 s");
-        assert!(entity_gather_due(30, 1.0 / 30.0, 1, 1), "exactly on the tick");
-        assert!(entity_gather_due(30, 1.0 / 60.0 * 2.0, 1, 1), "two 60 fps frames make the tick");
-        assert!(entity_gather_due(30, 0.0, 0b11, 0b01), "a changed dynamic set overrides the clock");
+        assert!(
+            entity_gather_due(30, 1.0 / 30.0, 1, 1),
+            "exactly on the tick"
+        );
+        assert!(
+            entity_gather_due(30, 1.0 / 60.0 * 2.0, 1, 1),
+            "two 60 fps frames make the tick"
+        );
+        assert!(
+            entity_gather_due(30, 0.0, 0b11, 0b01),
+            "a changed dynamic set overrides the clock"
+        );
         assert!(entity_gather_due(15, 0.07, 1, 1));
         assert!(!entity_gather_due(15, 0.05, 1, 1));
         // A rate at or above the frame rate is "every frame" without being a special case.

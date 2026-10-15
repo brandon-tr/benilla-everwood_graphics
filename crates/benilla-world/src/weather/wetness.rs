@@ -153,7 +153,11 @@ mod tests {
         for _ in 0..(120 * 10) {
             w.step(0.0, 0.1);
         }
-        assert!((w.wetness - 0.5).abs() < 0.01, "half dry at 2 min: {}", w.wetness);
+        assert!(
+            (w.wetness - 0.5).abs() < 0.01,
+            "half dry at 2 min: {}",
+            w.wetness
+        );
         for _ in 0..(121 * 10) {
             w.step(0.0, 0.1);
         }

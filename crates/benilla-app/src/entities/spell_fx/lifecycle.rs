@@ -543,10 +543,17 @@ mod tests {
         assert_eq!(at(kit(), 0.0), 0.0, "nothing on the spawn frame");
         assert!((at(kit(), SPELL_LIGHT_RAMP * 0.5) - 0.5).abs() < 1e-3);
         assert_eq!(at(kit(), SPELL_LIGHT_RAMP), 1.0);
-        assert_eq!(at(kit(), 30.0), 1.0, "an aura holds for as long as it stands");
+        assert_eq!(
+            at(kit(), 30.0),
+            1.0,
+            "an aura holds for as long as it stands"
+        );
 
         // A missile is the same minus any ending of its own — the arrival despawn is the ending.
-        assert_eq!(at(SpellLight::new(1.0, 0.0, SpellLightMode::Missile), 5.0), 1.0);
+        assert_eq!(
+            at(SpellLight::new(1.0, 0.0, SpellLightMode::Missile), 5.0),
+            1.0
+        );
 
         // A burst peaks at the ramp's end and is gone `span` later; the plateau is real, not a
         // one-frame spike a low frame rate could step over.
@@ -586,8 +593,7 @@ mod tests {
         // The swell is a factor on the WHOLE envelope, ramp included — it is what the light is
         // doing, not a decoration on the hold — so the expected values carry it.
         let swell = |t: f32| {
-            1.0 + SPELL_AREA_BREATH_DEPTH
-                * (std::f32::consts::TAU * SPELL_AREA_BREATH_HZ * t).sin()
+            1.0 + SPELL_AREA_BREATH_DEPTH * (std::f32::consts::TAU * SPELL_AREA_BREATH_HZ * t).sin()
         };
 
         // The ramp is the AREA one — at the flash ramp's 0.1 s an area light is well short of up.
@@ -600,14 +606,15 @@ mod tests {
         // that it is at the top of the swell, and it never wanders outside ±depth. (Every mark
         // below is past the ramp, so `up` is 1 and the swell is the whole of the value.)
         let period = 1.0 / SPELL_AREA_BREATH_HZ;
-        assert!((at(area(), period) - 1.0).abs() < 1e-3, "one period, back to base");
+        assert!(
+            (at(area(), period) - 1.0).abs() < 1e-3,
+            "one period, back to base"
+        );
         assert!(
             (at(area(), period * 1.25) - (1.0 + SPELL_AREA_BREATH_DEPTH)).abs() < 1e-3,
             "the swell is centred on the base, not clamped below it"
         );
-        assert!(
-            (at(area(), period * 1.75) - (1.0 - SPELL_AREA_BREATH_DEPTH)).abs() < 1e-3
-        );
+        assert!((at(area(), period * 1.75) - (1.0 - SPELL_AREA_BREATH_DEPTH)).abs() < 1e-3);
         for step in 0..200 {
             let v = at(area(), 1.0 + step as f32 * 0.05);
             assert!(

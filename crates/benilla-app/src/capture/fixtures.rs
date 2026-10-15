@@ -1195,7 +1195,9 @@ pub(super) fn seed_ui_fixture(
         }
         // MONKEY (volumetric fog): exercise the rendered Advanced Graphics dropdown and layout.
         UiFixture::OptionsAdvancedGraphics => {
-            let Some(script) = script else { return; };
+            let Some(script) = script else {
+                return;
+            };
             script.register_cvars(crate::cvars::registered_pairs());
             if let Err(e) = script.run(
                 "ShowUIPanel(BenillaOptionsFrame); BenillaOptionsFrameCategoryListRowAdvancedGraphics:Click()",
@@ -1907,7 +1909,10 @@ pub(super) fn seed_perf_crowd(
     spatial: avian3d::prelude::SpatialQuery,
     mut seeded: Local<bool>,
 ) {
-    let Some(n) = std::env::var("WOW_PERF_CROWD").ok().and_then(|v| v.parse::<u32>().ok()) else {
+    let Some(n) = std::env::var("WOW_PERF_CROWD")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
         return;
     };
     let Some(scenario) = ctx.scenario else {

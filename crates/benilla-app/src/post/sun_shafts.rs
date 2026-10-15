@@ -164,7 +164,10 @@ fn update_views(
 fn horizon_row(transform: &GlobalTransform, projection: &Projection) -> (Vec4, Vec4) {
     let Projection::Perspective(p) = projection else {
         // No horizon test: `(0, 0, 1)` is always "up".
-        return (Vec4::new(0.0, 0.0, 1.0, -2.0), Vec4::new(0.0, 0.0, 0.0, 0.0));
+        return (
+            Vec4::new(0.0, 0.0, 1.0, -2.0),
+            Vec4::new(0.0, 0.0, 0.0, 0.0),
+        );
     };
     let ty = (p.fov * 0.5).tan();
     let tx = ty * p.aspect_ratio;
@@ -510,6 +513,9 @@ mod tests {
         let down = Transform::default().looking_to(Vec3::new(1.0, -0.3, 0.0), Vec3::Y);
         let dir = Vec3::new(1.0, -0.3, 0.0).normalize();
         assert!((up(&down, Vec2::ZERO) - dir.y).abs() < 1e-5);
-        assert!(up(&down, Vec2::ZERO) < -0.01, "sea below the horizon is not sky");
+        assert!(
+            up(&down, Vec2::ZERO) < -0.01,
+            "sea below the horizon is not sky"
+        );
     }
 }

@@ -649,15 +649,16 @@ where
     // whose missing side is exterior by definition (there is no group out there).
     let mut sides: Vec<(u16, Vec<u16>)> = Vec::new();
     if want_portals {
-        let note = |portal: u16, group: u16, sides: &mut Vec<(u16, Vec<u16>)>| {
-            match sides.iter_mut().find(|(p, _)| *p == portal) {
-                Some((_, gs)) => {
-                    if !gs.contains(&group) {
-                        gs.push(group);
-                    }
+        let note = |portal: u16, group: u16, sides: &mut Vec<(u16, Vec<u16>)>| match sides
+            .iter_mut()
+            .find(|(p, _)| *p == portal)
+        {
+            Some((_, gs)) => {
+                if !gs.contains(&group) {
+                    gs.push(group);
                 }
-                None => sides.push((portal, vec![group])),
             }
+            None => sides.push((portal, vec![group])),
         };
         for (gi, (start, count)) in portals.slices.iter().enumerate() {
             let (start, count) = (usize::from(*start), usize::from(*count));
@@ -1469,15 +1470,16 @@ pub fn bleed_seeds(groups: &[WmoGroupInfo], portals: PortalGraph<'_>) -> Vec<Ble
         return Vec::new();
     }
     let mut sides: Vec<(u16, Vec<u16>)> = Vec::new();
-    let note = |portal: u16, group: u16, sides: &mut Vec<(u16, Vec<u16>)>| {
-        match sides.iter_mut().find(|(p, _)| *p == portal) {
-            Some((_, gs)) => {
-                if !gs.contains(&group) {
-                    gs.push(group);
-                }
+    let note = |portal: u16, group: u16, sides: &mut Vec<(u16, Vec<u16>)>| match sides
+        .iter_mut()
+        .find(|(p, _)| *p == portal)
+    {
+        Some((_, gs)) => {
+            if !gs.contains(&group) {
+                gs.push(group);
             }
-            None => sides.push((portal, vec![group])),
         }
+        None => sides.push((portal, vec![group])),
     };
     for (gi, (start, count)) in portals.slices.iter().enumerate() {
         let (start, count) = (usize::from(*start), usize::from(*count));
@@ -1626,7 +1628,12 @@ pub fn quota_select(
         // and 1 for bleed — the tie the inn's p0/p1 pair lands on. `index` makes the order TOTAL, so
         // two identical openings can never swap between launches.
         let mut best: Option<(u8, f32, u8, usize, bool)> = None;
-        let consider = |round: u8, area: f32, lane: u8, i: usize, is_day: bool, best: &mut Option<(u8, f32, u8, usize, bool)>| {
+        let consider = |round: u8,
+                        area: f32,
+                        lane: u8,
+                        i: usize,
+                        is_day: bool,
+                        best: &mut Option<(u8, f32, u8, usize, bool)>| {
             let key = (round, -area, lane, i);
             if best.is_none_or(|b| key < (b.0, b.1, b.2, b.3)) {
                 *best = Some((key.0, key.1, key.2, key.3, is_day));
@@ -2017,62 +2024,64 @@ pub fn update_bleed_fixtures(
     let src: Vec<BleedSource<'_>> = if on && !live.is_empty() {
         sources
             .iter()
-            .filter_map(|(pl, gt, reach, lit_rooms, lane, rooms, synthetic, daylight, spell)| {
-                if lit_rooms.is_some_and(|c| {
-                    !c.rooms.groups.is_empty() && !live.contains(&c.rooms.instance)
-                }) {
-                    return None;
-                }
-                // The packer's own lane verdict, fallback included (a light lives a frame or two
-                // before the classifier's first pass).
-                if !lane.map_or_else(|| rooms.is_some(), |l| l.interior) {
-                    return None;
-                }
-                let c = pl.color;
-                let base = pl.intensity / (4.0 * std::f32::consts::PI);
-                // `fireLightGain` IS mirrored (a dial that darkens the hearth must darken what the
-                // doorway carries of it); the FLICKER deliberately is not.
-                //
-                // MONKEY (spellLightGain): and the spell dial the same way, in the same ORDER the
-                // packer folds them (`global_light::build_light_data` ~:1328) — spell first, fire
-                // second, because a spell light carries BOTH markers and the two dials answer
-                // different questions (a hearth's brightness vs how hard combat may strobe a room).
-                // Without the mirror a player who turned `spellLightGain` to 0 would still see the
-                // fireball's light arrive through the doorway while its own row was dark.
-                let s = base
-                    * if spell {
-                        spell_gain.0.max(0.0)
-                    } else if synthetic {
-                        fire_gain.0.max(0.0)
-                    } else {
+            .filter_map(
+                |(pl, gt, reach, lit_rooms, lane, rooms, synthetic, daylight, spell)| {
+                    if lit_rooms.is_some_and(|c| {
+                        !c.rooms.groups.is_empty() && !live.contains(&c.rooms.instance)
+                    }) {
+                        return None;
+                    }
+                    // The packer's own lane verdict, fallback included (a light lives a frame or two
+                    // before the classifier's first pass).
+                    if !lane.map_or_else(|| rooms.is_some(), |l| l.interior) {
+                        return None;
+                    }
+                    let c = pl.color;
+                    let base = pl.intensity / (4.0 * std::f32::consts::PI);
+                    // `fireLightGain` IS mirrored (a dial that darkens the hearth must darken what the
+                    // doorway carries of it); the FLICKER deliberately is not.
+                    //
+                    // MONKEY (spellLightGain): and the spell dial the same way, in the same ORDER the
+                    // packer folds them (`global_light::build_light_data` ~:1328) — spell first, fire
+                    // second, because a spell light carries BOTH markers and the two dials answer
+                    // different questions (a hearth's brightness vs how hard combat may strobe a room).
+                    // Without the mirror a player who turned `spellLightGain` to 0 would still see the
+                    // fireball's light arrive through the doorway while its own row was dark.
+                    let s = base
+                        * if spell {
+                            spell_gain.0.max(0.0)
+                        } else if synthetic {
+                            fire_gain.0.max(0.0)
+                        } else {
+                            1.0
+                        };
+                    // …and `interiorGain`, which the packer applies to every interior fixture EXCEPT a
+                    // `DaylightFixture`. Mirroring that exclusion here is what keeps the doorway from
+                    // being dimmed twice: a bleed fixture IS a `DaylightFixture`, so the packer will not
+                    // scale it, and the gain therefore has to be in the TARGET.
+                    // MONKEY (lava light): the shared caster exclusion does not make magma sunlight.
+                    let g = if daylight.is_some_and(|f| f.how != DaylightHow::Lava) {
                         1.0
+                    } else {
+                        knobs.interior_gain
                     };
-                // …and `interiorGain`, which the packer applies to every interior fixture EXCEPT a
-                // `DaylightFixture`. Mirroring that exclusion here is what keeps the doorway from
-                // being dimmed twice: a bleed fixture IS a `DaylightFixture`, so the packer will not
-                // scale it, and the gain therefore has to be in the TARGET.
-                // MONKEY (lava light): the shared caster exclusion does not make magma sunlight.
-                let g = if daylight.is_some_and(|f| f.how != DaylightHow::Lava) {
-                    1.0
-                } else {
-                    knobs.interior_gain
-                };
-                let c_norm = commit_norm([
-                    (c[0] * s * g).max(0.0),
-                    (c[1] * s * g).max(0.0),
-                    (c[2] * s * g).max(0.0),
-                ]);
-                let r = reach
-                    .map(|r| r.0)
-                    .filter(|r| *r > 0.5)
-                    .unwrap_or_else(|| super::m2_light_reach(base));
-                Some(BleedSource {
-                    pos: gt.translation(),
-                    c_norm,
-                    r_eff: super::interior_reach(r, knobs.atten_scale),
-                    claims: lit_rooms,
-                })
-            })
+                    let c_norm = commit_norm([
+                        (c[0] * s * g).max(0.0),
+                        (c[1] * s * g).max(0.0),
+                        (c[2] * s * g).max(0.0),
+                    ]);
+                    let r = reach
+                        .map(|r| r.0)
+                        .filter(|r| *r > 0.5)
+                        .unwrap_or_else(|| super::m2_light_reach(base));
+                    Some(BleedSource {
+                        pos: gt.translation(),
+                        c_norm,
+                        r_eff: super::interior_reach(r, knobs.atten_scale),
+                        claims: lit_rooms,
+                    })
+                },
+            )
             .collect()
     } else {
         Vec::new()
@@ -2120,8 +2129,22 @@ pub fn update_bleed_fixtures(
         let r_eff = super::interior_reach(reach.map_or(fx.reach, |r| r.0), knobs.atten_scale);
         let lit = if on {
             brighter(
-                room_irradiance(placement_src(fx.instance), &[], bl.probe, fx.instance, bl.sides[0], k_fill),
-                room_irradiance(placement_src(fx.instance), &[], bl.probe, fx.instance, bl.sides[1], k_fill),
+                room_irradiance(
+                    placement_src(fx.instance),
+                    &[],
+                    bl.probe,
+                    fx.instance,
+                    bl.sides[0],
+                    k_fill,
+                ),
+                room_irradiance(
+                    placement_src(fx.instance),
+                    &[],
+                    bl.probe,
+                    fx.instance,
+                    bl.sides[1],
+                    k_fill,
+                ),
             )
         } else {
             [0.0; 3]
@@ -2306,27 +2329,59 @@ mod tests {
         groups.extend((0..40).map(|_| group(true, lo, hi)));
         let vertices = [[0.0f32; 3]; 4];
         let infos: Vec<WmoPortalInfo> = (0..3)
-            .map(|_| WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] })
+            .map(|_| WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            })
             .collect();
         // p0: g1<->g0 (exterior), p1: g1<->g2, p2: g2<->g3.
         let refs = [
-            WmoPortalRef { portal: 0, group: 0, side: 1 },
-            WmoPortalRef { portal: 1, group: 2, side: 1 },
-            WmoPortalRef { portal: 1, group: 1, side: -1 },
-            WmoPortalRef { portal: 2, group: 3, side: 1 },
-            WmoPortalRef { portal: 2, group: 2, side: -1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 1,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 2,
+                group: 3,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 2,
+                group: 2,
+                side: -1,
+            },
         ];
         let mut slices = vec![(0u16, 0u16); groups.len()];
         slices[1] = (0, 2);
         slices[2] = (2, 2);
         slices[3] = (4, 1);
-        let portals = PortalGraph { vertices: &vertices, infos: &infos, refs: &refs, slices: &slices };
+        let portals = PortalGraph {
+            vertices: &vertices,
+            infos: &infos,
+            refs: &refs,
+            slices: &slices,
+        };
         let none: [(u16, bool, &[[f32; 3]]); 0] = [];
         let sky = district_sky_rooms(&groups, portals, none);
         assert!(sky[1] && sky[2], "the doorway room and its neighbour");
         assert!(!sky[3], "two hops in stays dark");
         assert!(!sky[0], "the shell is not a room");
-        assert!(district_sky_rooms(&groups[..5], portals, none).is_empty(), "a building is untouched");
+        assert!(
+            district_sky_rooms(&groups[..5], portals, none).is_empty(),
+            "a building is untouched"
+        );
         // A window (EXT-class batch) makes g3 a sky room too.
         let window = [[0.0f32; 3], [1.0, 1.0, 1.0]];
         let sky = district_sky_rooms(&groups, portals, [(3u16, true, &window[..])]);
@@ -2347,7 +2402,11 @@ mod tests {
             }
         }
         pts.push([0.0, 0.0, 0.0]);
-        assert_eq!(window_boxes(&pts, false).len(), 1, "a building keeps the whole batch");
+        assert_eq!(
+            window_boxes(&pts, false).len(),
+            1,
+            "a building keeps the whole batch"
+        );
         let panes = window_boxes(&pts, true);
         assert_eq!(panes.len(), 3, "a district splits it into its panes");
         assert!(panes.iter().all(|(l, h)| diagonal(*l, *h) < 6.0));
@@ -2360,7 +2419,7 @@ mod tests {
         assert_eq!(daylight_reach(2.0), 7.0);
         assert!((daylight_reach(2.6) - 7.9).abs() < 1e-5); // a 1.2 x 2.2 yd door
         assert_eq!(daylight_reach(100.0), 20.0); // the cap
-        // Monotone in between, so a wider opening never throws light LESS far.
+                                                 // Monotone in between, so a wider opening never throws light LESS far.
         let mut prev = 0.0;
         for i in 0..40 {
             let r = daylight_reach(i as f32 * 0.5);
@@ -2388,19 +2447,51 @@ mod tests {
             [0.0, -1.0, 2.0],
         ];
         let infos = [
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
         ];
         // p0: g0 <-> g1 (interior to exterior — a doorway).
         // p1: g0 <-> g2 (room to room — not).
         // p2: named by g2 alone (a portal to the outside — a doorway).
         let refs = [
-            WmoPortalRef { portal: 0, group: 1, side: 1 },
-            WmoPortalRef { portal: 1, group: 2, side: 1 },
-            WmoPortalRef { portal: 0, group: 0, side: -1 },
-            WmoPortalRef { portal: 1, group: 0, side: -1 },
-            WmoPortalRef { portal: 2, group: 2, side: 1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 2,
+                group: 2,
+                side: 1,
+            },
         ];
         // g0 owns refs 0..2, g1 owns 2..3, g2 owns 3..5.
         let slices = [(0, 2), (2, 1), (3, 2)];
@@ -2551,8 +2642,15 @@ mod tests {
         let kept = daylight_seeds(&groups, PortalGraph::default(), batches());
         assert_eq!(kept.len(), MAX_DAYLIGHT_PER_PLACEMENT);
         let rooms: HashSet<u16> = kept.iter().map(|s| s.group).collect();
-        assert_eq!(rooms.len(), MAX_DAYLIGHT_PER_PLACEMENT, "one each: {kept:?}");
-        assert!(kept.iter().all(|s| s.round == 0), "all first lights: {kept:?}");
+        assert_eq!(
+            rooms.len(),
+            MAX_DAYLIGHT_PER_PLACEMENT,
+            "one each: {kept:?}"
+        );
+        assert!(
+            kept.iter().all(|s| s.round == 0),
+            "all first lights: {kept:?}"
+        );
         // …and the eight rooms are the ones with the WIDEST first opening, in that order: within a
         // round the old area rank is untouched.
         for (n, s) in kept.iter().enumerate() {
@@ -2576,7 +2674,11 @@ mod tests {
         // The budget TRUNCATES, at any size, and a budget of zero spends nothing.
         assert_eq!(quota_select(&ranked, &[], 5).0.len(), 5);
         assert_eq!(quota_select(&ranked, &[], 0).0.len(), 0);
-        assert_eq!(quota_select(&ranked, &[], 999).0.len(), 24, "runs out of seeds, not slots");
+        assert_eq!(
+            quota_select(&ranked, &[], 999).0.len(),
+            24,
+            "runs out of seeds, not slots"
+        );
     }
 
     /// MONKEY (daylight quota): the budget itself — a building holds at eight, a district scales
@@ -2591,19 +2693,28 @@ mod tests {
         // The whole small-building corpus (1 183 of 1 211 shipped roots) is on this arm, the inn
         // (10 interior groups) and the abbey (11) included: nothing moves.
         assert_eq!(daylight_budget(&rooms(0, true)), MAX_DAYLIGHT_PER_PLACEMENT);
-        assert_eq!(daylight_budget(&rooms(10, true)), MAX_DAYLIGHT_PER_PLACEMENT);
+        assert_eq!(
+            daylight_budget(&rooms(10, true)),
+            MAX_DAYLIGHT_PER_PLACEMENT
+        );
         assert_eq!(
             daylight_budget(&rooms(DAYLIGHT_DISTRICT_ROOMS, true)),
             MAX_DAYLIGHT_PER_PLACEMENT
         );
         // One room past the line it is a district and pays per room — Ironforge's 103 interior
         // groups, Stormwind's 190 against the 128 ceiling.
-        assert_eq!(daylight_budget(&rooms(DAYLIGHT_DISTRICT_ROOMS + 1, true)), 33);
+        assert_eq!(
+            daylight_budget(&rooms(DAYLIGHT_DISTRICT_ROOMS + 1, true)),
+            33
+        );
         assert_eq!(daylight_budget(&rooms(103, true)), 103);
         assert_eq!(daylight_budget(&rooms(190, true)), DAYLIGHT_BUDGET_MAX);
         // EXTERIOR groups are not rooms: Stormwind's 116 exterior-class groups buy nothing, which is
         // why the count is `g.interior` and not `groups.len()`.
-        assert_eq!(daylight_budget(&rooms(200, false)), MAX_DAYLIGHT_PER_PLACEMENT);
+        assert_eq!(
+            daylight_budget(&rooms(200, false)),
+            MAX_DAYLIGHT_PER_PLACEMENT
+        );
     }
 
     /// MONKEY (daylight quota): a BLEED serves TWO rooms, so its round is the lower of them — a
@@ -2653,7 +2764,10 @@ mod tests {
         let (d4, b4) = quota_select(&day2, &bleed, 3);
         assert_eq!(b4.len(), 1);
         assert!(d4.iter().all(|s| s.round == 0), "{d4:?}");
-        assert!(d4.iter().any(|s| s.group == 1), "g1's window is a first light: {d4:?}");
+        assert!(
+            d4.iter().any(|s| s.group == 1),
+            "g1's window is a first light: {d4:?}"
+        );
     }
 
     /// MONKEY (daylight fixtures: boundary): the stitched-threshold seed — it finds the shared
@@ -2666,13 +2780,9 @@ mod tests {
             group(false, [-10.0, -10.0, -1.0], [20.0, 20.0, 10.0]),
         ];
         // THE DOORWAY: a 4 yd run of floor vertices on the y = 0 wall, authored into BOTH groups.
-        let door: Vec<[f32; 3]> = (0..=8)
-            .map(|i| [2.0 + i as f32 * 0.5, 0.0, 0.0])
-            .collect();
+        let door: Vec<[f32; 3]> = (0..=8).map(|i| [2.0 + i as f32 * 0.5, 0.0, 0.0]).collect();
         // A PARTY-WALL seam: the same stitch, but running 5 yd UP the x = 10 wall.
-        let wall: Vec<[f32; 3]> = (0..=10)
-            .map(|i| [10.0, 8.0, i as f32 * 0.5])
-            .collect();
+        let wall: Vec<[f32; 3]> = (0..=10).map(|i| [10.0, 8.0, i as f32 * 0.5]).collect();
         // A CORNER stitch: three coincident vertices where two walls meet the floor.
         let corner = [[0.0, 10.0, 0.0], [0.0, 10.0, 0.2], [0.2, 10.0, 0.0]];
         // …and interior-only floor the shell never sees.
@@ -2701,7 +2811,11 @@ mod tests {
         // but its bearing is the centroid's, not the wall normal's. And it stands SEED_MAX_HZ above
         // the threshold rather than on it.
         let step = ((s.pos[0] - 4.0).powi(2) + s.pos[1].powi(2)).sqrt();
-        assert!((step - NUDGE_YD).abs() < 1e-3, "pos {:?} step {step}", s.pos);
+        assert!(
+            (step - NUDGE_YD).abs() < 1e-3,
+            "pos {:?} step {step}",
+            s.pos
+        );
         assert!(s.pos[1] > 0.0, "did not step into the room: {:?}", s.pos);
         assert!((s.pos[2] - SEED_MAX_HZ).abs() < 1e-3, "pos {:?}", s.pos);
         assert!((s.hz - SEED_MAX_HZ).abs() < 1e-3);
@@ -2719,7 +2833,6 @@ mod tests {
         assert_eq!(with_portal.len(), 1, "{with_portal:#?}");
         assert_eq!(with_portal[0].how, DaylightHow::Aperture);
     }
-
 
     /// MONKEY (portal bleed): the seed rule — interior<->interior portals only, standing IN the
     /// opening, carrying both sides.
@@ -2739,19 +2852,51 @@ mod tests {
             [0.0, -1.0, 2.0],
         ];
         let infos = [
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, 0.0] },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, 0.0],
+            },
         ];
         // p0: g0 <-> g1 (a room to the SHELL — the daylight seed's population, not this one).
         // p1: g0 <-> g2 (room to room — the one bleed seed).
         // p2: named by g2 alone (a portal to the outside — not a doorway between two rooms).
         let refs = [
-            WmoPortalRef { portal: 0, group: 1, side: 1 },
-            WmoPortalRef { portal: 1, group: 2, side: 1 },
-            WmoPortalRef { portal: 0, group: 0, side: -1 },
-            WmoPortalRef { portal: 1, group: 0, side: -1 },
-            WmoPortalRef { portal: 2, group: 2, side: 1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 2,
+                group: 2,
+                side: 1,
+            },
         ];
         let slices = [(0, 2), (2, 1), (3, 2)];
         let portals = PortalGraph {
@@ -2770,7 +2915,11 @@ mod tests {
         // the whole aperture argument — a doorway has no side, so there is no side to step onto).
         assert!(seeds[0].pos[0].abs() < 1e-4, "pos {:?}", seeds[0].pos);
         // The z clamp is `seed_point`'s: the quad's centre is 1 yd up, under `SEED_MAX_HZ`.
-        assert!((seeds[0].pos[2] - 1.0).abs() < 1e-4, "pos {:?}", seeds[0].pos);
+        assert!(
+            (seeds[0].pos[2] - 1.0).abs() < 1e-4,
+            "pos {:?}",
+            seeds[0].pos
+        );
         // Both rooms are MOLR-seeded, so both are claimed HARD — a doorway lights either side.
         let claims = seeds[0].claims(&groups, portals);
         for g in [0u16, 2] {
@@ -2794,7 +2943,8 @@ mod tests {
         let delivered = luminance(hue)
             * i
             * (core_atten(NUDGE_YD) * interior_window(NUDGE_YD, r_eff, INTERIOR_DIRECT_POW)
-                + k_fill * interior_window(NUDGE_YD, INTERIOR_FILL_SPAN * r_eff, INTERIOR_FILL_POW));
+                + k_fill
+                    * interior_window(NUDGE_YD, INTERIOR_FILL_SPAN * r_eff, INTERIOR_FILL_POW));
         assert!(
             (delivered - BLEED_K * luminance(lit)).abs() < 1e-6,
             "delivered {delivered} vs {}",
@@ -2844,10 +2994,18 @@ mod tests {
             .collect();
         let mut refs = Vec::new();
         for i in 0..6u16 {
-            refs.push(WmoPortalRef { portal: i, group: 1, side: 1 });
+            refs.push(WmoPortalRef {
+                portal: i,
+                group: 1,
+                side: 1,
+            });
         }
         for i in 0..6u16 {
-            refs.push(WmoPortalRef { portal: i, group: 0, side: -1 });
+            refs.push(WmoPortalRef {
+                portal: i,
+                group: 0,
+                side: -1,
+            });
         }
         let slices = [(0, 6), (6, 6)];
         let portals = PortalGraph {
@@ -2880,12 +3038,17 @@ mod tests {
         );
         // The widest doorways (2w x w = 2, 8, 18, 32*, 50*, 72* yd^2 -- starred ones refused as
         // SPLIT cuts) outrank the 2 x 2 yd windows, and the narrowest doorway loses to them.
-        assert!(bleed.iter().all(|b| b.area < 28.0), "a split cut got seeded: {bleed:?}");
+        assert!(
+            bleed.iter().all(|b| b.area < 28.0),
+            "a split cut got seeded: {bleed:?}"
+        );
         assert!(bleed.len() >= 2, "{bleed:?}");
         for w in bleed.windows(2) {
             assert!(w[0].area >= w[1].area);
         }
-        assert!(bleed.iter().all(|b| b.sides.contains(&0) && b.sides.contains(&1)));
+        assert!(bleed
+            .iter()
+            .all(|b| b.sides.contains(&0) && b.sides.contains(&1)));
     }
 
     /// The sun curve: dark at and below the horizon, monotone up to full — and the calibration
@@ -2934,6 +3097,9 @@ mod tests {
         // on the reference target, which is the whole claim the seam closure rests on.
         let room = hue_lum * bright * (a + knobs.fill * w_fill) + knobs.ambient;
         let illum = 1.0 - (-room * knobs.exposure).exp();
-        assert!((illum - t_day).abs() < 1e-3, "illum {illum} vs target {t_day}");
+        assert!(
+            (illum - t_day).abs() < 1e-3,
+            "illum {illum} vs target {t_day}"
+        );
     }
 }

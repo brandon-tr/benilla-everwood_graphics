@@ -319,7 +319,11 @@ fn lane_census(
     let Some(mode) = DUMP.get_or_init(|| std::env::var_os("WOW_POINTS_DUMP")) else {
         return;
     };
-    let every = if mode.as_os_str() == "frame" { 0.0 } else { 1.0 };
+    let every = if mode.as_os_str() == "frame" {
+        0.0
+    } else {
+        1.0
+    };
     let now = time.elapsed_secs_f64();
     if now - *last < every {
         return;
@@ -442,7 +446,10 @@ mod tests {
         assert!(!points.is_empty());
         for point in points {
             let p = benilla_assets::coords::bevy_to_wow(point);
-            assert_eq!(info.surface_z_at(p[0], p[1]).map(|z| z + LIFT_YD), Some(p[2]));
+            assert_eq!(
+                info.surface_z_at(p[0], p[1]).map(|z| z + LIFT_YD),
+                Some(p[2])
+            );
             let local = rot.inverse() * Vec3::from_array(p);
             assert!(!(local.x > 12.0 && local.x < 24.0 && local.y > 12.0 && local.y < 24.0));
         }
@@ -603,11 +610,10 @@ mod tests {
             assert_eq!(marker.surface, magma);
             assert!(app.world().get::<DaylightFixture>(e).is_some());
             assert!(app.world().get::<super::super::FlameFlicker>(e).is_none());
-            assert!(
-                app.world()
-                    .get::<super::super::SyntheticFireLight>(e)
-                    .is_none()
-            );
+            assert!(app
+                .world()
+                .get::<super::super::SyntheticFireLight>(e)
+                .is_none());
             assert!(app.world().get::<ChildOf>(e).is_none());
         }
         app.world_mut().despawn(magma);

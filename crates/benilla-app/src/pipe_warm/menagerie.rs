@@ -605,7 +605,10 @@ pub(super) fn spawn_menagerie(
     solid_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
     let mut cutout_mesh = crate::shadow_core::empty_cutout_mesh();
     cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, tri.to_vec());
-    cutout_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+    cutout_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0f32, 0.0], [1.0, 0.0], [1.0, 1.0]],
+    );
     cutout_mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
     if let Some(store) = lanes.shadow_solid.as_mut() {
         let solid = store.add(crate::shadow_core::ShadowCasterMaterial {});

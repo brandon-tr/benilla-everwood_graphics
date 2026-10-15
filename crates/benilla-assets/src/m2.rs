@@ -473,57 +473,57 @@ impl AssetLoader for M2ModelLoader {
             // is flagged ([`ModelLight::spell`]) so the PLACED lanes can keep refusing it exactly
             // as they do today — only the entity lanes, which reap a light with its effect, take
             // one.
-            let synth = benilla_formats::synthesize_spell_light(
-                &path,
-                emitters.iter().map(|e| &e.def),
-            )
-            .map(|fx| {
-                let src = &emitters[fx.emitter].def;
-                (
-                    src.position,
-                    src.bone,
-                    fx.color,
-                    fx.intensity,
-                    // Never a FLAME for the flicker's purposes: a spell light runs its own
-                    // lifecycle envelope (ramp in / hold / decay) and a fire wobble on top of it
-                    // would read as the effect stuttering, not as fire breathing.
-                    false,
-                    Some(SpellLightInfo {
-                        kind: fx.kind,
-                        onset: fx.onset,
-                    }),
-                )
-            })
-            .or_else(|| {
-                benilla_formats::synthesize_fire_light(&path, emitters.iter().map(|e| &e.def)).map(
-                    |fire| {
-                        let src = &emitters[fire.emitter].def;
+            let synth =
+                benilla_formats::synthesize_spell_light(&path, emitters.iter().map(|e| &e.def))
+                    .map(|fx| {
+                        let src = &emitters[fx.emitter].def;
                         (
                             src.position,
                             src.bone,
-                            fire.color,
-                            fire.intensity,
-                            true,
-                            None,
+                            fx.color,
+                            fx.intensity,
+                            // Never a FLAME for the flicker's purposes: a spell light runs its own
+                            // lifecycle envelope (ramp in / hold / decay) and a fire wobble on top of it
+                            // would read as the effect stuttering, not as fire breathing.
+                            false,
+                            Some(SpellLightInfo {
+                                kind: fx.kind,
+                                onset: fx.onset,
+                            }),
                         )
-                    },
-                )
-            })
-            .or_else(|| {
-                // MONKEY (lamp lights): a lamppost/lantern/chandelier authors NO particle emitter
-                // at all — its glow is an UNLIT (render-flag 0x01) glass geoset. The rule reads the
-                // already-built render batches, so nothing extra is parsed; the position it returns
-                // is that geoset's CENTROID (the lamp head, 4-5 yd up a lamppost), never the model
-                // origin at the base of the pole. `bounds` is the fallback for a name-route hit
-                // whose glass we can't find — see `fire_light::lamp_position`.
-                let batches: Vec<benilla_formats::EmissiveBatch<'_>> = submeshes
-                    .iter()
-                    .map(|s| benilla_formats::EmissiveBatch::from(&*s.geometry))
-                    .collect();
-                let bbox = bounds.as_ref().map(|b| (b.bbox_min, b.bbox_max));
-                benilla_formats::synthesize_lamp_light(&path, &batches, bbox)
-                    .map(|l| (l.position, l.bone, l.color, l.intensity, false, None))
-            });
+                    })
+                    .or_else(|| {
+                        benilla_formats::synthesize_fire_light(
+                            &path,
+                            emitters.iter().map(|e| &e.def),
+                        )
+                        .map(|fire| {
+                            let src = &emitters[fire.emitter].def;
+                            (
+                                src.position,
+                                src.bone,
+                                fire.color,
+                                fire.intensity,
+                                true,
+                                None,
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        // MONKEY (lamp lights): a lamppost/lantern/chandelier authors NO particle emitter
+                        // at all — its glow is an UNLIT (render-flag 0x01) glass geoset. The rule reads the
+                        // already-built render batches, so nothing extra is parsed; the position it returns
+                        // is that geoset's CENTROID (the lamp head, 4-5 yd up a lamppost), never the model
+                        // origin at the base of the pole. `bounds` is the fallback for a name-route hit
+                        // whose glass we can't find — see `fire_light::lamp_position`.
+                        let batches: Vec<benilla_formats::EmissiveBatch<'_>> = submeshes
+                            .iter()
+                            .map(|s| benilla_formats::EmissiveBatch::from(&*s.geometry))
+                            .collect();
+                        let bbox = bounds.as_ref().map(|b| (b.bbox_min, b.bbox_max));
+                        benilla_formats::synthesize_lamp_light(&path, &batches, bbox)
+                            .map(|l| (l.position, l.bone, l.color, l.intensity, false, None))
+                    });
             if let Some((position, src_bone, color, intensity, flame, spell)) = synth {
                 // The light sits at the FLAME (or the lamp glass), not the model origin: a brazier's
                 // origin is under its bowl, and a light there back-lights the bowl into every

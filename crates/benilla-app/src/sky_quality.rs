@@ -4,8 +4,8 @@
 //! 2 High (+ detailed, sun-lit clouds). `$WOW_SKY_QUALITY` pins the tier for the session, so
 //! captures stay independent of `config.toml`.
 
-use bevy::prelude::*;
 use benilla_world::sky_fx::SkyQuality;
+use bevy::prelude::*;
 
 use crate::video::VideoConfig;
 
@@ -21,7 +21,11 @@ impl Plugin for SkyQualityPlugin {
     }
 }
 
-fn bridge(video: Res<VideoConfig>, mut out: ResMut<SkyQuality>, mut pinned: Local<Option<Option<u8>>>) {
+fn bridge(
+    video: Res<VideoConfig>,
+    mut out: ResMut<SkyQuality>,
+    mut pinned: Local<Option<Option<u8>>>,
+) {
     let pin = *pinned.get_or_insert_with(SkyQuality::env_override);
     let want = SkyQuality(pin.unwrap_or(video.sky_quality).min(SkyQuality::MAX));
     if *out != want {
@@ -39,9 +43,13 @@ mod tests {
             return; // pinned by the environment; nothing to observe
         }
         let mut app = App::new();
-        app.init_resource::<VideoConfig>().add_plugins(SkyQualityPlugin);
+        app.init_resource::<VideoConfig>()
+            .add_plugins(SkyQualityPlugin);
         app.update();
-        assert_eq!(app.world().resource::<SkyQuality>().0, VideoConfig::default().sky_quality);
+        assert_eq!(
+            app.world().resource::<SkyQuality>().0,
+            VideoConfig::default().sky_quality
+        );
         for tier in [2u8, 1, 0] {
             app.world_mut().resource_mut::<VideoConfig>().sky_quality = tier;
             app.update();

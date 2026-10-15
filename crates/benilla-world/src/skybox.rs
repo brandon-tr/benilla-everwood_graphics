@@ -83,13 +83,13 @@ pub struct CameraSkybox(pub Vec<SkyboxLayer>);
 impl CameraSkybox {
     /// The heaviest main layer, the one a readout names.
     pub fn primary(&self) -> Option<&SkyboxLayer> {
-        self.0
-            .iter()
-            .filter(|l| !l.celestial)
-            .fold(None, |best: Option<&SkyboxLayer>, l| match best {
+        self.0.iter().filter(|l| !l.celestial).fold(
+            None,
+            |best: Option<&SkyboxLayer>, l| match best {
                 Some(b) if b.weight >= l.weight => Some(b),
                 _ => Some(l),
-            })
+            },
+        )
     }
 
     /// MONKEY (leftovers): the heaviest main layer's weight among those carrying `flag`, 0 if none.
@@ -483,12 +483,7 @@ fn build_skybox(
             .lock_recover()
             .read_file(&norm(path))
             .ok();
-        let rig = Arc::new(
-            bytes
-                .as_deref()
-                .map(SkyRig::from_bytes)
-                .unwrap_or_default(),
-        );
+        let rig = Arc::new(bytes.as_deref().map(SkyRig::from_bytes).unwrap_or_default());
         let subs = benilla_formats::load_m2_mesh(&mut world_assets.chain.lock_recover(), path);
         let subs = match subs {
             Ok(subs) if !subs.is_empty() => subs,
@@ -539,7 +534,11 @@ fn build_skybox(
                 mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, sub.vertex_colors.clone());
             }
             // MONKEY (skybox): stage 1 reads UV set B.
-            if let Some(st) = sub.stage1.as_ref().filter(|s| s.uvs.len() == sub.positions.len()) {
+            if let Some(st) = sub
+                .stage1
+                .as_ref()
+                .filter(|s| s.uvs.len() == sub.positions.len())
+            {
                 mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, st.uvs.clone());
             }
             mesh.insert_indices(Indices::U32(sub.indices.clone()));
@@ -560,7 +559,11 @@ fn build_skybox(
             };
             // MONKEY (skybox): a two-texture batch takes its own copies with stage 1 bound, so
             // the deduped one-texture materials stay as they were.
-            if let Some(st) = sub.stage1.as_ref().filter(|s| s.uvs.len() == sub.positions.len()) {
+            if let Some(st) = sub
+                .stage1
+                .as_ref()
+                .filter(|s| s.uvs.len() == sub.positions.len())
+            {
                 let tex1 = st
                     .texture
                     .as_deref()
@@ -639,9 +642,10 @@ fn build_skybox(
             }
         }
         rigs.0.insert(path.to_string(), rig);
-        built
-            .0
-            .insert(path.to_string(), u16::try_from(subs.len()).unwrap_or(u16::MAX));
+        built.0.insert(
+            path.to_string(),
+            u16::try_from(subs.len()).unwrap_or(u16::MAX),
+        );
     }
 }
 
@@ -981,10 +985,7 @@ fn apply_skybox_visibility(
 #[allow(clippy::type_complexity)]
 fn follow_camera(
     cam: Query<&GlobalTransform, With<WorldCamera>>,
-    mut parts: Query<
-        (&mut Transform, &mut GlobalTransform, &SkyboxLocal),
-        Without<WorldCamera>,
-    >,
+    mut parts: Query<(&mut Transform, &mut GlobalTransform, &SkyboxLocal), Without<WorldCamera>>,
 ) {
     let Some(cam_gt) = cam.iter().next() else {
         return;
@@ -1068,7 +1069,10 @@ mod tests {
         assert_eq!(skybox_batch_order(true, 0, 23), 24);
         assert_eq!(skybox_batch_order(false, 24, 0), 25);
         assert_eq!(skybox_batch_order(false, 0, 31), 32);
-        assert_eq!(skybox_batch_order(false, 40, usize::MAX), FOG_CONE_ORDER - 1);
+        assert_eq!(
+            skybox_batch_order(false, 40, usize::MAX),
+            FOG_CONE_ORDER - 1
+        );
         assert_eq!(FOG_CONE_ORDER, 58);
     }
 
@@ -1102,12 +1106,19 @@ mod tests {
             flags,
             ..layer(path, w)
         };
-        let mut sky = CameraSkybox(vec![with("a", 0.3, 0x8), with("b", 0.7, 0x1), with("c", 0.5, 0x18)]);
+        let mut sky = CameraSkybox(vec![
+            with("a", 0.3, 0x8),
+            with("b", 0.7, 0x1),
+            with("c", 0.5, 0x18),
+        ]);
         sky.0.push(SkyboxLayer {
             celestial: true,
             ..with("d", 1.0, 0x18)
         });
-        assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_FORCE_SUN_SHAFTS), 0.5);
+        assert_eq!(
+            sky.flag_weight(benilla_formats::SKYBOX_FORCE_SUN_SHAFTS),
+            0.5
+        );
         assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_NO_SUN_FOG), 0.5);
         assert_eq!(sky.flag_weight(benilla_formats::SKYBOX_FOG_BLEND), 0.0);
         assert_eq!(CameraSkybox::default().flag_weight(0x8), 0.0);

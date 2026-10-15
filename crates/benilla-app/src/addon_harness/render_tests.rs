@@ -10,7 +10,9 @@ use super::{survey, Drew};
 // so the same oracle runs without administrator symlink privileges on Windows.
 pub(super) fn link_fixture(source: &Path, destination: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    { std::os::unix::fs::symlink(source, destination) }
+    {
+        std::os::unix::fs::symlink(source, destination)
+    }
     #[cfg(not(unix))]
     {
         std::fs::create_dir_all(destination)?;

@@ -157,7 +157,11 @@ impl LightCatalog {
             0 => params[SLOT_CLEAR],
             p => p,
         };
-        of(param).or_else(|| (slot != SLOT_CLEAR).then(|| of(params[SLOT_CLEAR])).flatten())
+        of(param).or_else(|| {
+            (slot != SLOT_CLEAR)
+                .then(|| of(params[SLOT_CLEAR]))
+                .flatten()
+        })
     }
 
     /// The weighted skyboxes at `pos` for the living: the global (or fallback) light at alpha 1,

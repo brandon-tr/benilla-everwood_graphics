@@ -376,7 +376,14 @@ pub(super) fn portal_slices(model: &WmoModel) -> Vec<(u16, u16)> {
 fn pack_claims(claims: &[room_claim::Claim]) -> std::sync::Arc<[u16]> {
     claims
         .iter()
-        .map(|c| c.group | if c.ext_ok { 0 } else { crate::lighting::LIT_ROOM_EXT_DENY })
+        .map(|c| {
+            c.group
+                | if c.ext_ok {
+                    0
+                } else {
+                    crate::lighting::LIT_ROOM_EXT_DENY
+                }
+        })
         .collect()
 }
 
@@ -735,9 +742,9 @@ pub(super) fn spawn_ribbons_for(
 #[cfg(test)]
 mod tests {
     use super::{carried_light_claims, pack_claims};
+    use benilla_assets::WmoModel;
     use benilla_formats::room_claim::{room_claims, PortalGraph};
     use benilla_formats::WmoGroupInfo;
-    use benilla_assets::WmoModel;
     use bevy::prelude::*;
 
     fn g(interior: bool, min: [f32; 3], max: [f32; 3]) -> WmoGroupInfo {
@@ -763,9 +770,9 @@ mod tests {
     #[test]
     fn a_fixture_claims_the_rooms_whose_authored_box_holds_it() {
         let groups = [
-            g(true, [14.11, -4.86, 0.40], [20.47, -0.38, 4.37]),      // g0, far corner room
-            g(true, [-17.07, -11.08, -0.21], [14.39, 15.54, 16.32]),  // g1 (inn "kitchen")
-            g(true, [-36.75, -8.67, -6.76], [-17.01, 12.68, 0.45]),   // g2 (inn "room03", basement)
+            g(true, [14.11, -4.86, 0.40], [20.47, -0.38, 4.37]), // g0, far corner room
+            g(true, [-17.07, -11.08, -0.21], [14.39, 15.54, 16.32]), // g1 (inn "kitchen")
+            g(true, [-36.75, -8.67, -6.76], [-17.01, 12.68, 0.45]), // g2 (inn "room03", basement)
             g(false, [-37.77, -13.53, -0.18], [19.91, 18.68, 23.28]), // g3 (inn "upstairs" SHELL)
         ];
         let claim = |p: [f32; 3]| room_claims(&groups, PortalGraph::default(), p, 11.2, &[]);
@@ -790,7 +797,11 @@ mod tests {
     /// one tavern candle.
     #[test]
     fn a_district_shell_is_claimed_but_barred_from_the_exterior_lane() {
-        let groups = [g(false, [-510.81, -82.83, -5.78], [-315.12, 101.35, 126.18])];
+        let groups = [g(
+            false,
+            [-510.81, -82.83, -5.78],
+            [-315.12, 101.35, 126.18],
+        )];
         let packed = pack_claims(&room_claims(
             &groups,
             PortalGraph::default(),
@@ -826,9 +837,8 @@ mod tests {
         let placement = Transform::from_xyz(100.0, 0.0, 0.0);
         let world_from_local = placement.compute_affine();
         // Model-space (-9.13, -1.13, 4.48) — the inn's real ground-floor fixture L0.
-        let at = placement.transform_point(benilla_assets::coords::wow_to_bevy([
-            -9.13, -1.13, 4.48,
-        ]));
+        let at =
+            placement.transform_point(benilla_assets::coords::wow_to_bevy([-9.13, -1.13, 4.48]));
         let inst = Entity::from_raw_u32(12).unwrap();
 
         let set = carried_light_claims(&model, inst, world_from_local, at, 11.2)
@@ -855,10 +865,13 @@ mod tests {
         // claim would pack it UNGATED, which fails open — but it is barred from the exterior lane,
         // so `all_ext_ok` is false and the caller leaves the light on the EXTERIOR lane rather than
         // taking its pool off the very cobbles it stands on.
-        model.group_bounds = vec![g(false, [-510.81, -82.83, -5.78], [-315.12, 101.35, 126.18])];
-        let canyon = placement.transform_point(benilla_assets::coords::wow_to_bevy([
-            -400.0, 0.0, 10.0,
-        ]));
+        model.group_bounds = vec![g(
+            false,
+            [-510.81, -82.83, -5.78],
+            [-315.12, 101.35, 126.18],
+        )];
+        let canyon =
+            placement.transform_point(benilla_assets::coords::wow_to_bevy([-400.0, 0.0, 10.0]));
         let set = carried_light_claims(&model, inst, world_from_local, canyon, 11.2)
             .expect("the district shell contains it");
         assert!(!set.any_interior);

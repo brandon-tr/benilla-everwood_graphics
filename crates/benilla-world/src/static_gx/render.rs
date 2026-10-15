@@ -339,12 +339,14 @@ fn init_pipelines(
     // MONKEY (room gate): the claim table's persistent GPU buffer, written every frame by
     // `prepare_room_claims`. Created here (RenderStartup) rather than beside the shared light
     // buffer so the whole binding — layout, buffer, upload — lives with its one reader.
-    commands.insert_resource(GxRoomClaims(render_device.create_buffer(&BufferDescriptor {
-        label: Some("static_gx_room_claims"),
-        size: crate::lighting::room_claim_bytes(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })));
+    commands.insert_resource(GxRoomClaims(render_device.create_buffer(
+        &BufferDescriptor {
+            label: Some("static_gx_room_claims"),
+            size: crate::lighting::room_claim_bytes(),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        },
+    )));
     commands.insert_resource(GxPipelines {
         view_layout,
         cell_layout,
@@ -855,7 +857,10 @@ fn prepare_room_claims(
     // copy it saves, and the comparison is against what we WROTE, so it cannot disagree with the
     // buffer's real contents.
     let id = buffer.0.id();
-    if last.as_ref().is_some_and(|(b, w)| *b == id && w[..] == claims.0[..]) {
+    if last
+        .as_ref()
+        .is_some_and(|(b, w)| *b == id && w[..] == claims.0[..])
+    {
         return;
     }
     queue.write_buffer(&buffer.0, 0, bytemuck::cast_slice(&claims.0[..]));
@@ -885,10 +890,7 @@ fn prepare_view_bind(
     commands.insert_resource(GxLightBind(render_device.create_bind_group(
         "static_gx_light",
         &layout,
-        &BindGroupEntries::sequential((
-            light.0.as_entire_binding(),
-            claims.0.as_entire_binding(),
-        )),
+        &BindGroupEntries::sequential((light.0.as_entire_binding(), claims.0.as_entire_binding())),
     )));
 }
 
@@ -946,16 +948,28 @@ fn prepare_torch_bind(
         }
         // Rebuild in place — one `Res` write instead of a deferred `insert_resource` per frame.
         *cached = GxTorchBind {
-            group: build_torch_bind(&pipes, &pipeline_cache, &render_device, gpu_image,
-                targets.sampler(), &table),
+            group: build_torch_bind(
+                &pipes,
+                &pipeline_cache,
+                &render_device,
+                gpu_image,
+                targets.sampler(),
+                &table,
+            ),
             table,
             texture,
         };
         return;
     }
     commands.insert_resource(GxTorchBind {
-        group: build_torch_bind(&pipes, &pipeline_cache, &render_device, gpu_image,
-            targets.sampler(), &table),
+        group: build_torch_bind(
+            &pipes,
+            &pipeline_cache,
+            &render_device,
+            gpu_image,
+            targets.sampler(),
+            &table,
+        ),
         table,
         texture,
     });

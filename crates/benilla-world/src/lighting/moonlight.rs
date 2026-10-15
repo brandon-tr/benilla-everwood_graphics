@@ -73,7 +73,11 @@ pub(super) fn update_moonlight(
     } else {
         ([0.0; 3], 0.0)
     };
-    let confidence = if intensity > 0.0 { handover.moon_ramp() } else { 0.0 };
+    let confidence = if intensity > 0.0 {
+        handover.moon_ramp()
+    } else {
+        0.0
+    };
     // Write through `ResMut` only on a change, so the packer's own change check stays quiet.
     if frame.moon_light_dir != dir
         || frame.moon_light != intensity
@@ -92,9 +96,21 @@ mod tests {
     #[test]
     fn off_day_and_a_set_moon_are_exactly_zero() {
         // Midnight: sun far below, moon high.
-        assert_eq!(moon_light_intensity(0.0, -0.9, 0.8, 0.0), 0.0, "moonLight 0 is the null");
-        assert_eq!(moon_light_intensity(1.0, 0.7, 0.8, 0.0), 0.0, "no moonlight by day");
-        assert_eq!(moon_light_intensity(1.0, -0.9, -0.1, 0.0), 0.0, "a set moon lights nothing");
+        assert_eq!(
+            moon_light_intensity(0.0, -0.9, 0.8, 0.0),
+            0.0,
+            "moonLight 0 is the null"
+        );
+        assert_eq!(
+            moon_light_intensity(1.0, 0.7, 0.8, 0.0),
+            0.0,
+            "no moonlight by day"
+        );
+        assert_eq!(
+            moon_light_intensity(1.0, -0.9, -0.1, 0.0),
+            0.0,
+            "a set moon lights nothing"
+        );
         let full = moon_light_intensity(1.0, -0.9, 0.8, 0.0);
         assert!((full - MOON_LIGHT_BASE).abs() < 1e-6);
     }

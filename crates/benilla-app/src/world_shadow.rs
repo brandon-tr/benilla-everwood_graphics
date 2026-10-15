@@ -240,7 +240,9 @@ fn update_world_shadows(
     // Its own cvar rather than sharing `characterShadowRate`: this population barely moves, so it
     // tolerates a far lower rate than an animated crowd does, and a dial named for characters that
     // silently also governs the world is a trap for whoever reads this next.
-    let env_due = lane.env_rate.due(time.elapsed_secs(), video.world_shadow_rate);
+    let env_due = lane
+        .env_rate
+        .due(time.elapsed_secs(), video.world_shadow_rate);
     if let Some(handle) = lane.env_mesh.clone().filter(|_| env_due) {
         if let Some(mesh) = meshes.get_mut(&handle) {
             let (mut positions, mut indices) = take_mesh_buffers(mesh);
@@ -284,9 +286,9 @@ fn update_world_shadows(
         lane.static_mesh = Some(mesh);
         lane.static_rebuilt_at = None;
     }
-    let due = lane
-        .static_rebuilt_at
-        .map_or(true, |at| at.distance(frame.light_position) > STATIC_REBUILD_STEP);
+    let due = lane.static_rebuilt_at.map_or(true, |at| {
+        at.distance(frame.light_position) > STATIC_REBUILD_STEP
+    });
     if !due {
         return;
     }
@@ -346,8 +348,14 @@ fn update_world_shadows(
                     ShadowCaster,
                 ))
                 .id();
-            lane.cutout
-                .insert(bucket.texture_id, CutoutCaster { entity, mesh, material });
+            lane.cutout.insert(
+                bucket.texture_id,
+                CutoutCaster {
+                    entity,
+                    mesh,
+                    material,
+                },
+            );
         }
         let mesh_handle = lane.cutout[&bucket.texture_id].mesh.clone();
         if let Some(mesh) = meshes.get_mut(&mesh_handle) {

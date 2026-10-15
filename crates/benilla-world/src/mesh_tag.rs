@@ -418,14 +418,20 @@ mod tests {
         assert_eq!(lane_of(t), 6);
         assert_eq!(rig_of(t), 9);
         assert_eq!(t & ALPHA_MASK, alpha_bits(0.5));
-        assert_eq!(with_shade(t, 255, ext()) & MATTE_INDOOR_BIT, MATTE_INDOOR_BIT);
+        assert_eq!(
+            with_shade(t, 255, ext()) & MATTE_INDOOR_BIT,
+            MATTE_INDOOR_BIT
+        );
         assert_eq!(lane_of(with_shade(t, 255, ext())), 6);
         assert_eq!(shade_of(with_shade(t, 255, ext()), ext()), 255);
         assert_eq!(with_alpha(t, 0.25) & MATTE_INDOOR_BIT, MATTE_INDOOR_BIT);
         assert_eq!(lane_of(with_alpha(t, 0.25)), 6);
         assert_eq!(with_rig(t, 3) & MATTE_INDOOR_BIT, MATTE_INDOOR_BIT);
         assert_eq!(lane_of(with_rig(t, 3)), 6);
-        assert_eq!(with_interior_fog(t, true) & MATTE_INDOOR_BIT, MATTE_INDOOR_BIT);
+        assert_eq!(
+            with_interior_fog(t, true) & MATTE_INDOOR_BIT,
+            MATTE_INDOOR_BIT
+        );
         assert_eq!(lane_of(with_interior_fog(t, true)), 6);
         assert_eq!(with_exterior_reset(t) & MATTE_INDOOR_BIT, 0);
         assert_eq!(lane_of(with_exterior_reset(t)), 0);
@@ -440,7 +446,11 @@ mod tests {
         // An overshooting caller SATURATES rather than wrapping into the probe/rig neighbourhood.
         let over = with_matte_indoor(alpha_bits(1.0), 200);
         assert_eq!(lane_of(over), LANE_MAX);
-        assert_eq!(over & (RIG_MASK | SHADE_MASK), 0, "no spill into its neighbours");
+        assert_eq!(
+            over & (RIG_MASK | SHADE_MASK),
+            0,
+            "no spill into its neighbours"
+        );
         // Lane 0 under the flag is legal (the first tick of a ramp) and is NOT the exterior reset:
         // the bit is what routes the shader into the mix, the field is only its weight.
         let zero = with_matte_indoor(alpha_bits(1.0), 0);

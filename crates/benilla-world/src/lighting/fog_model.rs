@@ -46,11 +46,13 @@ impl Default for FogModelSetting {
 fn env_override() -> Option<FogModel> {
     static ENV: std::sync::OnceLock<Option<FogModel>> = std::sync::OnceLock::new();
     *ENV.get_or_init(|| {
-        std::env::var("WOW_FOGMODEL").ok().and_then(|v| match v.trim() {
-            "0" => Some(FogModel::Classic),
-            "1" => Some(FogModel::Modern),
-            _ => None,
-        })
+        std::env::var("WOW_FOGMODEL")
+            .ok()
+            .and_then(|v| match v.trim() {
+                "0" => Some(FogModel::Classic),
+                "1" => Some(FogModel::Modern),
+                _ => None,
+            })
     })
 }
 

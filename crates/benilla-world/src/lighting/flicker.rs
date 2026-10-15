@@ -193,9 +193,7 @@ impl FlameFlicker {
             (lo + span * (frac + jitter)).clamp(lo * 0.85, hi)
         };
         let phase = |k: u32| unit(mix(self.seed.wrapping_add(0x85eb_ca6b).wrapping_mul(k + 3)));
-        let s = |k: u32, frac: f32| {
-            (std::f32::consts::TAU * (f(k, frac) * t + phase(k))).sin()
-        };
+        let s = |k: u32, frac: f32| (std::f32::consts::TAU * (f(k, frac) * t + phase(k))).sin();
         // Three sines plus one smoothed value-noise term. The noise is what stops the sum reading
         // as a sum of sines — a pure harmonic stack has an audible-to-the-eye periodicity at the
         // beat of its partials, and a fire has none. It runs at the SLOW edge of the band so it
@@ -367,7 +365,10 @@ mod tests {
                         m - 1.0
                     );
                     let rate = (m - prev).abs() / dt;
-                    assert!(rate <= bound, "{kind:?} gain {gain}: {rate}/s over {bound}/s");
+                    assert!(
+                        rate <= bound,
+                        "{kind:?} gain {gain}: {rate}/s over {bound}/s"
+                    );
                     prev = m;
                 }
             }
@@ -398,7 +399,10 @@ mod tests {
             assert_eq!(a.at(t, 1.0).intensity, same.at(t, 1.0).intensity);
             apart = apart.max((a.at(t, 1.0).intensity - b.at(t, 1.0).intensity).abs());
         }
-        assert!(apart > 0.05, "two neighbouring candles ran in step: {apart}");
+        assert!(
+            apart > 0.05,
+            "two neighbouring candles ran in step: {apart}"
+        );
     }
 
     /// `fireFlicker 0` is the off switch — a hard identity, not merely a small wobble.

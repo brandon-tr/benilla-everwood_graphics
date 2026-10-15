@@ -67,7 +67,7 @@ mod sky_quality;
 // MONKEY (ao): optional screen-space ambient occlusion plugin.
 mod ssao;
 // MONKEY (skybox): the zoneSkyboxes cvar bridge.
-mod zone_skybox;
+mod character_shadow;
 mod entities;
 mod fishing_line;
 mod footprints;
@@ -90,7 +90,6 @@ mod net;
 mod npc_text;
 /// Ships in part (the FPS journal and the clocks it reads); the rest is `dev`.
 mod perf;
-mod character_shadow;
 mod pipe_warm;
 mod player;
 mod poi_marker;
@@ -111,6 +110,7 @@ mod screenshot;
 mod script_calls;
 mod shaders;
 mod shadow_core;
+mod zone_skybox;
 
 mod game_tip;
 mod name_persist;
@@ -131,6 +131,7 @@ pub(crate) mod test_support;
 mod text_filter;
 mod text_reshape;
 mod textinput;
+mod torch_shadow;
 mod transport;
 mod tutorial;
 mod ui_action;
@@ -202,7 +203,6 @@ mod ui_unit;
 mod ui_world_map;
 mod video;
 mod vplates;
-mod torch_shadow;
 mod weapon_trail;
 mod world_backdrop;
 mod world_shadow;

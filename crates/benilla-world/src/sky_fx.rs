@@ -90,7 +90,9 @@ pub(crate) fn glow_day_fade(sun_y: f32) -> f32 {
 /// The glow strength: the day fade, dimmed by the cloud cover over the sun (the same coverage the
 /// glare's occlusion reads) and by storm weather.
 pub(crate) fn glow_strength(sun_y: f32, cover_at_sun: f32, bcc: f32) -> f32 {
-    GLOW_GAIN * glow_day_fade(sun_y) * (1.0 - 0.8 * cover_at_sun.clamp(0.0, 1.0))
+    GLOW_GAIN
+        * glow_day_fade(sun_y)
+        * (1.0 - 0.8 * cover_at_sun.clamp(0.0, 1.0))
         * (1.0 - 0.85 * bcc.clamp(0.0, 1.0))
 }
 
@@ -100,8 +102,7 @@ impl Plugin for SkyFxPlugin {
     fn build(&self, app: &mut App) {
         // The library `sky.wgsl` and `cloud.wgsl` import; its embedded path is served by
         // `shaders::plugin`, this keeps it loaded so the import resolves.
-        let lib: Handle<Shader> =
-            bevy::asset::load_embedded_asset!(app, "shaders/sky_fx.wgsl");
+        let lib: Handle<Shader> = bevy::asset::load_embedded_asset!(app, "shaders/sky_fx.wgsl");
         std::mem::forget(lib);
         let frozen = std::env::var_os("WOW_CAPTURE").map(|_| {
             std::env::var("WOW_CAPTURE_SKY_T")
@@ -117,7 +118,10 @@ impl Plugin for SkyFxPlugin {
         let quality = SkyQuality(SkyQuality::env_override().unwrap_or(0));
         app.insert_resource(quality)
             // MONKEY (integration): the clock ticks before its readers (sky colours, cloud FX).
-            .add_systems(Update, tick_sky_clock.before(crate::lighting::LightingConsumeSet))
+            .add_systems(
+                Update,
+                tick_sky_clock.before(crate::lighting::LightingConsumeSet),
+            )
             // Beside the shared light buffer, ahead of the sky and cloud materials built after it.
             .add_systems(
                 Startup,
@@ -205,7 +209,10 @@ mod tests {
         for (n, rate) in tiles.iter().zip([0.011, 0.0043]) {
             assert_eq!(n.fract(), 0.0, "whole tiles per wrap");
             let actual = n * f64::from(tile) / SKY_CLOCK_WRAP_S;
-            assert!((actual / rate - 1.0).abs() < 0.05, "drift {actual} vs {rate}");
+            assert!(
+                (actual / rate - 1.0).abs() < 0.05,
+                "drift {actual} vs {rate}"
+            );
         }
     }
 

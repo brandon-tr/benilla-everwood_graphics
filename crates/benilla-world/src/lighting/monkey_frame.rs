@@ -127,9 +127,24 @@ impl MonkeyFrame {
         rows[1] = [s[0], s[1], s[2], self.sun_fog_strength];
         let e = self.end_fog_rgb;
         rows[2] = [e[0], e[1], e[2], self.end_fog_distance];
-        rows[3] = [model, self.sun_fog_angle, self.sun_fog_dir[0], self.sun_fog_dir[1]];
-        rows[4] = [self.wind_dir[0], self.wind_dir[1], self.wind_base_heading, self.wind_gust];
-        rows[5] = [self.wind_travel, self.sway_strength, self.grass_strength, self.tree_strength];
+        rows[3] = [
+            model,
+            self.sun_fog_angle,
+            self.sun_fog_dir[0],
+            self.sun_fog_dir[1],
+        ];
+        rows[4] = [
+            self.wind_dir[0],
+            self.wind_dir[1],
+            self.wind_base_heading,
+            self.wind_gust,
+        ];
+        rows[5] = [
+            self.wind_travel,
+            self.sway_strength,
+            self.grass_strength,
+            self.tree_strength,
+        ];
         rows[6] = [self.rain_rate, self.wetness, self.ripple_time_s, self.snow];
         let n = (self.bender_count as usize).min(MAX_BENDERS);
         rows[7] = [n as f32, time_of_day, night, self.moon_shadow_confidence];
@@ -205,7 +220,11 @@ mod tests {
         let body = src.split_once("struct MonkeyFrame {").unwrap().1;
         let body = body.split_once("\n}").unwrap().0;
         let mut rows = 0;
-        for line in body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("//")) {
+        for line in body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+        {
             if line.contains("array<vec4<f32>, 8>") {
                 rows += 8;
             } else if line.contains("vec4<f32>") {

@@ -23,9 +23,11 @@ pub(crate) fn rigid_model(path: &str) -> bool {
         .next()
         .unwrap_or(path)
         .to_ascii_lowercase();
-    ["rock", "stone", "boulder", "pebble", "gravel", "rubble", "cage", "prison"]
-        .iter()
-        .any(|term| name.contains(term))
+    [
+        "rock", "stone", "boulder", "pebble", "gravel", "rubble", "cage", "prison",
+    ]
+    .iter()
+    .any(|term| name.contains(term))
 }
 
 /// The WarcraftXL wind profile. Units are yards, seconds and degrees.
@@ -441,11 +443,17 @@ mod tests {
         // The player's strength scales the sway only; a storm swings it harder still.
         world.insert_resource(FoliageWindStrength::from_cvar(2.0));
         world.run_system_once(update_wind).unwrap();
-        assert_eq!(world.resource::<MonkeyFrame>().pack(0.5, 0.0)[5][1..], [2.0, 1.0, 1.0]);
+        assert_eq!(
+            world.resource::<MonkeyFrame>().pack(0.5, 0.0)[5][1..],
+            [2.0, 1.0, 1.0]
+        );
         world.resource_mut::<WeatherState>().sky_density = 1.0;
         world.run_system_once(update_wind).unwrap();
         let sway = world.resource::<MonkeyFrame>().sway_strength;
-        assert!((sway - 2.0 * (1.0 + STORM_SWAY_GAIN)).abs() < 1.0e-6, "{sway}");
+        assert!(
+            (sway - 2.0 * (1.0 + STORM_SWAY_GAIN)).abs() < 1.0e-6,
+            "{sway}"
+        );
         world.insert_resource(FoliageWind(0));
         world.run_system_once(update_wind).unwrap();
         let rows = world.resource::<MonkeyFrame>().pack(0.5, 0.0);
@@ -466,7 +474,10 @@ mod tests {
         let p = WindProfile::default();
         for t0 in [10.0, 600.0, 36_000.0] {
             let d = integrate_travel(p, 0.0, t0, t0 + 1.0);
-            assert!(d > 0.0 && d < 2.2 * f64::from(p.base_speed), "t0={t0} d={d}");
+            assert!(
+                d > 0.0 && d < 2.2 * f64::from(p.base_speed),
+                "t0={t0} d={d}"
+            );
         }
     }
 }

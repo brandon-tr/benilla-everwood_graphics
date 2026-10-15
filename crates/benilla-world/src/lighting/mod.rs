@@ -17,8 +17,8 @@ pub mod fog_model; // MONKEY (fog): the Modern fog model's CPU half (MonkeyFrame
 pub use fog_model::FogModelSetting;
 mod lava_light; // MONKEY (lava light): magma surface fixtures and their independent gain
 mod moonlight; // GFX (moonlight): the moon as an additive night light (MonkeyFrame row 16)
-pub use moonlight::{moon_light_intensity, MoonLight, MOON_LIGHT_BASE};
 pub use lava_light::{LavaLight, LavaLightGain};
+pub use moonlight::{moon_light_intensity, MoonLight, MOON_LIGHT_BASE};
 mod prop_probes; // the per-instance interior-prop SH probe table (slot ↔ MeshTag payload)
 mod resolve; // the per-frame time-of-day sample into WowLighting + the WMO interior-fog crossfade
 mod sh; // the model SH light-probe coefficient math
@@ -31,22 +31,34 @@ pub use blob::LightBlob;
 // two types; the fixture itself still wears `DaylightFixture`.
 pub use daylight::set_window_split; // MONKEY (fix-daylight)
 pub use daylight::{
-    daylight_claims, daylight_intensity, daylight_lane, daylight_point_light, daylight_reach,
-    daylight_rooms, daylight_seeds, daylight_target, bleed_seeds, placement_openings, BleedFixture,
+    bleed_seeds,
+    daylight_claims,
+    daylight_intensity,
+    daylight_lane,
+    daylight_point_light,
+    daylight_reach,
+    daylight_rooms,
+    daylight_seeds,
+    daylight_target,
     // MONKEY (daylight: district sky rooms)
     district_sky_rooms,
+    placement_openings,
+    BleedFixture,
     BleedSeed,
-    DaylightFixture, DaylightHow, DaylightSeed, BLEED_K, MAX_DAYLIGHT_PER_PLACEMENT,
+    DaylightFixture,
+    DaylightHow,
+    DaylightSeed,
+    BLEED_K,
+    MAX_DAYLIGHT_PER_PLACEMENT,
 };
 // MONKEY (flame flicker): the component + the one route rule, so every spawn lane files a flame
 // the same way and the packer has a single function to evaluate.
 pub use flicker::{flame_kind_for, flicker_seed, FlameFlicker, FlameKind, FlickerMod};
 pub use global_light::{
-    interior_reach, m2_light_reach, new_shared_light_buffer, DynamicInteriors, FireLightGain,
-    ClaimFade, LightLane, LightLitRooms, LightReach, LightRooms, RoomClaimTable,
-    ResolvedPointLight, ResolvedPointLights, SharedLightBuffer,
-    ShadowDistance, ShadowFilterGaussian, ShadowProxyLight, SyntheticFireLight,
-    WorldShadowActive,
+    interior_reach, m2_light_reach, new_shared_light_buffer, ClaimFade, DynamicInteriors,
+    FireLightGain, LightLane, LightLitRooms, LightReach, LightRooms, ResolvedPointLight,
+    ResolvedPointLights, RoomClaimTable, ShadowDistance, ShadowFilterGaussian, ShadowProxyLight,
+    SharedLightBuffer, SyntheticFireLight, WorldShadowActive,
 };
 // MONKEY (moon shadows): the night directional-shadow strength dial (`moonShadowStrength`), the
 // one resource the settings registry writes for this feature (`0` = the pre-feature night render),

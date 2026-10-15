@@ -361,13 +361,7 @@ pub(super) fn attach_ground_fx_models(
                     plan.school,
                     dm.lights.iter().find_map(|l| l.spell.map(|fx| fx.kind)),
                 );
-                super::spawn_area_spell_light(
-                    &mut commands,
-                    &dm.lights,
-                    kind,
-                    anchor,
-                    plan.radius,
-                );
+                super::spawn_area_spell_light(&mut commands, &dm.lights, kind, anchor, plan.radius);
                 continue; // no one-shot clock and no flash — the area object owns both ends
             }
             // MONKEY (spell light): the IMPACT flash. A dest-anchored effect is the one lane whose

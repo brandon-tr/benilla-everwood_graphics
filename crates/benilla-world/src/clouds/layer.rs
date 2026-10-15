@@ -61,7 +61,9 @@ pub struct CloudFxKey {
 
 impl From<&CloudExt> for CloudFxKey {
     fn from(e: &CloudExt) -> Self {
-        Self { high: e.fx.x >= 1.5 }
+        Self {
+            high: e.fx.x >= 1.5,
+        }
     }
 }
 

@@ -20,10 +20,6 @@ mod tables;
 pub use atmosphere::Atmosphere;
 pub use fog_band::{FogBand, FogBandCatalog, FOG_BANDS_PER_PARAM};
 // MONKEY (leftovers): + the 0x8 / 0x10 flags.
-pub use skybox::{
-    SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FORCE_SUN_SHAFTS, SKYBOX_FULL_DAY,
-    SKYBOX_KEEP_CELESTIAL, SKYBOX_NO_SUN_FOG,
-};
 use atmosphere::{
     FB_CLOUD_DENSITY, FB_FOG_END, FB_FOG_START_MULT, IB_AMBIENT, IB_CLOUD_GBASE, IB_CLOUD_SLOPE,
     IB_CLOUD_SUN, IB_DIFFUSE, IB_FOG_COLOR, IB_OCEAN_DEEP, IB_OCEAN_SHALLOW, IB_RIVER_DEEP,
@@ -31,6 +27,10 @@ use atmosphere::{
     LP_OCEAN_SHALLOW_ALPHA, LP_SKYBOX, LP_WATER_DEEP_ALPHA, LP_WATER_SHALLOW_ALPHA,
 };
 pub use atmosphere::{ZERO_KEY_COLOR, ZERO_KEY_SCALAR};
+pub use skybox::{
+    SkyboxDef, ZoneSkybox, SKYBOX_FOG_BLEND, SKYBOX_FORCE_SUN_SHAFTS, SKYBOX_FULL_DAY,
+    SKYBOX_KEEP_CELESTIAL, SKYBOX_NO_SUN_FOG,
+};
 use tables::{band_schema, load_bands, load_float_bands, sample_color, sample_float, Band, DAY};
 
 const LIGHT: &str = "DBFilesClient\\Light.dbc";

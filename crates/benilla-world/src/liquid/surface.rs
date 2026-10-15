@@ -379,9 +379,14 @@ pub(super) fn setup_liquid(
     // the time anything draws — the same path terrain and the models take.
     // Read once at setup; only frozen water captures consume this override.
     let capture_time = if std::env::var_os("WOW_CAPTURE").is_some() {
-        std::env::var("WOW_CAPTURE_WATER_T").ok().and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(0.0)
-    } else { 0.0 };
+        std::env::var("WOW_CAPTURE_WATER_T")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
     let deterministic = crate::dev_state::deterministic_run();
     let mut assets = LiquidAssets::default();
     for &(kind, dir, stem, count) in FRAME_SETS {

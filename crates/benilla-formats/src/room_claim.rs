@@ -333,8 +333,7 @@ pub const CLAIM_EXT_SHELL_YD: f32 = 96.0;
 /// groups trivially are (the exterior lane never draws them); an exterior group only at building
 /// scale (see [`CLAIM_EXT_SHELL_YD`]).
 pub fn claimable_by_box(g: &WmoGroupInfo) -> bool {
-    g.interior
-        || (0..2).all(|a| (g.bbox_max[a] - g.bbox_min[a]) <= CLAIM_EXT_SHELL_YD)
+    g.interior || (0..2).all(|a| (g.bbox_max[a] - g.bbox_min[a]) <= CLAIM_EXT_SHELL_YD)
 }
 
 /// MONKEY (ext-class night law): is this group EXTERIOR-class but at BUILDING scale — an inn's
@@ -666,7 +665,10 @@ mod tests {
             g(false, [-100.0, -100.0, -10.0], [100.0, 100.0, 40.0]),
         ];
         assert!(enclosed_by_building_shell(&groups, 0));
-        assert!(!enclosed_by_building_shell(&groups, 1), "a shell is not a room");
+        assert!(
+            !enclosed_by_building_shell(&groups, 1),
+            "a shell is not a room"
+        );
         assert!(
             !enclosed_by_building_shell(&groups, 2),
             "only the DISTRICT shell holds it, and that is not a building"
@@ -686,7 +688,10 @@ mod tests {
             g(true, [0.0, 0.0, 0.0], [10.0, 10.0, 5.0]),
             g(false, [-5.0, -5.0, -1.0], [52.0, 27.0, 2.3]),
         ];
-        assert!(enclosed_by_building_shell(&tight, 0), "centre z 2.5 vs shell top 2.3 + 0.5");
+        assert!(
+            enclosed_by_building_shell(&tight, 0),
+            "centre z 2.5 vs shell top 2.3 + 0.5"
+        );
     }
 
     /// A quad portal in the x = 5 plane, spanning y 0..2, z 0..3.
@@ -794,8 +799,16 @@ mod tests {
         ];
         let (verts, infos) = one_portal();
         let refs = [
-            WmoPortalRef { portal: 0, group: 1, side: 1 },
-            WmoPortalRef { portal: 0, group: 0, side: -1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
         ];
         let slices = [(0u16, 1u16), (1u16, 1u16)];
         let portals = PortalGraph {
@@ -806,7 +819,10 @@ mod tests {
         };
         // 3 yd short of the doorway (x = 5), reach 8 ⇒ 5 yd of reach left on the far side.
         let c = room_claims(&groups, portals, [2.0, 1.0, 1.0], 8.0, &[]);
-        assert_eq!(c[0].fade_radius, 0.0, "a containment claim is HARD: weight 1 everywhere");
+        assert_eq!(
+            c[0].fade_radius, 0.0,
+            "a containment claim is HARD: weight 1 everywhere"
+        );
         assert_eq!(c[0].hops, 0);
         let door = c[1];
         assert_eq!(door.how, ClaimHow::Portal);
@@ -815,9 +831,18 @@ mod tests {
         // sqrt(0 + 1 + 1.5^2) = 1.803.
         assert_eq!(door.fade_center, [5.0, 1.0, 1.5]);
         assert!((door.fade_slack - 1.802_775).abs() < 1e-4, "{door:?}");
-        assert!((door.distance - 3.0).abs() < 1e-5, "closest point on the quad, not its centre");
-        assert!((door.fade_radius - 5.0).abs() < 1e-5, "reach 8 minus the 3 yd spent");
-        assert_eq!(door.fade_entry, 1.0, "a first hop is at full weight in its own doorway");
+        assert!(
+            (door.distance - 3.0).abs() < 1e-5,
+            "closest point on the quad, not its centre"
+        );
+        assert!(
+            (door.fade_radius - 5.0).abs() < 1e-5,
+            "reach 8 minus the 3 yd spent"
+        );
+        assert_eq!(
+            door.fade_entry, 1.0,
+            "a first hop is at full weight in its own doorway"
+        );
 
         // The floor on the fade: a fixture that only just reaches the doorway must still FADE
         // there, not step. Reach 3.0 leaves 0 yd, and a 0-yard smoothstep is the hard edge again.
@@ -838,43 +863,97 @@ mod tests {
             g(true, [15.0, -5.0, 0.0], [25.0, 5.0, 6.0]),
         ];
         let verts = vec![
-            [5.0, -2.5, 0.0], [5.0, 2.5, 0.0], [5.0, 2.5, 6.0], [5.0, -2.5, 6.0],
-            [15.0, 0.0, 0.0], [15.0, 2.0, 0.0], [15.0, 2.0, 3.0], [15.0, 0.0, 3.0],
+            [5.0, -2.5, 0.0],
+            [5.0, 2.5, 0.0],
+            [5.0, 2.5, 6.0],
+            [5.0, -2.5, 6.0],
+            [15.0, 0.0, 0.0],
+            [15.0, 2.0, 0.0],
+            [15.0, 2.0, 3.0],
+            [15.0, 0.0, 3.0],
         ];
         let infos = vec![
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, -5.0] },
-            WmoPortalInfo { start_vertex: 4, count: 4, plane: [1.0, 0.0, 0.0, -15.0] },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, -5.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 4,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, -15.0],
+            },
         ];
         let refs = [
-            WmoPortalRef { portal: 0, group: 1, side: 1 },
-            WmoPortalRef { portal: 0, group: 0, side: -1 },
-            WmoPortalRef { portal: 1, group: 2, side: 1 },
-            WmoPortalRef { portal: 1, group: 1, side: -1 },
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 2,
+                side: 1,
+            },
+            WmoPortalRef {
+                portal: 1,
+                group: 1,
+                side: -1,
+            },
         ];
         let slices = [(0u16, 1u16), (1u16, 2u16), (3u16, 1u16)];
-        let portals = PortalGraph { vertices: &verts, infos: &infos, refs: &refs, slices: &slices };
+        let portals = PortalGraph {
+            vertices: &verts,
+            infos: &infos,
+            refs: &refs,
+            slices: &slices,
+        };
         assert!((portal_area(&portals, 0).unwrap() - 30.0).abs() < 1e-3);
         assert!((portal_area(&portals, 1).unwrap() - 6.0).abs() < 1e-3);
         let c = room_claims(&groups, portals, [2.0, 0.0, 1.0], 20.0, &[]);
         assert_eq!(
-            c.iter().map(|c| (c.group, c.how, c.hops)).collect::<Vec<_>>(),
+            c.iter()
+                .map(|c| (c.group, c.how, c.hops))
+                .collect::<Vec<_>>(),
             vec![
                 (0, ClaimHow::Contains, 0),
                 (1, ClaimHow::Split, 0),
                 (2, ClaimHow::Portal, 1),
             ],
         );
-        assert_eq!(c[1].fade_radius, 0.0, "a split is HARD — weight 1 across the far half");
-        assert_eq!(c[2].fade_entry, 1.0, "…so the door off it is a FIRST hop at full entry");
+        assert_eq!(
+            c[1].fade_radius, 0.0,
+            "a split is HARD — weight 1 across the far half"
+        );
+        assert_eq!(
+            c[2].fade_entry, 1.0,
+            "…so the door off it is a FIRST hop at full entry"
+        );
         // Under the bar the same portal is an ordinary doorway again: g1 fades, g2 is hop TWO.
         let small = vec![
-            [5.0, -1.0, 0.0], [5.0, 1.0, 0.0], [5.0, 1.0, 3.0], [5.0, -1.0, 3.0],
-            [15.0, 0.0, 0.0], [15.0, 2.0, 0.0], [15.0, 2.0, 3.0], [15.0, 0.0, 3.0],
+            [5.0, -1.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [5.0, 1.0, 3.0],
+            [5.0, -1.0, 3.0],
+            [15.0, 0.0, 0.0],
+            [15.0, 2.0, 0.0],
+            [15.0, 2.0, 3.0],
+            [15.0, 0.0, 3.0],
         ];
-        let portals = PortalGraph { vertices: &small, ..portals };
+        let portals = PortalGraph {
+            vertices: &small,
+            ..portals
+        };
         let c = room_claims(&groups, portals, [2.0, 0.0, 1.0], 20.0, &[]);
         assert_eq!(
-            c.iter().map(|c| (c.group, c.how, c.hops)).collect::<Vec<_>>(),
+            c.iter()
+                .map(|c| (c.group, c.how, c.hops))
+                .collect::<Vec<_>>(),
             vec![
                 (0, ClaimHow::Contains, 0),
                 (1, ClaimHow::Portal, 1),
@@ -895,18 +974,48 @@ mod tests {
             g(true, [15.0, -5.0, 0.0], [25.0, 5.0, 6.0]),
         ];
         let verts = vec![
-            [5.0, 0.0, 0.0], [5.0, 2.0, 0.0], [5.0, 2.0, 3.0], [5.0, 0.0, 3.0],
-            [15.0, 0.0, 0.0], [15.0, 2.0, 0.0], [15.0, 2.0, 3.0], [15.0, 0.0, 3.0],
+            [5.0, 0.0, 0.0],
+            [5.0, 2.0, 0.0],
+            [5.0, 2.0, 3.0],
+            [5.0, 0.0, 3.0],
+            [15.0, 0.0, 0.0],
+            [15.0, 2.0, 0.0],
+            [15.0, 2.0, 3.0],
+            [15.0, 0.0, 3.0],
         ];
         let infos = vec![
-            WmoPortalInfo { start_vertex: 0, count: 4, plane: [1.0, 0.0, 0.0, -5.0] },
-            WmoPortalInfo { start_vertex: 4, count: 4, plane: [1.0, 0.0, 0.0, -15.0] },
+            WmoPortalInfo {
+                start_vertex: 0,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, -5.0],
+            },
+            WmoPortalInfo {
+                start_vertex: 4,
+                count: 4,
+                plane: [1.0, 0.0, 0.0, -15.0],
+            },
         ];
         let refs = [
-            WmoPortalRef { portal: 0, group: 1, side: 1 },  // g0 -> g1
-            WmoPortalRef { portal: 0, group: 0, side: -1 }, // g1 -> g0
-            WmoPortalRef { portal: 1, group: 2, side: 1 },  // g1 -> g2
-            WmoPortalRef { portal: 1, group: 1, side: -1 }, // g2 -> g1
+            WmoPortalRef {
+                portal: 0,
+                group: 1,
+                side: 1,
+            }, // g0 -> g1
+            WmoPortalRef {
+                portal: 0,
+                group: 0,
+                side: -1,
+            }, // g1 -> g0
+            WmoPortalRef {
+                portal: 1,
+                group: 2,
+                side: 1,
+            }, // g1 -> g2
+            WmoPortalRef {
+                portal: 1,
+                group: 1,
+                side: -1,
+            }, // g2 -> g1
         ];
         let slices = [(0u16, 1u16), (1u16, 2u16), (3u16, 1u16)];
         let portals = PortalGraph {
@@ -922,8 +1031,15 @@ mod tests {
             vec![(0, 0), (1, 1), (2, 2)],
             "one claim per room, in hop order"
         );
-        assert_eq!(c[2].fade_center[0], 15.0, "the SECOND door is what g2 fades from");
-        assert!((c[2].fade_radius - 7.0).abs() < 1e-5, "20 yd reach, 13 spent: {:?}", c[2]);
+        assert_eq!(
+            c[2].fade_center[0], 15.0,
+            "the SECOND door is what g2 fades from"
+        );
+        assert!(
+            (c[2].fade_radius - 7.0).abs() < 1e-5,
+            "20 yd reach, 13 spent: {:?}",
+            c[2]
+        );
         // CONTINUITY at the second threshold: g2 must START at exactly the weight g1's own fade
         // has reached there, or the far room reads BRIGHTER than the near one across one plank.
         // g1's door is at (5, 1, 1.5) with slack 1.803 and radius 17; g2's is at (15, 1, 1.5),
