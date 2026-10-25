@@ -509,9 +509,9 @@ pub fn daylight_target(light: &WowLighting) -> ([f32; 3], f32, f32) {
     let ndotl = l.y.max(0.0);
     let mut target = [0.0f32; 3];
     let mut peak = 0.0f32;
-    for i in 0..3 {
-        target[i] = (light.ambient[i] + light.diffuse[i] * ndotl).clamp(0.0, 1.0);
-        peak = peak.max(target[i]);
+    for (i, value) in target.iter_mut().enumerate() {
+        *value = (light.ambient[i] + light.diffuse[i] * ndotl).clamp(0.0, 1.0);
+        peak = peak.max(*value);
     }
     let hue = if peak > 1e-4 {
         [target[0] / peak, target[1] / peak, target[2] / peak]
@@ -885,9 +885,9 @@ fn plan_clusters(points: &[[f32; 3]]) -> Vec<([f32; 3], [f32; 3])> {
     for (p, ci) in points.iter().zip(of_point.iter()) {
         let root = find(&mut parent, *ci);
         let e = boxes.entry(root).or_insert((*p, *p));
-        for a in 0..3 {
-            e.0[a] = e.0[a].min(p[a]);
-            e.1[a] = e.1[a].max(p[a]);
+        for (a, &value) in p.iter().enumerate() {
+            e.0[a] = e.0[a].min(value);
+            e.1[a] = e.1[a].max(value);
         }
     }
     let mut out: Vec<([f32; 3], [f32; 3])> = boxes.into_values().collect();
@@ -938,10 +938,12 @@ const WINDOW_SPLIT_MAX: usize = 6;
 /// stitch -- three vertices where two walls meet a floor), must stand no more than
 /// [`SEAM_MAX_Z_EXTENT`] tall (or it is the vertical seam of a whole party wall), and must fall in
 /// the same 1..24 yd size band the aperture seed uses.
+type BoundaryCluster = (u16, [f32; 3], [f32; 3], [f32; 3]);
+
 fn boundary_clusters(
     groups: &[WmoGroupInfo],
     batches: &[(u16, bool, &[[f32; 3]])],
-) -> Vec<(u16, [f32; 3], [f32; 3], [f32; 3])> {
+) -> Vec<BoundaryCluster> {
     // Per-group batch slices + each group's own vertex CENTROID, which is what "inward" points at.
     // The centroid rather than the authored box centre: a box centre can sit outside an L-shaped
     // room entirely, and a threshold's inward direction is the one thing this seed cannot get wrong
@@ -955,8 +957,8 @@ fn boundary_clusters(
         slot.push(positions);
         let acc = &mut sum[usize::from(gi)];
         for p in positions {
-            for a in 0..3 {
-                acc.0[a] += f64::from(p[a]);
+            for (a, &value) in p.iter().enumerate() {
+                acc.0[a] += f64::from(value);
             }
             acc.1 += 1;
         }
@@ -1135,9 +1137,9 @@ fn cluster_boxes(points: &[[f32; 3]]) -> Vec<([f32; 3], [f32; 3])> {
     for (p, ci) in points.iter().zip(of_point.iter()) {
         let root = find(&mut parent, *ci);
         let e = boxes.entry(root).or_insert((*p, *p));
-        for a in 0..3 {
-            e.0[a] = e.0[a].min(p[a]);
-            e.1[a] = e.1[a].max(p[a]);
+        for (a, &value) in p.iter().enumerate() {
+            e.0[a] = e.0[a].min(value);
+            e.1[a] = e.1[a].max(value);
         }
     }
     let mut out: Vec<([f32; 3], [f32; 3])> = boxes.into_values().collect();
@@ -1204,6 +1206,7 @@ pub fn daylight_modes() -> (bool, bool, bool) {
 /// contribute nothing. Removing the component takes it out of the packer's query outright and costs
 /// two archetype moves per game day. Everything else about the entity (its claims, its lane, its
 /// reach) is untouched, so dawn re-inserts and the claim set is exactly the one built at spawn.
+#[allow(clippy::type_complexity)] // Bevy queries include disjoint component filters.
 pub fn update_daylight_fixtures(
     mut commands: Commands,
     light: Res<WowLighting>,
@@ -1959,6 +1962,7 @@ fn bleed_intensity(lit: [f32; 3], r_eff: f32, k_fill: f32) -> ([f32; 3], f32) {
 /// remains is structural and harmless: `update_daylight_fixtures` INSERTS and REMOVES its `PointLight`
 /// through `Commands`, so on the single frame a daylight fixture switches on at dawn or off at dusk
 /// the bleed reading it is one frame stale. Its steady-state value is written in place and is current.
+#[allow(clippy::type_complexity)] // Bevy queries include disjoint component filters.
 pub fn update_bleed_fixtures(
     mut commands: Commands,
     knobs: Res<DynamicInteriors>,

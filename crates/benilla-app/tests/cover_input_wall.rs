@@ -101,6 +101,7 @@ const VERDICTS: &[(&str, Verdict)] = &[
     ("PresentMode", Plumbing),
     ("PrimaryWindow", Plumbing),
     ("RawHandleWrapper", Plumbing),
+    ("VideoMode", Plumbing),
     ("Window", Plumbing),
     ("WindowLevel", Plumbing),
     ("WindowMode", Plumbing),

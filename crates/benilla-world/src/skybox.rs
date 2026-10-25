@@ -535,7 +535,7 @@ fn build_skybox(
             }
             // MONKEY (skybox): stage 1 reads UV set B.
             if let Some(st) = sub
-                .stage1
+                .sky_stage1
                 .as_ref()
                 .filter(|s| s.uvs.len() == sub.positions.len())
             {
@@ -560,7 +560,7 @@ fn build_skybox(
             // MONKEY (skybox): a two-texture batch takes its own copies with stage 1 bound, so
             // the deduped one-texture materials stay as they were.
             if let Some(st) = sub
-                .stage1
+                .sky_stage1
                 .as_ref()
                 .filter(|s| s.uvs.len() == sub.positions.len())
             {
@@ -575,8 +575,8 @@ fn build_skybox(
                         h.id(),
                         |m| m.clone(),
                     )?;
-                    m.extension.stage1 = Vec4::new(mode, 0.0, 0.0, 0.0);
-                    m.extension.stage1_texture = tex1.clone();
+                    m.extension.sky_stage1 = Vec4::new(mode, 0.0, 0.0, 0.0);
+                    m.extension.sky_stage1_texture = tex1.clone();
                     Some(mats.materials().add(m))
                 };
                 let shared = pair.fade_blend == pair.steady;

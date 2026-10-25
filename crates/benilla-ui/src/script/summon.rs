@@ -1,7 +1,8 @@
 //! The four summon globals the `CONFIRM_SUMMON` dialog calls (`StaticPopup.lua:1336-1357`); 1.12
 //! has no `CancelSummon`, as declining sends nothing. The reference resolves the summoner
 //! (`0xb4e358`), zone (`0xb4e354`) and deadline (`0xb4e350`) at call time; the app pushes the
-//! answers each frame, so a name still in flight reads `""` and fills in on a later tick.
+//! answers each frame, so a name still in flight reads `""` and fills in on a later tick, and the
+//! summoner getter's miss asks inside its call ([`super::RecordAsk::Summoner`]).
 
 use mlua::Lua;
 
@@ -20,6 +21,14 @@ pub struct SummonConfirmUiState {
     pub time_left_ms: u32,
 }
 
+/// The summon's verb the host applies inside its call ([`super::ScriptCall::Summon`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummonCall {
+    /// `ConfirmSummon()` (`0x48b770`): `CMSG_SUMMON_RESPONSE` with the latched summoner
+    /// (`0x48b7d0`).
+    Confirm,
+}
+
 impl super::UiScript {
     /// Push the three resolved reads, each frame.
     pub fn set_summon_confirm(&mut self, state: SummonConfirmUiState) {
@@ -29,9 +38,9 @@ impl super::UiScript {
         }
     }
 
-    /// Drain the `ConfirmSummon()` calls, each a `CMSG_SUMMON_RESPONSE`.
+    /// The `ConfirmSummon()` calls a harness's VM kept ([`Self::keep_calls`]).
     pub fn take_summon_confirms(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().summon_confirms)
+        self.take_calls_like(&super::ScriptCall::Summon(SummonCall::Confirm)) as u32
     }
 }
 
@@ -42,8 +51,16 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "GetSummonConfirmSummoner",
         lua.create_function(|lua, ()| {
-            let model = lua.app_data_ref::<Model>().expect("model app_data");
-            lua.create_string(&model.summon_confirm.summoner)
+            let summoner = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.summon_confirm.summoner.clone()
+            };
+            // A miss is the lookup's ask with the callback `0x48b710` (`0x48b6e1`), inside the
+            // call.
+            if summoner.is_empty() {
+                super::calls::ask(lua, super::RecordAsk::Summoner)?;
+            }
+            lua.create_string(&summoner)
         })?,
     )?;
 
@@ -71,9 +88,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ConfirmSummon",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.summon_confirms += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::Summon(SummonCall::Confirm))
         })?,
     )?;
 

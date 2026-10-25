@@ -168,6 +168,7 @@ impl WorldLane {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn update_world_shadows(
     video: Res<VideoConfig>,
     time: Res<Time>,
@@ -179,7 +180,7 @@ fn update_world_shadows(
     mut cutout_materials: ResMut<Assets<CutoutShadowCasterMaterial>>,
     // The retained static world — `Option` because it exists only when the retained pass is armed.
     gx: Option<Res<StaticGx>>,
-    terrain: (Res<TerrainStreamer>, Res<Assets<AdtTile>>),
+    terrain: (Option<Res<TerrainStreamer>>, Option<Res<Assets<AdtTile>>>),
     // The terrain MCSH-suppression flag (this lane owns it).
     mut world_active: ResMut<WorldShadowActive>,
     parts: Query<
@@ -286,9 +287,9 @@ fn update_world_shadows(
         lane.static_mesh = Some(mesh);
         lane.static_rebuilt_at = None;
     }
-    let due = lane.static_rebuilt_at.map_or(true, |at| {
-        at.distance(frame.light_position) > STATIC_REBUILD_STEP
-    });
+    let due = lane
+        .static_rebuilt_at
+        .is_none_or(|at| at.distance(frame.light_position) > STATIC_REBUILD_STEP);
     if !due {
         return;
     }
@@ -304,14 +305,21 @@ fn update_world_shadows(
                 &mut indices,
             );
             // MONKEY (gfx): the directional map also occludes volumetric shafts; hills must cast.
-            let terrain_tris = append_terrain_torch_triangles(
-                &terrain.0,
-                &terrain.1,
-                frame.light_position,
-                frame.tall_reach,
-                &mut positions,
-                &mut indices,
-            );
+            let terrain_tris =
+                terrain
+                    .0
+                    .as_deref()
+                    .zip(terrain.1.as_deref())
+                    .map_or(0, |(terrain, tiles)| {
+                        append_terrain_torch_triangles(
+                            terrain,
+                            tiles,
+                            frame.light_position,
+                            frame.tall_reach,
+                            &mut positions,
+                            &mut indices,
+                        )
+                    });
             let tris = (indices.len() / 3) as u32;
             restore_mesh_buffers(mesh, positions, indices);
             lane.static_rebuilt_at = Some(frame.light_position);
@@ -424,9 +432,11 @@ mod streamed_refresh_tests {
     #[test]
     fn shadow_cache_refresh_runs_without_volumetric_fog_and_is_quiet_when_unchanged() {
         let mut app = App::new();
-        let mut video = VideoConfig::default();
-        video.volumetric_fog = 0;
-        video.world_shadows = false;
+        let video = VideoConfig {
+            volumetric_fog: 0,
+            world_shadows: false,
+            ..default()
+        };
         app.insert_resource(video)
             .init_resource::<StaticGx>()
             .init_resource::<WorldLane>()

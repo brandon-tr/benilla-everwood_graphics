@@ -453,6 +453,7 @@ impl CarriedLightMotion {
 /// carried light is a child of a moving parent, so its `GlobalTransform` is only this frame's once
 /// `Propagate` has run. `update_torch_shadows` reads the verdict in `Last`, i.e. later in the same
 /// frame — never one stale.
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 pub(crate) fn track_carried_light_motion(
     mut commands: Commands,
     time: Res<Time>,

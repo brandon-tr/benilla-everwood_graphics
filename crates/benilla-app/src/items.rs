@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use benilla_assets::LockRecover;
 use bevy::prelude::*;
 
 use benilla_protocol::{ItemInfo, ObjectFields};
@@ -12,7 +13,7 @@ use benilla_protocol::{ItemInfo, ObjectFields};
 use bevy::ecs::system::SystemParam;
 
 use crate::net::{ClientCommand, Guid, GuidIndex, NetCommands, ObjectStore, Objects};
-use crate::query_cache::QueryCache;
+use crate::query_cache::{Ask, QueryCache};
 
 /// An item or container entity's kind (`TYPEMASK_ITEM` / `TYPEMASK_CONTAINER`), with no model or
 /// pose. Unit readers filter it out (`Without<ItemObject>`): an item block's dwords overlap the
@@ -23,8 +24,8 @@ pub(crate) struct ItemObject {
     pub(crate) container: bool,
 }
 
-/// Spawn an item object into the index. The seed is never merged, so the create raises no field
-/// notify; a re-create of a live guid takes the handler's values path instead.
+/// Spawn an item object into the index with `fields` as its store, notifying nothing: the update
+/// pass runs its create hook or its watches ([`crate::net::FieldChanged`]).
 pub(crate) fn spawn_item(
     commands: &mut Commands,
     index: &mut GuidIndex,
@@ -102,7 +103,7 @@ impl Countdowns {
     }
 
     /// [`Self::enchant_remaining_ms`] floored to the second, for the snapshot feeds: a per-ms read
-    /// would fire `UNIT_INVENTORY_CHANGED` every frame while a timer runs.
+    /// would push a new snapshot every frame while a timer runs.
     pub(crate) fn enchant_remaining_display_ms(&self, slot: u32) -> Option<u64> {
         self.enchant_remaining_ms(slot).map(|ms| ms - ms % 1000)
     }
@@ -194,6 +195,19 @@ pub(crate) struct HeldTemplate {
     pub(crate) material: u32,
 }
 
+impl HeldTemplate {
+    pub(crate) fn of(i: &ItemInfo) -> Self {
+        Self {
+            display_info_id: i.display_info_id,
+            inventory_type: i.inventory_type,
+            sheath: i.sheath,
+            class: i.class,
+            subclass: i.subclass,
+            material: i.material,
+        }
+    }
+}
+
 /// `SpellItemEnchantment.dbc`, for the weapon glow ([`crate::entities::item_glow`]) and the
 /// tooltip enchant line ([`crate::ui_items`]). Optional: absent, neither draws.
 #[derive(Resource)]
@@ -221,13 +235,69 @@ pub(crate) fn enchant_lines(
     lines
 }
 
-/// `0x5da2c0`: already bound when `ITEM_FIELD_FLAGS & 1` is set or a live enchant slot names a
-/// binding `SpellItemEnchantment` row (`0x5da300` to `0x5da320`). The enchant cursor's bind
-/// question (gate `0x495d60`) and the tooltip's Soulbound line both read it. It reads the raw
-/// descriptor, not [`enchant_lines`]: Firestone and Orb of Fire both bind and print no line.
-pub(crate) fn already_bound(fields: &ObjectFields, cat: Option<&Enchants>) -> bool {
+/// The name behind a wrapped item's `ITEM_WRAPPED_BY` line: only an item carrying WRAPPED `0x8`
+/// takes the gift arm (`0x52b789`, `0x52e1b9`), which reads `ITEM_FIELD_GIFTCREATOR` (`0x52e32a`)
+/// and asks the name cache (`0x52e29d`). A zero guid, an unwrapped item or a name not yet
+/// answered gives `None`. Only reads: the lookup is the tooltip build's, which asks it
+/// (`crate::ui_items::feed::ask_item_build_lookups`).
+pub(crate) fn gift_creator_name(
+    fields: &ObjectFields,
+    names: &crate::names::NameCache,
+) -> Option<String> {
+    if fields.item_flags()? & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED == 0 {
+        return None;
+    }
+    let giver = fields.item_gift_creator()?;
+    names.resolve_player(giver, Ask::Read).map(str::to_string)
+}
+
+/// The creator's guid (`ITEM_FIELD_CREATOR`, asked at `0x52e1f4`) and, for a wrapped item only,
+/// the giver's (`0x52e28d`), 0 where nothing is asked: the tooltip waits on a nonzero one whose
+/// name is not in yet.
+pub(crate) fn creator_guids(fields: &ObjectFields) -> (u64, u64) {
+    let wrapped = fields
+        .item_flags()
+        .is_some_and(|f| f & benilla_protocol::messages::ITEM_DYNFLAG_WRAPPED != 0);
+    (
+        fields.item_creator().unwrap_or(0),
+        if wrapped {
+            fields.item_gift_creator().unwrap_or(0)
+        } else {
+            0
+        },
+    )
+}
+
+/// `0x5da2c0`: already bound when `ITEM_FIELD_FLAGS & 1` is set or, for an item whose record
+/// flags ([`record_flags`]) lack `0x2000` (`0x5da2e3`, a charter's), a live
+/// enchant slot names a binding `SpellItemEnchantment` row (`0x5da300` to `0x5da320`). The enchant
+/// cursor's bind question (gate `0x495d60`) and the tooltip's Soulbound line both read it. It
+/// reads the raw descriptor, not [`enchant_lines`]: Firestone and Orb of Fire both bind and print
+/// no line.
+pub(crate) fn already_bound(
+    fields: &ObjectFields,
+    record_flags: u32,
+    cat: Option<&Enchants>,
+) -> bool {
     fields.item_flags().is_some_and(|f| f & 0x1 != 0)
-        || (0..7).any(|slot| live_enchant(fields, slot, cat).is_some_and(|id| binds(id, cat)))
+        || (record_flags & benilla_protocol::messages::ITEM_FLAG_CHARTER == 0
+            && (0..7).any(|slot| live_enchant(fields, slot, cat).is_some_and(|id| binds(id, cat))))
+}
+
+/// The item record's PageText as `0x5d9e10` reads it (`[rec+0x19c]`): the cached template's, 0
+/// while it is not cached. Only read.
+pub(crate) fn record_page_text(items: &Items, entry: u32, guid: u64) -> u32 {
+    items
+        .template(entry, guid, Ask::Read)
+        .map_or(0, |t| t.page_text)
+}
+
+/// The item record's flags as `0x5da2a0` reads them: the cached template's, 0 while it is not
+/// cached. Only read.
+pub(crate) fn record_flags(items: &Items, entry: u32, guid: u64) -> u32 {
+    items
+        .template(entry, guid, Ask::Read)
+        .map_or(0, |t| t.flags)
 }
 
 /// One enchant slot as the bind checks read it (`0x495eec`): the raw id must be positive (`jl` at
@@ -275,20 +345,44 @@ fn enchant_lines_quiet(
 /// `ItemRandomProperties.dbc`, the random-suffix roll: a name suffix and tooltip enchant slots
 /// 2..6 (`0x52b7e0`). Optional: absent, names stay unsuffixed.
 #[derive(Resource)]
-pub(crate) struct RandomProperties(pub(crate) benilla_formats::RandomPropertyCatalog);
+pub(crate) struct RandomProperties {
+    pub(crate) catalog: benilla_formats::RandomPropertyCatalog,
+    /// `ITEM_SUFFIX_TEMPLATE` as `FrameScript_GetText` reads it off the VM (`0x5d8b78` →
+    /// `0x703bf0`), the empty string for a missing key; `None` until a VM has been read.
+    pub(crate) suffix_template: Option<String>,
+}
+
+impl RandomProperties {
+    pub(crate) fn new(catalog: benilla_formats::RandomPropertyCatalog) -> Self {
+        RandomProperties {
+            catalog,
+            suffix_template: None,
+        }
+    }
+}
 
 /// The item's display name, the reference's one formatter `0x5d8b00(entry, randomPropertyId)`:
-/// `ITEM_SUFFIX_TEMPLATE` (`"%s %s"`) with the roll's suffix, or the plain name when the id names
-/// no suffixed row. Every surface that shows an item name goes through here.
+/// `SStrPrintf(ITEM_SUFFIX_TEMPLATE, name, suffix)` (`0x5d8b78`-`0x5d8b8c`) for an id naming a
+/// suffixed row, else the plain name (`0x5d8ba5`). The template is the VM's
+/// ([`RandomProperties::suffix_template`]); before a VM has been read, the stock `"%s %s"`. Every
+/// surface that shows an item name goes through here.
 pub(crate) fn item_display_name(
     base: &str,
     random_property_id: i32,
     props: Option<&RandomProperties>,
 ) -> String {
-    match props.and_then(|p| p.0.get(random_property_id)) {
-        Some(row) => format!("{base} {}", row.suffix),
-        None => base.to_string(),
-    }
+    let Some((props, row)) = props.and_then(|p| Some((p, p.catalog.get(random_property_id)?)))
+    else {
+        return base.to_string();
+    };
+    let template = props.suffix_template.as_deref().unwrap_or("%s %s");
+    benilla_ui::strings::fill(
+        template,
+        &[
+            benilla_ui::strings::Arg::S(base),
+            benilla_ui::strings::Arg::S(&row.suffix),
+        ],
+    )
 }
 
 /// The tooltip lines of a roll, for a source with no item object: the reference (`0x52b7bf` to
@@ -315,7 +409,7 @@ pub(crate) fn random_property_views(
     enchants: Option<&Enchants>,
 ) -> std::collections::HashMap<u32, benilla_ui::script::RandomPropertyView> {
     props
-        .0
+        .catalog
         .iter()
         .map(|(id, row)| {
             (
@@ -336,6 +430,23 @@ pub(crate) struct RollCatalogs<'a> {
     pub(crate) enchants: Option<&'a Enchants>,
 }
 
+/// The two roll catalogs as a system reads them; absent in a world that loaded no DBCs.
+#[derive(SystemParam)]
+pub(crate) struct Rolls<'w> {
+    props: Option<Res<'w, RandomProperties>>,
+    enchants: Option<Res<'w, Enchants>>,
+}
+
+impl Rolls<'_> {
+    /// The catalogs, as [`RollCatalogs`].
+    pub(crate) fn get(&self) -> RollCatalogs<'_> {
+        RollCatalogs {
+            props: self.props.as_deref(),
+            enchants: self.enchants.as_deref(),
+        }
+    }
+}
+
 impl RollCatalogs<'_> {
     /// No DBC catalogs: the plain name and no suffix lines.
     #[cfg(test)]
@@ -352,7 +463,10 @@ impl RollCatalogs<'_> {
     /// [`random_property_lines`] for one id; the live surfaces read the engine's pushed table.
     #[cfg(test)]
     pub(crate) fn lines(&self, random_property_id: u32) -> Vec<benilla_ui::script::EnchantView> {
-        match self.props.and_then(|p| p.0.get(random_property_id as i32)) {
+        match self
+            .props
+            .and_then(|p| p.catalog.get(random_property_id as i32))
+        {
             Some(row) => random_property_lines(row, self.enchants),
             None => Vec::new(),
         }
@@ -362,18 +476,49 @@ impl RollCatalogs<'_> {
 /// Item templates by entry, asked once, and the enchant times queued for items not yet held.
 #[derive(Resource, Default)]
 pub(crate) struct Items {
-    /// A `None` answer is the server's unknown entry, cached so it is never re-asked.
+    /// A refused entry is the server's unknown one, read as such by
+    /// [`Items::template_answered_unknown`] and asked again by the next event's lookup
+    /// ([`QueryCache::refuse`]); it is never kept as a record.
     templates: QueryCache<u32, ItemInfo>,
     /// Landed since the last [`Self::take_fresh`]; pushed to the UI unprompted.
     fresh: Vec<u32>,
+    /// Records a refusal removed since the last [`Self::take_dropped`], which the UI's copy drops.
+    dropped: Vec<u32>,
     /// The reference's `PlayerPendingItemExpiration` list (`0x5ebd40`, at `CGPlayer_C + 0x1cc8`):
     /// `(guid, slot, seconds)` enchant updates for an item not yet held. `0x5ebde0` applies them
     /// when the item is set up (`0x5d8440`), counting seconds from then; they live as long as the
     /// player, here the session. `SMSG_ITEM_TIME_UPDATE` has no such list.
     pending_enchant_times: Vec<(u64, u32, u32)>,
-    /// `(guid, entry)` of our items whose entry changed to one the cache missed, each waiting on
-    /// the answer with the entry watcher's callback `0x5d96b0`, in request order.
-    entry_waiters: Vec<(u64, u32)>,
+    /// The callbacks the lookups that missed registered, each with the entry it waits on, in the
+    /// order they asked: an answer runs its entry's in that order (`0x55ba30` keeps each with no
+    /// dedupe for the dedupe flag 0, `dbcache/callbacks#callback-order`). A getter registers one
+    /// from a lookup, so the list is locked like the in-flight asks and registering takes `&self`.
+    callbacks: std::sync::Mutex<Vec<(u32, RecordCallback)>>,
+    /// The callbacks an answer ran that need the VM, `(entry, callback, found)` in the order
+    /// they ran: the equip replays ([`crate::ui_bind_confirm::replay_equip_records`]).
+    vm_callbacks: std::sync::Mutex<Vec<(u32, RecordCallback, bool)>>,
+}
+
+/// A callback an item record's lookup registered, which the record's answer runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecordCallback {
+    /// An item's create set-up (`0x5d8300` asks with `0x5d8390`, `0x5d8321`-`0x5d833f`).
+    SetUp(u64),
+    /// An item of ours whose entry changed to one the cache missed (`0x5d9652` asks with
+    /// `0x5d96b0`).
+    Entry(u64),
+    /// A loot row's record, asked by the copier (`0x4c1e77` with `0x4c2ac0`).
+    LootRow,
+    /// An item push's record (`0x491b05` with `0x491ee0`).
+    Push,
+    /// A trade getter call (`0x4c017f`, `0x4c0582` with `0x4c0340`), one per call.
+    Trade,
+    /// An ammo-slot getter call (`0x4c83bc`, `0x4c89cf` with `0x4c84f0`), one per call.
+    Ammo,
+    /// A swap parked on its record (`0x5e0db1` with `0x5e1020`).
+    Swap,
+    /// An auto-equip waiting on its record (`0x5e1603` with `0x5e17a0`).
+    AutoEquip,
 }
 
 impl Items {
@@ -384,22 +529,72 @@ impl Items {
         self.pending_enchant_times.push((guid, slot, seconds));
     }
 
-    /// An entry change asked for the record of `entry` with the callback `0x5d96b0`.
-    pub(crate) fn wait_for_entry(&mut self, guid: u64, entry: u32) {
-        self.entry_waiters.push((guid, entry));
+    /// A lookup of `entry` that missed registered `callback`.
+    pub(crate) fn wait(&self, entry: u32, callback: RecordCallback) {
+        self.callbacks.lock_recover().push((entry, callback));
     }
 
-    /// The answer for `entry` landed: the items whose entry change waited on it, in request order.
-    pub(crate) fn take_entry_waiters(&mut self, entry: u32) -> Vec<u64> {
+    /// The answer for `entry` landed, or refused it: the callbacks waiting on it, in the order
+    /// they asked, spent either way.
+    pub(crate) fn take_callbacks(&mut self, entry: u32) -> Vec<RecordCallback> {
+        let callbacks = self.callbacks.get_mut().unwrap_or_else(|e| e.into_inner());
         let mut taken = Vec::new();
-        self.entry_waiters.retain(|&(g, e)| {
+        callbacks.retain(|&(e, cb)| {
             let hit = e == entry;
             if hit {
-                taken.push(g);
+                taken.push(cb);
             }
             !hit
         });
         taken
+    }
+
+    /// Run `callback` for the record of `entry`, answered (`found`) or refused, with the VM.
+    pub(crate) fn run_with_vm(&self, entry: u32, callback: RecordCallback, found: bool) {
+        self.vm_callbacks
+            .lock_recover()
+            .push((entry, callback, found));
+    }
+
+    /// The callbacks [`Self::run_with_vm`] queued, in order, spent.
+    pub(crate) fn take_vm_callbacks(&self) -> Vec<(u32, RecordCallback, bool)> {
+        std::mem::take(&mut *self.vm_callbacks.lock_recover())
+    }
+
+    /// An entry change asked for the record of `entry` with the callback `0x5d96b0`.
+    pub(crate) fn wait_for_entry(&mut self, guid: u64, entry: u32) {
+        self.wait(entry, RecordCallback::Entry(guid));
+    }
+
+    /// A trade getter missed the cache on `entry` and asked with the callback `0x4c0340`.
+    pub(crate) fn wait_for_trade_record(&self, entry: u32) {
+        self.wait(entry, RecordCallback::Trade);
+    }
+
+    /// An ammo-slot getter missed the cache on `entry` and asked with the callback `0x4c84f0`.
+    pub(crate) fn wait_for_ammo_record(&self, entry: u32) {
+        self.wait(entry, RecordCallback::Ammo);
+    }
+
+    /// The trade getter calls waiting on `entry`, spent.
+    #[cfg(test)]
+    pub(crate) fn take_trade_waiters(&mut self, entry: u32) -> usize {
+        self.take_waiters(entry, RecordCallback::Trade)
+    }
+
+    /// The ammo-slot getter calls waiting on `entry`, spent.
+    #[cfg(test)]
+    pub(crate) fn take_ammo_waiters(&mut self, entry: u32) -> usize {
+        self.take_waiters(entry, RecordCallback::Ammo)
+    }
+
+    /// The answer for `entry` landed: how many callbacks of `kind` waited on it, which it spends.
+    #[cfg(test)]
+    pub(crate) fn take_waiters(&mut self, entry: u32, kind: RecordCallback) -> usize {
+        let callbacks = self.callbacks.get_mut().unwrap_or_else(|e| e.into_inner());
+        let before = callbacks.len();
+        callbacks.retain(|&(e, cb)| !(e == entry && cb == kind));
+        before - callbacks.len()
     }
 
     /// The item `guid` arrived: its queued enchant updates in arrival order, unlinked (`0x5ebde0`).
@@ -415,51 +610,77 @@ impl Items {
         taken
     }
 
-    /// The template for `entry` if known; a miss asks once per entry per connection (`guid` rides
-    /// along, `0` for template-only). A cached negative is also `None`, without a re-ask.
-    pub(crate) fn template(
-        &self,
-        entry: u32,
-        guid: u64,
-        commands: &NetCommands,
-    ) -> Option<&ItemInfo> {
-        self.templates.get_or_ask(entry, || {
-            debug!("items: asking template (entry {entry})");
-            let _ = commands.0.send(ClientCommand::ItemQuery { entry, guid });
+    /// The template for `entry` if known, read as `ask` says; an ask goes once while in flight
+    /// (`guid` rides along, `0` for template-only). A refused entry is also `None`.
+    pub(crate) fn template(&self, entry: u32, guid: u64, ask: Ask<'_>) -> Option<&ItemInfo> {
+        self.templates.read(entry, ask, |commands| {
+            Self::send_template(entry, guid, commands)
         })
     }
 
-    /// Whether the server answered `entry` as unknown, not still pending; the cast-fail redisplay
-    /// then shows the reference's `"UNKNOWN"` instead of waiting.
+    fn send_template(entry: u32, guid: u64, commands: &NetCommands) {
+        debug!("items: asking template (entry {entry})");
+        let _ = commands.0.send(ClientCommand::ItemQuery { entry, guid });
+    }
+
+    /// Whether the cache holds a record, a pending ask or a refusal for `entry`
+    /// ([`QueryCache::knows`]).
+    pub(crate) fn template_known(&self, entry: u32) -> bool {
+        self.templates.knows(entry)
+    }
+
+    /// Whether the cache answered `entry`, with a record or a refusal: the point at which a lookup's
+    /// callback has run, status 1 or 0.
+    pub(crate) fn template_answered(&self, entry: u32) -> bool {
+        self.templates.answered(entry)
+    }
+
+    /// Whether the server refused `entry`, not still pending; the cast-fail redisplay then shows
+    /// the reference's `"UNKNOWN"` instead of waiting (`0x6e29b0` runs on the status-0 callback and
+    /// finds no record, `0x6e2a49`).
     pub(crate) fn template_answered_unknown(&self, entry: u32) -> bool {
         self.templates.answered_unknown(entry)
     }
 
     /// The [`HeldTemplate`] view of [`Self::template`], asked template-only.
-    pub(crate) fn held(&self, entry: u32, commands: &NetCommands) -> Option<HeldTemplate> {
-        self.template(entry, 0, commands).map(|i| HeldTemplate {
-            display_info_id: i.display_info_id,
-            inventory_type: i.inventory_type,
-            sheath: i.sheath,
-            class: i.class,
-            subclass: i.subclass,
-            material: i.material,
-        })
+    pub(crate) fn held(&self, entry: u32, ask: Ask<'_>) -> Option<HeldTemplate> {
+        self.template(entry, 0, ask).map(HeldTemplate::of)
     }
 
-    /// [`Self::template`] without the ask: the cached record only.
-    pub(crate) fn template_cached(&self, entry: u32) -> Option<&ItemInfo> {
-        self.templates.get(entry)
-    }
-
-    /// Record a template answer (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`); `None` = unknown entry.
+    /// Record a template answer (`SMSG_ITEM_QUERY_SINGLE_RESPONSE`); `None` = a refusal.
     pub(crate) fn insert_template(&mut self, entry: u32, info: Option<ItemInfo>) {
-        if info.is_some() {
-            self.fresh.push(entry);
+        match info {
+            Some(info) => {
+                self.fresh.push(entry);
+                self.templates.insert(entry, info);
+            }
+            // A refusal moves the generation too: "still asking" to "unknown" is a display
+            // transition for the cast-fail redisplay.
+            None => {
+                if self.templates.refuse(entry) == crate::query_cache::Refused::Record {
+                    self.fresh.retain(|&id| id != entry);
+                    self.dropped.push(entry);
+                }
+            }
         }
-        // A negative answer moves the generation too: "still asking" to "answered unknown" is a
-        // display transition for the cast-fail redisplay.
-        self.templates.insert(entry, info);
+    }
+
+    /// The template store, the one [`crate::wdb`] saves.
+    pub(crate) fn template_store(&self) -> &QueryCache<u32, ItemInfo> {
+        &self.templates
+    }
+
+    pub(crate) fn template_store_mut(&mut self) -> &mut QueryCache<u32, ItemInfo> {
+        &mut self.templates
+    }
+
+    /// Drops every template, which the interface's copy drops too: another realm's file replaces
+    /// them.
+    pub(crate) fn forget_templates(&mut self) {
+        self.dropped
+            .extend(self.templates.iter().map(|(&entry, _)| entry));
+        self.fresh.clear();
+        self.templates.clear();
     }
 
     /// Bumped by every landed answer, for consumers besides the drain; the stand-in for the
@@ -470,15 +691,22 @@ impl Items {
 
     /// Every entry with a cached template.
     pub(crate) fn cached_template_ids(&self) -> Vec<u32> {
-        self.templates
-            .iter()
-            .filter_map(|(&id, t)| t.is_some().then_some(id))
-            .collect()
+        self.templates.iter().map(|(&id, _)| id).collect()
+    }
+
+    /// Whether a template landed, or a refusal removed a record, since the last drains.
+    pub(crate) fn any_fresh_or_dropped(&self) -> bool {
+        !self.fresh.is_empty() || !self.dropped.is_empty()
     }
 
     /// Drain the entries whose template landed since the last drain.
     pub(crate) fn take_fresh(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.fresh)
+    }
+
+    /// Drain the entries whose record a refusal removed since the last drain.
+    pub(crate) fn take_dropped(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.dropped)
     }
 
     /// World enter: release the ask-once latch and keep what the cache learned. An ask is marked
@@ -487,11 +715,19 @@ impl Items {
         self.templates.clear_pending();
     }
 
-    /// Disconnect: drop the in-flight asks and the queued enchant times, keep the templates. The
-    /// item objects and their countdowns go with the index's sweep.
+    /// Disconnect: drop the in-flight asks, the callbacks waiting on them or on the VM, and the
+    /// queued enchant times, keep the templates. The item objects and their countdowns go with
+    /// the index's sweep.
     pub(crate) fn clear_session(&mut self) {
         self.pending_enchant_times.clear();
-        self.entry_waiters.clear();
+        self.callbacks
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.vm_callbacks
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.templates.clear_pending();
     }
 }
@@ -569,22 +805,18 @@ pub(crate) fn test_spawn_item(
     e
 }
 
-/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` (vmangos `EquipmentSlots`).
+/// Any streamed object, straight into a test world: its guid indexed and its descriptor stored.
+#[cfg(test)]
+pub(crate) fn test_spawn_object(world: &mut World, guid: u64, fields: ObjectFields) -> Entity {
+    let e = world.spawn((Guid(guid), ObjectStore(fields))).id();
+    world.resource_mut::<GuidIndex>().0.insert(guid, e);
+    e
+}
+
+/// `EQUIPMENT_SLOT_MAINHAND` / `_OFFHAND` / `_RANGED` (vmangos `EquipmentSlots`).
 pub(crate) const EQUIPMENT_SLOT_MAINHAND: u8 = 15;
 pub(crate) const EQUIPMENT_SLOT_OFFHAND: u8 = 16;
-
-/// One equipment slot's item class; `None` while empty or its template is in flight.
-fn equipped_class(
-    store: &ObjectStore,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-    slot: u8,
-) -> Option<u8> {
-    let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
-    let entry = objects.object(guid).and_then(|o| o.object_entry())?;
-    Some(items.template(entry, guid, commands)?.class as u8)
-}
+pub(crate) const EQUIPMENT_SLOT_RANGED: u8 = 17;
 
 /// Whether the disarm flag is up (`UNIT_FIELD_FLAGS & UNIT_FLAG_DISARMED`), which hides one hand
 /// from the equipped-item search.
@@ -595,23 +827,8 @@ pub(crate) fn is_disarmed(store: &ObjectStore) -> bool {
 /// The equipment slot this character's disarm hides ([`crate::creature_anim::disarmed_hand`] over
 /// the raw inventory), for the action bar's equipped-item requirement (`0x5f0c50`) and the
 /// item-use refusal (`CGItem::Use` rung 15). `None` while the flag is down or neither hand holds
-/// a weapon.
+/// a weapon. The templates are only read, as the reference's item getters read them (`0x5d9f6d`).
 pub(crate) fn disarmed_equipment_slot(
-    store: &ObjectStore,
-    objects: &Objects,
-    items: &Items,
-    commands: &NetCommands,
-) -> Option<u8> {
-    if !is_disarmed(store) {
-        return None;
-    }
-    let main = equipped_class(store, objects, items, commands, EQUIPMENT_SLOT_MAINHAND);
-    let off = equipped_class(store, objects, items, commands, EQUIPMENT_SLOT_OFFHAND);
-    crate::creature_anim::disarmed_hand(main, off).map(|hand| EQUIPMENT_SLOT_MAINHAND + hand as u8)
-}
-
-/// [`disarmed_equipment_slot`] without the ask.
-pub(crate) fn disarmed_equipment_slot_cached(
     store: &ObjectStore,
     objects: &Objects,
     items: &Items,
@@ -622,7 +839,7 @@ pub(crate) fn disarmed_equipment_slot_cached(
     let class_of = |slot: u8| -> Option<u8> {
         let guid = store.0.player_inv_slot(slot).filter(|&g| g != 0)?;
         let entry = objects.object(guid).and_then(|o| o.object_entry())?;
-        Some(items.template_cached(entry)?.class as u8)
+        Some(items.template(entry, 0, Ask::Read)?.class as u8)
     };
     crate::creature_anim::disarmed_hand(
         class_of(EQUIPMENT_SLOT_MAINHAND),
@@ -712,9 +929,9 @@ mod tests {
         let (cmds, rx) = commands();
         let mut items = Items::default();
 
-        assert!(items.template(117, 0x42, &cmds).is_none());
+        assert!(items.template(117, 0x42, Ask::New(&cmds)).is_none());
         // Second copy of the same item: no second query.
-        assert!(items.template(117, 0x43, &cmds).is_none());
+        assert!(items.template(117, 0x43, Ask::New(&cmds)).is_none());
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::ItemQuery {
@@ -726,7 +943,9 @@ mod tests {
 
         items.insert_template(117, Some(info("Tough Jerky")));
         assert_eq!(
-            items.template(117, 0x43, &cmds).map(|i| i.name.as_str()),
+            items
+                .template(117, 0x43, Ask::New(&cmds))
+                .map(|i| i.name.as_str()),
             Some("Tough Jerky")
         );
     }
@@ -737,7 +956,7 @@ mod tests {
         let mut items = Items::default();
         let t0 = items.template_epoch();
 
-        assert!(items.template(117, 0x42, &cmds).is_none());
+        assert!(items.template(117, 0x42, Ask::New(&cmds)).is_none());
         assert_eq!(
             items.template_epoch(),
             t0,
@@ -859,19 +1078,51 @@ mod tests {
         assert!(gift_box.shows_open_line(ITEM_DYNFLAG_WRAPPED));
     }
 
+    /// `0x55bdf7`: an item key with its top bit set is a refusal. The waiters read unknown
+    /// (`template_answered_unknown`), nothing is kept, the reads between events never ask it
+    /// however often they run, and the next event's lookup does.
     #[test]
-    fn negative_template_answer_is_cached() {
+    fn a_refused_template_reads_unknown_and_only_the_next_event_asks_again() {
         let (cmds, rx) = commands();
         let mut items = Items::default();
 
-        assert!(items.template(9999, 0, &cmds).is_none());
-        let _ = rx.try_recv();
+        assert!(items.template(9999, 0, Ask::New(&cmds)).is_none());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ClientCommand::ItemQuery { entry: 9999, .. })
+        ));
+        assert!(!items.template_answered_unknown(9999), "still pending");
+        let before = items.template_epoch();
         items.insert_template(9999, None); // server: unknown entry
-        assert!(items.template(9999, 0, &cmds).is_none());
+        assert_ne!(
+            items.template_epoch(),
+            before,
+            "the redisplay counter moves"
+        );
+        assert!(items.template_answered_unknown(9999));
+        assert!(
+            items.template(9999, 0, Ask::Read).is_none(),
+            "and nothing is kept"
+        );
+        assert!(items.cached_template_ids().is_empty());
+
+        for _ in 0..600 {
+            assert!(items.template(9999, 0, Ask::New(&cmds)).is_none());
+        }
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Empty)),
-            "no re-ask"
+            "a read between events does not send"
         );
+
+        assert!(items.template(9999, 0, Ask::Event(&cmds)).is_none());
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(ClientCommand::ItemQuery { entry: 9999, .. })
+            ),
+            "the event's lookup does"
+        );
+        assert!(!items.template_answered_unknown(9999), "pending again");
     }
 
     #[test]
@@ -961,13 +1212,16 @@ mod tests {
         // A disconnect drops unarrived records and in-flight asks, and keeps the templates.
         let (cmds, rx) = commands();
         items.insert_template(117, Some(info("Tough Jerky")));
-        assert!(items.template(118, 0, &cmds).is_none()); // leaves 118 in flight
+        assert!(items.template(118, 0, Ask::New(&cmds)).is_none()); // leaves 118 in flight
         items.clear_session();
         assert!(items.take_enchant_times(0x43).is_empty());
-        assert!(items.template(117, 0, &cmds).is_some(), "templates survive");
+        assert!(
+            items.template(117, 0, Ask::New(&cmds)).is_some(),
+            "templates survive"
+        );
         // 118's ask was dropped with the writer, so it re-asks now.
         let _ = rx.try_recv();
-        assert!(items.template(118, 0, &cmds).is_none());
+        assert!(items.template(118, 0, Ask::New(&cmds)).is_none());
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientCommand::ItemQuery { entry: 118, .. })
@@ -1026,6 +1280,27 @@ mod tests {
         ObjectFields::from_pairs(&[(21, flags), (22, slot0)])
     }
 
+    /// The gift arm (`0x52e1b9`) names the gift creator of a wrapped item and no other: an
+    /// unwrapped item, a zero guid and a name not yet answered add no name.
+    #[test]
+    fn only_a_wrapped_item_names_its_gift_creator() {
+        let mut names = crate::names::NameCache::default();
+        let giver =
+            |flags: u32, guid: u32| ObjectFields::from_pairs(&[(21, flags), (12, guid), (13, 0)]);
+        names.insert_player(5, "Santa".to_string(), None);
+        assert_eq!(gift_creator_name(&giver(0, 5), &names), None, "unwrapped");
+        assert_eq!(gift_creator_name(&giver(0x8, 0), &names), None, "no giver");
+        assert_eq!(
+            gift_creator_name(&giver(0x8, 6), &names),
+            None,
+            "not answered"
+        );
+        assert_eq!(
+            gift_creator_name(&giver(0x8, 5), &names).as_deref(),
+            Some("Santa")
+        );
+    }
+
     /// `0x5da2c0`: the Firestone shape binds and prints no line, so a predicate read off
     /// [`enchant_lines`] would call it unbound.
     #[test]
@@ -1033,36 +1308,45 @@ mod tests {
         let cat = catalog();
         let cat = Some(&cat);
         assert!(
-            already_bound(&item(0x1, 0), cat),
+            already_bound(&item(0x1, 0), 0, cat),
             "ITEM_FIELD_FLAGS & 1 — already soulbound"
         );
         assert!(
-            !already_bound(&item(0x0, 0), cat),
+            !already_bound(&item(0x0, 0), 0, cat),
             "no flag, no enchant — the plain BoE"
         );
         assert!(
-            !already_bound(&item(0x8, 0), cat),
+            !already_bound(&item(0x8, 0), 0, cat),
             "a WRAPPED gift is not a bound item — the bit is 0x1, not any bit"
         );
         assert!(
-            already_bound(&item(0x0, 11), cat),
+            already_bound(&item(0x0, 11), 0, cat),
             "a live enchant slot naming a binding row"
         );
         assert!(
-            !already_bound(&item(0x0, 13), cat),
+            !already_bound(&item(0x0, 13), 0, cat),
             "a non-binding enchant leaves the item unbound"
         );
         assert!(
-            !already_bound(&item(0x0, 99), cat),
+            !already_bound(&item(0x0, 99), 0, cat),
             "an id that names no row binds nothing (the reference's `testl` after the table load)"
         );
         assert!(
-            !already_bound(&item(0x0, 11), None),
+            !already_bound(&item(0x0, 11), 0, None),
             "no catalog loaded — the enchant half cannot answer, and does not guess"
+        );
+        let charter = benilla_protocol::messages::ITEM_FLAG_CHARTER;
+        assert!(
+            !already_bound(&item(0x0, 11), charter, cat),
+            "a record flagged 0x2000 skips the enchant leg (0x5da2e3)"
+        );
+        assert!(
+            already_bound(&item(0x1, 11), charter, cat),
+            "but not the instance's own bound bit"
         );
         // The case that pins the design: bound, and no line.
         assert!(
-            already_bound(&item(0x0, 12), cat),
+            already_bound(&item(0x0, 12), 0, cat),
             "the Firestone shape — binds AND hides its line"
         );
         assert!(

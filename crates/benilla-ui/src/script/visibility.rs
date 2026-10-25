@@ -218,8 +218,8 @@ fn leave_mouse_index(model: &mut Model, h: FrameHandle) -> Option<Option<u32>> {
 /// The removal tail's capture clear (`0x764ca5`–`0x764cad`): a frame leaving the mouse index
 /// that holds the capture slot (`root+0x80`) empties it. `0x766420` delivers a release to the
 /// capture alone, so the press this frame took reaches no one: no `OnMouseUp`, no click, and no
-/// world click, since the world hook `0x492b50` runs only in freelook. The button stays held
-/// until its release, which then finds nothing.
+/// world click, since the world hook `0x492b50` sends a release to the world only in freelook.
+/// The button stays held until its release, which then finds nothing.
 fn drop_capture(model: &mut Model, h: FrameHandle) {
     if model.mouse_capture == Some(h) {
         model.mouse_capture = None;
@@ -275,6 +275,7 @@ fn notify(lua: &Lua, h: FrameHandle, visible: bool) {
         record(lua, fired);
     }
     super::editbox::visibility_focus(lua, h, visible);
+    super::messageframe::on_visibility(lua, h, visible);
 }
 
 /// Open or close a frame's load window: the pre-load hook's `+0x114 = 1` (`0x7697c2`) and the

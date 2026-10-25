@@ -129,30 +129,76 @@ fn read_loose(index: &benilla_formats::LooseIndex, req: &str) -> Option<Option<V
     Some(file.read())
 }
 
-/// The player's patch chain, opened once per process and shared by every VM. Process-local, not
-/// the one [`benilla_assets`] holds: tests, the addon harness and a bare `UiScript` load the
-/// interface with no Bevy world to ask.
-fn chain() -> Option<&'static Chain> {
+/// What opening the chain has to say, kept until something can log it.
+enum Notice {
+    Warn(String),
+    Error(String),
+}
+
+/// The chain `data` names, and the one thing to say if there is none.
+fn open(data: Option<std::path::PathBuf>) -> (Option<Chain>, Option<Notice>) {
+    let Some(data) = data else {
+        return (
+            None,
+            Some(Notice::Warn(
+                "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
+                 file it lists, is absent off the player's install, so its windows do not \
+                 exist and addons that call their globals will raise"
+                    .to_string(),
+            )),
+        );
+    };
+    match benilla_formats::open_chain(&data) {
+        Ok(chain) => (Some(chain), None),
+        Err(e) => (
+            None,
+            Some(Notice::Error(format!(
+                "ui_script: opening the patch chain to source the reference UI: {e:#}"
+            ))),
+        ),
+    }
+}
+
+/// The notice of the open, until [`chain`] logs it.
+static NOTICE: std::sync::Mutex<Option<Notice>> = std::sync::Mutex::new(None);
+
+/// The patch chain, opened once per process, logging nothing: the window is born before the log
+/// plugin exists ([`boot_client_locale`]), where a message would be dropped.
+fn chain_quiet() -> Option<&'static Chain> {
     static CHAIN: OnceLock<Option<Chain>> = OnceLock::new();
     CHAIN
         .get_or_init(|| {
-            let Some(data) = benilla_formats::wow_data() else {
-                warn!(
-                    "ui_script: no client data — the stock interface, `FrameXML.toc` and every \
-                     file it lists, is absent off the player's install, so its windows do not \
-                     exist and addons that call their globals will raise"
-                );
-                return None;
-            };
-            match benilla_formats::open_chain(&data) {
-                Ok(chain) => Some(chain),
-                Err(e) => {
-                    error!("ui_script: opening the patch chain to source the reference UI: {e:#}");
-                    None
-                }
-            }
+            let (chain, notice) = open(benilla_formats::wow_data());
+            *NOTICE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = notice;
+            chain
         })
         .as_ref()
+}
+
+/// The player's patch chain, opened once per process and shared by every VM. Process-local, not
+/// the one [`benilla_assets`] holds: tests, the addon harness and a bare `UiScript` load the
+/// interface with no Bevy world to ask. The open's one message is logged here, the first time
+/// anything past start-up asks.
+fn chain() -> Option<&'static Chain> {
+    let chain = chain_quiet();
+    let notice = NOTICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match notice {
+        Some(Notice::Warn(m)) => warn!("{m}"),
+        Some(Notice::Error(m)) => error!("{m}"),
+        None => {}
+    }
+    chain
+}
+
+/// [`client_locale`] for the one caller that runs before the log plugin: the primary window's
+/// birth. It opens the same chain, but whatever the open has to say waits for [`chain`].
+pub(crate) fn boot_client_locale() -> benilla_formats::Locale {
+    chain_quiet().map(Chain::locale).unwrap_or_default()
 }
 
 /// The client's locale, from the player's `Wow.ini` as start-up reads it once (`0x402350`): the
@@ -160,6 +206,12 @@ fn chain() -> Option<&'static Chain> {
 /// addon's metadata by its index, the logon carries its tag, and the name cache keys on it.
 pub(crate) fn client_locale() -> benilla_formats::Locale {
     chain().map(Chain::locale).unwrap_or_default()
+}
+
+/// `Wow.ini`'s `Region`, which start-up hands the character name check once (`0x402b7f`); 0 with
+/// no install, the file or the key. Signed, as the name check compares it (`0x6c9a78`).
+pub(crate) fn client_region() -> i32 {
+    chain().map_or(0, |c| benilla_formats::client_region(c) as i32)
 }
 
 /// Files a test lays over the chain, per test thread: an entry with bytes reads as a chain file,
@@ -213,6 +265,35 @@ fn is_word(c: char) -> bool {
 mod tests {
     use super::super::fire_scan;
     use benilla_ui::script::UiScript;
+
+    /// The open's message is returned, not logged, so a caller before the log plugin loses
+    /// nothing: no install is a warning naming the missing interface, a folder with no archives
+    /// an error carrying the cause, and a good open says nothing.
+    #[test]
+    fn the_open_returns_its_message_for_the_first_logging_caller() {
+        let (chain, notice) = super::open(None);
+        assert!(chain.is_none());
+        assert!(
+            matches!(&notice, Some(super::Notice::Warn(m)) if m.contains("no client data")),
+            "no install"
+        );
+        let empty = std::env::temp_dir().join(format!("benilla-empty-data-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let (chain, notice) = super::open(Some(empty.clone()));
+        std::fs::remove_dir_all(&empty).ok();
+        assert!(chain.is_none());
+        assert!(
+            matches!(&notice, Some(super::Notice::Error(m)) if m.contains("opening the patch chain")),
+            "no archives"
+        );
+        if let Some(data) = benilla_formats::wow_data() {
+            let (chain, notice) = super::open(Some(data));
+            assert!(
+                chain.is_some() && notice.is_none(),
+                "an install opens silently"
+            );
+        }
+    }
 
     /// An interface file loose in the install answers by its path below the install folder or
     /// `Data\`, whatever its case and separators, ahead of the chain; a bare name finds a file at
@@ -292,8 +373,18 @@ mod tests {
         let failures = super::super::manifest::load_default_ui(&s);
         assert!(failures.is_empty(), "the default UI: {failures:#?}");
 
+        // The stock files and the layer run in context 0, which `RegisterForSave` requires
+        // (`0x4884e0`).
+        let names = s.saved_variable_names();
+        for name in ["NAMEPLATES_ON", "FRIENDNAMEPLATES_ON", "AUTO_QUEST_WATCH"] {
+            assert!(
+                names.iter().any(|n| n == name),
+                "{name} registered: {names:?}"
+            );
+        }
+
         let (mut checked, mut uncovered, mut wrong) = (0usize, Vec::new(), Vec::new());
-        for name in s.saved_variable_names() {
+        for name in names {
             let Some(want) = theirs.get(&name) else {
                 uncovered.push(name);
                 continue;
@@ -627,7 +718,7 @@ mod tests {
         assert!(failures.is_empty(), "the shipped manifest: {failures:#?}");
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1033,7 +1124,7 @@ mod tests {
                 .collect()
         };
 
-        // Every function each chain entry and its same-name `.lua` define.
+        // Every function each chain entry and the files it loads define.
         let toc = &super::super::manifest::manifest_files();
         // Load order: each manifest entry at its line, ours included (`ours_wins` reads both
         // sides), then each reached addon's files after everything.
@@ -1055,21 +1146,13 @@ mod tests {
         let mut chain_frames: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for entry in &chain {
-            let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
-            let mut cands = vec![entry.clone()];
-            if let Some(stem) = entry.strip_suffix(".xml") {
-                cands.push(format!("{stem}.lua"));
-            }
-            for cand in cands {
-                let Some(b) = super::read(&cand.replace('\\', "/")) else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&b).into_owned();
+            // Each definition is credited to the file it is in, which for `ActionBarFrame.xml`
+            // is `ActionButton.lua`, not the entry.
+            for (path, text) in entry_files(entry) {
+                let file = path.rsplit('/').next().unwrap_or(&path).to_string();
                 for name in defined_in(&text) {
                     let at = pos[entry];
-                    chain_home.entry(name).or_insert_with(|| {
-                        (cand.rsplit('/').next().unwrap_or(leaf).to_string(), at)
-                    });
+                    chain_home.entry(name).or_insert_with(|| (file.clone(), at));
                 }
             }
         }
@@ -1103,18 +1186,16 @@ mod tests {
             if line.is_empty() || line.starts_with('#') || !line.ends_with(".xml") {
                 continue;
             }
-            for cand in [line.to_string(), format!("{}.lua", &line[..line.len() - 4])] {
-                let Some(b) = super::read(&format!("Interface/FrameXML/{cand}")) else {
-                    continue;
-                };
-                let text = String::from_utf8_lossy(&b).into_owned();
-                if cand.ends_with(".xml") {
+            // A window's frames belong to its toc line; a function belongs to the file it is in.
+            for (path, text) in entry_files(&format!("Interface\\FrameXML\\{line}")) {
+                let file = path.rsplit('/').next().unwrap_or(&path).to_string();
+                if path.ends_with(".xml") {
                     for name in declares(&text) {
                         chain_frames.entry(name).or_insert_with(|| line.to_string());
                     }
                 }
                 for (name, n) in params_in(&text) {
-                    ref_arity.entry(name).or_insert((n, cand.clone()));
+                    ref_arity.entry(name).or_insert((n, file.clone()));
                 }
             }
         }
@@ -1223,9 +1304,10 @@ mod tests {
 
     /// Every global a migrated window calls exists once the shipped interface is up. Loading never
     /// runs the body that calls it, so a missing one raises on the first click that reaches it.
-    /// Bare `name(` calls in each chain file and its `.lua`, minus its own functions and locals,
-    /// count when the reference's `_G` has them (`reference/lua_globals.tsv`). Blind to names
-    /// reached through `getglobal` and to widget methods; it checks existence, not the body.
+    /// Bare `name(` calls in each chain file and every file it loads (`entry_sources`: its
+    /// `<Script file=>` and `<Include file=>`), minus their own functions and locals, count when
+    /// the reference's `_G` has them (`reference/lua_globals.tsv`). Blind to names reached
+    /// through `getglobal` and to widget methods; it checks existence, not the body.
     #[test]
     fn every_global_a_migrated_window_calls_is_answered() {
         let _data = benilla_formats::wow_data_or_skip!();
@@ -1262,7 +1344,7 @@ mod tests {
         }
         let have: std::collections::HashSet<String> = s
             .eval::<Vec<String>>(
-                "local t = {} for k in pairs(_G) do table.insert(t, k) end return t",
+                "local t = {} for k in pairs(getfenv(0)) do table.insert(t, k) end return t",
             )
             .expect("dump _G")
             .into_iter()
@@ -1270,14 +1352,7 @@ mod tests {
 
         // Open gaps, each with the window and the click that reach it. The assertion below
         // refuses an entry whose gap has closed.
-        const KNOWN: &[(&str, &str, &str)] = &[
-            (
-                "StaticPopup.xml",
-                "ReplaceTradeEnchant",
-                "a registered 1.12 binding (`0x48d330`) whose body is not yet known; it is built \
-                 once it is. Reached by TRADE_REPLACE_ENCHANT's Accept, an event this engine does not fire yet.",
-            ),
-        ];
+        const KNOWN: &[(&str, &str, &str)] = &[];
 
         let mut missing: Vec<(String, String)> = Vec::new();
         for entry in &gated_chain_entries() {
@@ -1286,17 +1361,12 @@ mod tests {
                 continue;
             }
             let leaf = entry.rsplit(['\\', '/']).next().unwrap_or(entry);
-            let mut text = String::new();
-            let mut cands = vec![entry.replace('\\', "/")];
-            if let Some(stem) = entry.strip_suffix(".xml") {
-                cands.push(format!("{stem}.lua").replace('\\', "/"));
-            }
-            for cand in &cands {
-                if let Some(b) = super::read(cand) {
-                    text.push_str(&String::from_utf8_lossy(&b));
-                    text.push('\n');
-                }
-            }
+            // The entry's own text and every file it loads, as the loader does: each
+            // `<Script file=>` (`ActionBarFrame.xml` loads `ActionButton.lua`) and `<Include
+            // file=>` (`PartyFrame.xml` includes `PartyFrameTemplates.xml`), transitively.
+            let sources = entry_sources(entry);
+            assert!(!sources.is_empty(), "{entry}: the chain has no such file");
+            let text = sources.join("\n");
             let text = strip_strings(&strip_comments(&text));
             let defines: std::collections::HashSet<String> = text
                 .lines()
@@ -1320,18 +1390,15 @@ mod tests {
                     l.strip_prefix("for ")
                 };
                 if let Some(rest) = rest {
-                    for name in rest
-                        .split(['=', ' ', '\t'])
-                        .take_while(|w| *w != "in" && *w != "=" && !w.starts_with('('))
-                        .flat_map(|w| w.split(','))
-                        .map(|w| w.trim())
+                    // Only the names a statement binds: before its `=` (`local a, b = f()`
+                    // binds `a` and `b`, not `f`) and before a `for`'s `in`.
+                    let bound = rest.split('=').next().unwrap_or("");
+                    let bound = bound.split(" in ").next().unwrap_or("");
+                    for name in bound
+                        .split(['(', ')', ' ', '\t', ','])
                         .filter(|w| !w.is_empty())
                     {
-                        let name: String =
-                            name.chars().take_while(|c| super::is_word(*c)).collect();
-                        if !name.is_empty() {
-                            locals.insert(name);
-                        }
+                        locals.insert(name.to_string());
                     }
                 }
             }
@@ -1704,7 +1771,18 @@ mod tests {
         out
     }
 
+    /// The text of every file a toc entry loads, itself included.
     fn entry_sources(entry: &str) -> Vec<String> {
+        entry_files(entry)
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// Every file a toc entry loads, itself first and the rest in the order the walk reaches them:
+    /// each `<Script file=>` and `<Include file=>`, transitively, as `(path, text)` with `/`
+    /// separators.
+    fn entry_files(entry: &str) -> Vec<(String, String)> {
         fn read_one(path: &str, chain: bool) -> Option<String> {
             if chain {
                 let bytes = super::read(&path.replace('\\', "/"))?;
@@ -1718,12 +1796,8 @@ mod tests {
             .ok()
         }
         let chain = super::is_chain_entry(entry);
-        let dir = {
-            let p = entry.replace('\\', "/");
-            p.rsplit_once('/').map(|(d, _)| d.to_string())
-        };
         let mut out = Vec::new();
-        let mut queue = vec![entry.to_string()];
+        let mut queue = vec![entry.replace('\\', "/")];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(path) = queue.pop() {
             if !seen.insert(path.clone()) {
@@ -1732,11 +1806,13 @@ mod tests {
             let Some(text) = read_one(&path, chain) else {
                 continue;
             };
+            // A file resolves what it loads beside itself, as the loader does.
+            let dir = path.rsplit_once('/').map(|(d, _)| d.to_string());
             for chunk in text.split('<').skip(1) {
                 let Some(end) = chunk.find('>') else { continue };
                 let tag = &chunk[..end];
                 // `<Include>` brings a sibling document and `<Script file=>` the code, where
-                // nearly every `RegisterEvent` lives; both resolve in the entry's own folder.
+                // nearly every `RegisterEvent` lives; both resolve in the including file's own folder.
                 let kind = tag.trim_start();
                 if !kind.starts_with("Include") && !kind.starts_with("Script") {
                     continue;
@@ -1749,7 +1825,7 @@ mod tests {
                     queue.push(next);
                 }
             }
-            out.push(text);
+            out.push((path, text));
         }
         out
     }
@@ -1842,30 +1918,10 @@ mod tests {
                  `ShowFriends` too",
             ),
             (
-                "BILLING_NAG_DIALOG",
-                "UIParent.lua — the subscription-time nag; vmangos never sends it",
-            ),
-            (
-                "IGR_BILLING_NAG_DIALOG",
-                "UIParent.lua — the internet-cafe billing nag, likewise never sent",
-            ),
-            (
-                "GOSSIP_ENTER_CODE",
-                "UIParent.lua — the code-entry gossip option (a door with a combination); \
-                 benilla's gossip feed carries no code-entry option kind yet",
-            ),
-            (
-                "MEMORY_EXHAUSTED",
-                "UIParent.lua — the client's own out-of-memory dialog; benilla's allocator \
-                 failure is a Rust abort, not a Lua event",
-            ),
-            (
-                "MEMORY_RECOVERED",
-                "UIParent.lua — the other half of MEMORY_EXHAUSTED",
-            ),
-            (
-                "PLAYER_SKINNED",
-                "UIParent.lua — the corpse-skinned notice; benilla's loot feed does not derive it",
+                "PARTY_INVITE_CANCEL",
+                "UIParent.lua — the invite popup's hide. Its one signal is `SMSG_GROUP_CANCEL`'s \
+                 handler (`0x5e6770`, opcode `0x71`, reads a string, then calls \
+                 `0x48f440`); benilla does not read that packet, and vmangos never sends it",
             ),
             (
                 "TRADE_REQUEST",
@@ -1875,11 +1931,6 @@ mod tests {
                  `0x11d`), so StaticPopupDialogs[\"TRADE\"] is \
                  dead code THERE too, and benilla leaves it unproduced: \
                  producing this would be a divergence, not a fix",
-            ),
-            (
-                "TRADE_REPLACE_ENCHANT",
-                "UIParent.lua — the enchant-replacement confirm inside a trade; benilla's trade \
-                 feed does not derive it",
             ),
             (
                 "CLOSE_WORLD_MAP",
@@ -1897,8 +1948,6 @@ mod tests {
                  flow works without it",
             ),
             ("ITEM_TEXT_TRANSLATION", "ItemTextFrame.lua"),
-            ("PET_UI_CLOSE", "PetPaperDollFrame.lua"),
-            ("PET_UI_UPDATE", "PetPaperDollFrame.lua"),
             (
                 "SHOW_COMPARE_TOOLTIP",
                 "PaperDollFrame.lua — the second `TRADE_REQUEST`: event 377 is \
@@ -1911,12 +1960,6 @@ mod tests {
                  event would be a divergence, not a fix",
             ),
             ("SYSMSG", "UIErrorsFrame.lua"),
-            ("UNIT_DEFENSE", "PetPaperDollFrame.lua"),
-            (
-                "UNIT_MODEL_CHANGED",
-                "four files — the paperdoll model refresh",
-            ),
-            ("UNIT_PORTRAIT_UPDATE", "three files — the portrait refresh"),
             (
                 "ZONE_UNDER_ATTACK",
                 "ChatFrame.lua — registered, but the name is no row of the client's event table \
@@ -2011,6 +2054,141 @@ mod tests {
     /// Seats a player before a probe loads the manifest, as the live client always has one by
     /// then: the stock macro window formats `UnitName("player")` into a tab label in its `OnLoad`,
     /// and without a player that raises like a load failure.
+    /// The reference fills an XML texture whose file does not load opaque green and logs it
+    /// (`0x770136`-`0x770171`). No stock texture the core or the glue load draws fails on an
+    /// install, so a line here is benilla's resolver missing a file the reference opens, which
+    /// would paint part of the stock interface green.
+    #[test]
+    fn every_texture_the_stock_interface_loads_opens() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let probe = |s: &mut UiScript| {
+            let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("chain"));
+            let loose = benilla_assets::LooseFiles::install();
+            s.set_texture_probe(Box::new(move |path| {
+                benilla_assets::sprite_found(&chain, &loose, path)
+            }));
+        };
+        let failed = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| l.contains("Unable to load texture file"));
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        probe(&mut core);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(failed(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        probe(&mut glue);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(failed(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// An XML font file that does not load is logged and leaves the font as it was (`0x771226`,
+    /// `0x783eaf`). No stock font the core or the glue declares fails on an install, so a line
+    /// here is benilla's font probe missing a face the reference opens, which would strip a stock
+    /// font.
+    #[test]
+    fn every_font_file_the_stock_interface_loads_opens() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let probe = |s: &mut UiScript| {
+            let chain = std::sync::Mutex::new(benilla_formats::open_chain(&data).expect("chain"));
+            let loose = benilla_assets::LooseFiles::install();
+            s.set_font_probe(Box::new(move |path| {
+                super::super::lifecycle::font_found(&chain, &loose, path)
+            }));
+        };
+        let failed = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| l.contains("Unable to load font file"));
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        probe(&mut core);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(failed(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        probe(&mut glue);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(failed(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// The anchor loop (`0x767800`), the XML length readers (`0x6f1eb0`, `0x6f1d60`, `0x6f20a0`),
+    /// the Backdrop's child loop (`0x77e875`), a text frame's `font=` (`0x879bc8`) and
+    /// `<FontString>` child (`0x879b3c`) and a model's `scale` (`0x8788d8`) log a node they refuse.
+    /// The core and glue the default load reads, and benilla's layer, write none of these in
+    /// 1.12.1, so a line here is a read stricter than the reference's, or a layer file the
+    /// reference would refuse. (The one stock line among them, BrowseName's font override, is in
+    /// the load-on-demand Blizzard_AuctionUI, which `tests/auction_frame.rs` holds to it.)
+    #[test]
+    fn every_anchor_and_length_the_stock_interface_writes_reads() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let refused = |s: &mut UiScript| -> Vec<String> {
+            s.finish_ui_load_log();
+            let mut lines: Vec<String> = s.diagnostics().into_iter().map(|d| d.message).collect();
+            lines.extend(s.take_load_log_writes().iter().map(|w| format!("{w:?}")));
+            lines.retain(|l| {
+                [
+                    "Invalid anchor point in frame",
+                    "Frame anchored to itself",
+                    "Couldn't find relative frame",
+                    "attributes in element",
+                    "attribute in element",
+                    "Unknown child node in",
+                    "Couldn't find font object named",
+                    "Invalid model scale",
+                    "FontString element overriding font",
+                ]
+                .iter()
+                .any(|t| l.contains(t))
+            });
+            lines
+        };
+        let mut core = UiScript::new().expect("VM");
+        core.set_screen_size(1024.0, 768.0);
+        super::super::manifest::load_default_ui(&core);
+        assert_eq!(refused(&mut core), Vec::<String>::new(), "the core");
+
+        let mut glue = UiScript::new_glue().expect("VM");
+        glue.set_screen_size(1024.0, 768.0);
+        super::super::glue::load_glue(&mut glue);
+        assert_eq!(refused(&mut glue), Vec::<String>::new(), "the glue");
+    }
+
+    /// The frame loader's child loop applies each `<HitRectInsets>` in turn (`0x769c8c`), so the
+    /// reputation detail checkboxes' own `right="0"` wins over OptionsCheckButtonTemplate's -100,
+    /// and WorldStateScoreFrame's second element over its first.
+    #[test]
+    fn a_stock_frames_last_hit_rect_insets_win() {
+        let _data = benilla_formats::wow_data_or_skip!();
+        let core = UiScript::new().expect("VM");
+        super::super::manifest::load_default_ui(&core);
+        let insets = |f: &str| -> Vec<f32> {
+            core.eval(&format!("return {{{f}:GetHitRectInsets()}}"))
+                .unwrap_or_else(|e| panic!("{f}: {e}"))
+        };
+        for f in [
+            "ReputationDetailMainScreenCheckBox",
+            "ReputationDetailInactiveCheckBox",
+        ] {
+            assert_eq!(insets(f), [0.0; 4], "{f}");
+        }
+        // Each inset through the setter and getter steps at 4:3: `G(S(13))` is 13.000001.
+        assert_eq!(
+            insets("WorldStateScoreFrame"),
+            [13.000_001, 115.0, 10.0, 13.000_001]
+        );
+    }
+
     fn seat_a_player(s: &mut UiScript) {
         s.set_unit(
             "player",

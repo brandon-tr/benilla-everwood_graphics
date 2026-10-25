@@ -971,7 +971,8 @@ fn text_insets_shrink_the_text_region_rect() {
     let (l, r_, t, b) = s
         .eval::<(f32, f32, f32, f32)>("return E:GetTextInsets()")
         .unwrap();
-    assert_eq!((l, r_, t, b), (15.0, 13.0, 2.0, 3.0));
+    let law = |v: f32| crate::test_support::law43(v) as f32;
+    assert_eq!((l, r_, t, b), (law(15.0), law(13.0), law(2.0), law(3.0)));
 }
 
 // SetTextColor tints the box's text region, as `ChatEdit_UpdateHeader` colours the typed text.
@@ -1003,7 +1004,10 @@ fn set_text_color_tints_the_text_region() {
             _ => None,
         })
         .expect("the edit box text renders");
-    assert_eq!(color, Some([1.0, 0.5, 0.25, 1.0]));
+    assert_eq!(
+        color,
+        Some(crate::color::quant::drawn([1.0, 0.5, 0.25, 1.0]))
+    );
 }
 
 // ── the host text-UI seam: advances, caret/selection geometry, mouse, clipboard ─────────────
@@ -1105,7 +1109,8 @@ fn click_places_cursor_and_drag_selects() {
     s.mouse_button(124.9, 60.0, "LeftButton", false);
 }
 
-/// Ctrl+arrows jump word boundaries (alnum runs); Ctrl+Shift extends the selection there.
+/// Ctrl+arrows jump word boundaries (runs of non-spaces; Right ends at the next word's start);
+/// Ctrl+Shift extends the selection there.
 #[test]
 fn ctrl_arrows_jump_words() {
     let mut s = script();
@@ -1122,8 +1127,8 @@ fn ctrl_arrows_jump_words() {
     });
     assert_eq!(
         s.focused_editbox_text_ui().unwrap().caret_x,
-        21.0,
-        "end of 'abc'"
+        28.0,
+        "start of 'def', past the space"
     );
     s.editbox_action(EditAction::Move {
         unit: EditUnit::Word,
@@ -1133,7 +1138,7 @@ fn ctrl_arrows_jump_words() {
     assert_eq!(
         s.focused_editbox_text_ui().unwrap().caret_x,
         49.0,
-        "end of 'def'"
+        "end of the text"
     );
     s.editbox_action(EditAction::Move {
         unit: EditUnit::Word,
@@ -1184,9 +1189,9 @@ fn copy_cut_and_the_password_placeholder() {
     assert_eq!(s.eval::<String>("return P:GetText()").unwrap(), "");
 }
 
-/// Word and edge deletes, the host's OS-native chords with no 1.12 counterpart: a word delete
-/// takes the adjacent alphanumeric run and the separators toward it, an edge delete clears to the
-/// line's end, and either deletes a live selection instead.
+/// Word deletes (`0x77c3f0`, `0x77c310`) take the spaces next to the caret and the non-space run
+/// beside them; the Mac's edge delete (Cmd+Backspace) clears to the text's edge; either deletes a
+/// live selection instead.
 #[test]
 fn word_and_edge_deletes() {
     let mut s = script();
@@ -1776,5 +1781,47 @@ fn the_caret_flush_fires_on_cursor_changed_with_the_references_four_args() {
         s.eval::<i64>("return table.getn(fires)").unwrap() > before,
         "moving the caret one char fires the flush"
     );
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// The four read-backs answer 1 or nil off the flags word, one value each: a new box is autoFocus
+/// (the ctor stores 1, `0x779a2e`) and nothing else; a bare setter enables, nil disables; XML sets
+/// them through the same setters.
+#[test]
+fn the_mode_read_backs_answer_one_or_nil() {
+    let s = script();
+    s.run(r#"E = CreateFrame("EditBox", "E")"#).unwrap();
+    let probe = |expr: &str| -> (usize, String) {
+        let n = s.arity(expr).unwrap();
+        let t: String = s.eval(&format!("return type(({expr}))")).unwrap();
+        (n, t)
+    };
+    assert_eq!(probe("E:IsAutoFocus()"), (1, "number".into()));
+    assert_eq!(s.eval::<i64>("return E:IsAutoFocus()").unwrap(), 1);
+    for m in ["IsMultiLine", "IsNumeric", "IsPassword"] {
+        assert_eq!(
+            probe(&format!("E:{m}()")),
+            (1, "nil".into()),
+            "{m} on a new box"
+        );
+    }
+
+    s.run("E:SetNumeric(); E:SetAutoFocus(nil); E:SetMultiLine(1); E:SetPassword(true)")
+        .unwrap();
+    assert_eq!(probe("E:IsNumeric()"), (1, "number".into()));
+    assert_eq!(probe("E:IsAutoFocus()"), (1, "nil".into()));
+    assert_eq!(probe("E:IsMultiLine()"), (1, "number".into()));
+    assert_eq!(probe("E:IsPassword()"), (1, "number".into()));
+    s.run("E:SetNumeric(nil)").unwrap();
+    assert_eq!(probe("E:IsNumeric()"), (1, "nil".into()));
+
+    let doc = crate::framexml::parse(
+        r#"<Ui><EditBox name="Pw" password="true" autoFocus="false"/></Ui>"#,
+    )
+    .unwrap();
+    let report = crate::loader::load(&s, &doc, &|_| None);
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert_eq!(s.eval::<i64>("return Pw:IsPassword()").unwrap(), 1);
+    assert_eq!(probe("Pw:IsAutoFocus()"), (1, "nil".into()));
     assert!(s.errors().is_empty(), "{:?}", s.errors());
 }

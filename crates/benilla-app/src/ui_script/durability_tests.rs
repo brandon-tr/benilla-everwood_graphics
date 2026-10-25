@@ -7,6 +7,7 @@ use benilla_ui::script::{
 
 fn harness() -> UiScript {
     let mut s = UiScript::new().unwrap();
+    s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     for f in [
         "Interface\\FrameXML\\GlobalStrings.lua",
@@ -98,7 +99,11 @@ fn armor_guy_shows_red_broken_yellow_damaged_and_hides_clean() {
         !s.eval::<bool>("return DurabilityHead:IsShown()").unwrap(),
         "no body alert → the body stays hidden"
     );
-    assert_eq!(cell_color(&mut s, WEAPON_CELL), Some(RED), "broken → red");
+    assert_eq!(
+        cell_color(&mut s, WEAPON_CELL),
+        Some(benilla_ui::color::quant::drawn(RED)),
+        "broken → red"
+    );
 
     // Legs at 3 points: damaged is an absolute 1..=5 points left (`0x4c8012`).
     let mut inv: InventorySlots = Default::default();
@@ -117,12 +122,12 @@ fn armor_guy_shows_red_broken_yellow_damaged_and_hides_clean() {
     );
     assert_eq!(
         cell_color(&mut s, LEGS_CELL),
-        Some(YELLOW),
+        Some(benilla_ui::color::quant::drawn(YELLOW)),
         "damaged → yellow"
     );
     assert_eq!(
         cell_color(&mut s, HEAD_CELL),
-        Some([1.0, 1.0, 1.0, 0.5]),
+        Some(benilla_ui::color::quant::drawn([1.0, 1.0, 1.0, 0.5])),
         "un-alerted body piece rides faded white"
     );
 
@@ -162,7 +167,10 @@ fn flag_bits_and_the_low_ammo_region() {
         4,
         "force-red bit → broken at full durability"
     );
-    assert_eq!(cell_color(&mut s, WEAPON_CELL), Some(RED));
+    assert_eq!(
+        cell_color(&mut s, WEAPON_CELL),
+        Some(benilla_ui::color::quant::drawn(RED))
+    );
 
     let mut inv: InventorySlots = Default::default();
     let mut v = slot(25, Some((0, 20))).unwrap();
@@ -222,7 +230,10 @@ fn off_hand_glyph_follows_what_the_hand_holds() {
             .unwrap(),
         "a shield lights the shield glyph"
     );
-    assert_eq!(cell_color(&mut s, SHIELD_CELL), Some(RED));
+    assert_eq!(
+        cell_color(&mut s, SHIELD_CELL),
+        Some(benilla_ui::color::quant::drawn(RED))
+    );
 
     let mut inv: InventorySlots = Default::default();
     inv[17] = slot(2488, Some((0, 16)));
@@ -234,7 +245,7 @@ fn off_hand_glyph_follows_what_the_hand_holds() {
     );
     assert_eq!(
         cell_color(&mut s, WEAPON_CELL),
-        Some(RED),
+        Some(benilla_ui::color::quant::drawn(RED)),
         "the weapon cell paints the off-weapon red"
     );
     assert!(s.errors().is_empty(), "errors: {:?}", s.errors());

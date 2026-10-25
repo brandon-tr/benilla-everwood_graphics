@@ -107,6 +107,9 @@ pub struct WmoModel {
     pub group_light_refs: Vec<Vec<u16>>,
     /// Per-group MLIQ liquid surface in WMO model space; `None` for a group without one.
     pub group_liquids: Vec<Option<LiquidMesh>>,
+    /// The root's MCVP convex volume in WMO model space, which a transport's rider is held aboard
+    /// while inside (`0x6a4990`, [`benilla_formats::point_in_convex_volume`]).
+    pub convex_volume: Vec<[f32; 4]>,
 }
 
 /// One MODD doodad's lighting base. The reference fills an interior doodad's words at create from
@@ -499,6 +502,8 @@ impl AssetLoader for WmoModelLoader {
                     window: sub.window, // MOMT WINDOW (0x20): the interior midpoint light
                     additive: sub.additive,
                     env_map: false,
+                    stage1: None, // a WMO batch is one texture stage
+                    combine: None,
                     no_depth_write: false,
                     no_depth_test: false,
                     fog_policy: sub.fog_policy,
@@ -573,6 +578,7 @@ impl AssetLoader for WmoModelLoader {
             group_footprint_grids,
             group_light_refs,
             group_liquids,
+            convex_volume: root.convex_volume().to_vec(),
         })
     }
 

@@ -73,7 +73,7 @@ use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
 use benilla_world::static_gx::{torch_flame_inside_bounds, LightOwner, StaticGx, TorchShadowViews};
 use benilla_world::view::WorldCamera;
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::net::SelfPlayer;
 use crate::shadow_core::{
     empty_shadow_mesh, restore_mesh_buffers, take_mesh_buffers, ShadowDemand, ShadowFrame,
@@ -649,6 +649,7 @@ fn entity_gather_due(rate: u32, elapsed: f64, mask: u32, last_mask: u32) -> bool
 /// Not tidiness — [`update_torch_shadows`] sat at 15 of Bevy's 16 system params before this change
 /// added the player anchor and the interior knobs, and three separate members would not compile.
 #[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)] // The shared caster SystemParam groups its filtered queries.
 struct EntityCasters<'w, 's> {
     /// The SAME query the world lane passes to `collect_entity_geometry` (written inline by that
     /// contract so a lane can pass its own).
@@ -762,6 +763,7 @@ fn cube_view_projs(fixture: Vec3) -> [Mat4; CUBE_FACES] {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn update_torch_shadows(
     video: Res<VideoConfig>,
     state: Res<State<ClientState>>,
@@ -1225,15 +1227,17 @@ fn update_torch_shadows(
         }
         _ => 0,
     };
-    let census = (slot_count > 0)
-        .then(|| PartCensus {
+    let census = if slot_count > 0 {
+        PartCensus {
             gx: gx
                 .as_ref()
                 .map_or(0, |gx| gx.torch_residency_generation())
                 .wrapping_add(terrain_gen),
             parts: static_part_census(&ents),
-        })
-        .unwrap_or_default();
+        }
+    } else {
+        PartCensus::default()
+    };
     // A slot that has NEVER been fingerprinted jumps the queue: with one scan a frame a fresh
     // promotion would otherwise wait a whole sweep for its first map, and a slot with no map
     // publishes none (`map_publishable`), so that wait is a shadow that is simply missing. There
@@ -1541,14 +1545,13 @@ fn update_torch_shadows(
 
     // `WOW_TORCH_TRACE=1` — once a second, what the lane published: fixture distances + whether a
     // caster mesh exists. The app-side half of the debug (the shader group-3 sample is the GPU half).
-    if std::env::var_os("WOW_TORCH_TRACE").is_some() {
-        if now - *last_trace >= 1.0 {
-            *last_trace = now;
-            // MONKEY (outdoor torch shadows): the header carries the lane budget too — "6 of the
-            // 12 slots may be exterior, 3 currently are, the sun is at 0.00" is the whole state of
-            // the split in one line, and it is the first thing to read when an outdoor shadow is
-            // missing (no EXT slots at sun 1.00 is correct; no EXT slots at sun 0.00 is a bug).
-            info!(
+    if std::env::var_os("WOW_TORCH_TRACE").is_some() && now - *last_trace >= 1.0 {
+        *last_trace = now;
+        // MONKEY (outdoor torch shadows): the header carries the lane budget too — "6 of the
+        // 12 slots may be exterior, 3 currently are, the sun is at 0.00" is the whole state of
+        // the split in one line, and it is the first thing to read when an outdoor shadow is
+        // missing (no EXT slots at sun 1.00 is correct; no EXT slots at sun 0.00 is a bug).
+        info!(
                 "torch-trace: {}/{} slots of {} (ext {}/{}, sun {:.2}, {} candidates, caster {}, {} entity casters)",
                 promoted.len(),
                 want,
@@ -1564,15 +1567,15 @@ fn update_torch_shadows(
                 },
                 lane.trace_parts,
             );
-            // MONKEY (torch lane perf): the FIXED per-frame cost, in the two counters that bound
-            // it. `gather parts N (rate R Hz, reach X yd)` is the CPU-skinned moving-caster set and
-            // the cadence + union radius it was taken at; `fingerprint scans S` is how many full
-            // resident-scene walks the census gate actually let through in the last second (a
-            // still room should read 0, a streaming one a handful). Both are per SECOND, so they
-            // are directly comparable to the frame rate beside them: `gathers` equal to the fps is
-            // `interiorShadowEntityRate 0`, and `scans` equal to the fps is the old behaviour with
-            // the gate defeated.
-            info!(
+        // MONKEY (torch lane perf): the FIXED per-frame cost, in the two counters that bound
+        // it. `gather parts N (rate R Hz, reach X yd)` is the CPU-skinned moving-caster set and
+        // the cadence + union radius it was taken at; `fingerprint scans S` is how many full
+        // resident-scene walks the census gate actually let through in the last second (a
+        // still room should read 0, a streaming one a handful). Both are per SECOND, so they
+        // are directly comparable to the frame rate beside them: `gathers` equal to the fps is
+        // `interiorShadowEntityRate 0`, and `scans` equal to the fps is the old behaviour with
+        // the gate defeated.
+        info!(
                 "torch-perf: gather parts {} (rate {} Hz, {} gathers/s, reach {:.0} yd), fingerprint scans {}/s",
                 lane.trace_parts,
                 video.interior_shadow_entity_rate,
@@ -1580,29 +1583,29 @@ fn update_torch_shadows(
                 lane.trace_reach,
                 lane.trace_scans,
             );
-            lane.trace_gathers = 0;
-            lane.trace_scans = 0;
-            // MONKEY (torch caster selection): per SLOT, the three numbers the selection is made
-            // of — which fixture, what it scores at the player, and how far its cross-fade has
-            // ramped. A shadow that pops is a `w` that jumped; a shadow that should be there and
-            // is not is a fixture missing from this list (then read `cands`, above).
-            // MONKEY (torch caster reach): scientific scores expose the small distant tail;
-            // distance is still from the player, and eligibility now extends to 4R + 3 yd.
-            for (i, e, p, sc, w, ext) in &promoted {
-                // MONKEY (torch owner exclusion): `owner` + `own body` are the fix's own readout —
-                // "who this fixture belongs to" and "how many retained items / entity parts its
-                // LAST rebuild dropped as that owner's body". A fixture standing in its own black
-                // square with `own body 0/0` is a missing owner tag; one with a plausible count and
-                // a shadow still under it is a caster arriving by some third route.
-                let slot = lane.slots.iter().find(|s| s.cache_slot == *i);
-                let (gx_excl, part_excl) = slot.map_or((0, 0), |s| s.trace_excluded);
-                // MONKEY (moving fixture): `moving` is this feature's readout — `live` is a slot
-                // being re-rendered from scratch every frame, `dropped` one that is moving but past
-                // TORCH_MOVING_MAX and fast-fading out, `settled` the ordinary cached path. An imp
-                // whose shadow lags is a slot reading `settled` while it walks (then look at
-                // `still_since` / the owner tag); a room whose static shadows freeze is two slots
-                // stuck on `live`.
-                info!(
+        lane.trace_gathers = 0;
+        lane.trace_scans = 0;
+        // MONKEY (torch caster selection): per SLOT, the three numbers the selection is made
+        // of — which fixture, what it scores at the player, and how far its cross-fade has
+        // ramped. A shadow that pops is a `w` that jumped; a shadow that should be there and
+        // is not is a fixture missing from this list (then read `cands`, above).
+        // MONKEY (torch caster reach): scientific scores expose the small distant tail;
+        // distance is still from the player, and eligibility now extends to 4R + 3 yd.
+        for (i, e, p, sc, w, ext) in &promoted {
+            // MONKEY (torch owner exclusion): `owner` + `own body` are the fix's own readout —
+            // "who this fixture belongs to" and "how many retained items / entity parts its
+            // LAST rebuild dropped as that owner's body". A fixture standing in its own black
+            // square with `own body 0/0` is a missing owner tag; one with a plausible count and
+            // a shadow still under it is a caster arriving by some third route.
+            let slot = lane.slots.iter().find(|s| s.cache_slot == *i);
+            let (gx_excl, part_excl) = slot.map_or((0, 0), |s| s.trace_excluded);
+            // MONKEY (moving fixture): `moving` is this feature's readout — `live` is a slot
+            // being re-rendered from scratch every frame, `dropped` one that is moving but past
+            // TORCH_MOVING_MAX and fast-fading out, `settled` the ordinary cached path. An imp
+            // whose shadow lags is a slot reading `settled` while it walks (then look at
+            // `still_since` / the owner tag); a room whose static shadows freeze is two slots
+            // stuck on `live`.
+            info!(
                     "  slot {i}: lane {} {e} at [{:.1},{:.1},{:.1}] d(player) {:.1} score {:.4e} w {:.2} owner {:?} moving {} own body {gx_excl} gx + {part_excl} parts (camera <= shadowDistance AND player <= 4R+3) static {} dynamic {} requested_live_rank {:?}",
                     if *ext { "EXT" } else { "INT" },
                     p.x,
@@ -1621,7 +1624,6 @@ fn update_torch_shadows(
                     if dynamic & (1 << i) != 0 { "yes" } else { "no" },
                     (dynamic & (1 << i) != 0).then(|| TorchShadowViews::live_rank(dynamic, *i)),
                 );
-            }
         }
     }
 }
@@ -1713,7 +1715,7 @@ fn collect_torch_entities(
         if added == 0 {
             continue;
         }
-        for tri in pick.0.indices.chunks_exact(3) {
+        for tri in pick.0.indices.as_chunks::<3>().0 {
             if tri.iter().all(|i| *i < added) {
                 indices.extend(tri.iter().map(|i| base + *i));
             }

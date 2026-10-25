@@ -113,7 +113,7 @@ fn ride(state: &BobState) -> (f32, Quat) {
     // Clamp the SLOPE, not the resulting quaternion: the wave normal is `(-∂x, 1, -∂z)`
     // (`enhanced_water.wgsl`), so a gradient of length `tan(θ)` is a lean of exactly θ.
     let len = g.length();
-    let g = if len > MAX_TILT_TAN && len > 0.0 {
+    let g = if len > MAX_TILT_TAN {
         g * (MAX_TILT_TAN / len)
     } else {
         g

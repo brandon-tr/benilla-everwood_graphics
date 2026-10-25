@@ -198,6 +198,7 @@ impl LightRooms {
 ///     hall, guest rooms and basement claim NOTHING.
 ///   * **NSabbey** — 42 fixtures over 14 groups, but `Main Hall`, `LftWng`, `RtWng`, `Library`,
 ///     `Library2`, `Library Wing` and `Stairs2` are named by no MOLR either.
+///
 /// Gating purely on MOLR would therefore black out most of both buildings — the abbey's look is
 /// the one the owner signed off, so that is a regression, not a fix. MOLR is authored for the
 /// reference's own purpose (register GL lights while drawing a VISIBLE group's doodads and units),
@@ -982,6 +983,7 @@ fn unpack_shadow_lane(w: f32) -> (f32, f32) {
 ///     reach it from below, and cannot leave it from above.
 ///   * `u32(max(w - 1, 0) + 0.5)` — the debug decode (`static_gx` x3, `wow_model`, `terrain`):
 ///     `debug + f + 0.5` truncates to `debug` for every `f` in `[0, 0.5)`.
+///
 /// **0.49** keeps a clear margin under that 0.5 cliff while spending the whole of the rest of the
 /// range on the value. `1 + debug` is an exact integer in f32, so the shader's `fract(w)` returns
 /// `daylight * 0.49` bit-for-bit up to the f32 ulp at `w <= 5.49` (~5e-7 — four orders of magnitude
@@ -1012,6 +1014,7 @@ pub const DAYLIGHT_LANE_SCALE: f32 = 0.49;
 /// read `.w` at all before this, and both now read only its FRACTION. A fraction strictly below
 /// 0.5 therefore cannot move terrain’s decode in either direction: `0 + f` stays below the
 /// threshold, `1 + f` stays above it.
+///
 ///
 /// **0.49** keeps the same clear margin under the 0.5 cliff that the daylight lane keeps, and the
 /// packed value is CLAMPED to `[0, 1]` before scaling — `bake_floor` is 0..1 but `interior_gain`
@@ -1287,7 +1290,7 @@ impl RoomClaim {
                 Some(g) => {
                     // MONKEY (soft portal claims): the entry weight rides the spare high bits.
                     let entry = self.fades[i].entry.clamp(0.0, 1.0);
-                    u32::from(*g & !LIT_ROOM_EXT_DENY) + 1
+                    (u32::from(*g & !LIT_ROOM_EXT_DENY) + 1)
                         | if *g & LIT_ROOM_EXT_DENY == 0 {
                             CLAIM_EXT_OK
                         } else {

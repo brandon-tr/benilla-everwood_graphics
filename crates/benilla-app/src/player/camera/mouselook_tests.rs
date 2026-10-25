@@ -14,6 +14,8 @@ struct Hand {
     face_yaw: f32,
     left: Option<PressGesture>,
     right: Option<PressGesture>,
+    /// The session's answer: a motion reached the body's hand-off.
+    handed: bool,
 }
 
 /// `control`'s call of [`run_look_session`], with the both-button run read off the latch.
@@ -38,7 +40,7 @@ fn look_frame(
         nearclip: 0.2,
         surface_y: None,
     };
-    run_look_session(
+    hand.handed = run_look_session(
         &motion,
         both,
         &mut rig,
@@ -113,6 +115,18 @@ fn pointer(world: &mut World) -> Option<Vec2> {
 
 fn lua(world: &mut World, chunk: &str) {
     world.non_send_resource::<UiScript>().run(chunk).unwrap();
+}
+
+/// A binding body, as `ExecuteBinding` runs one: the movement gate passes.
+fn binding(world: &mut World, chunk: &str) {
+    world
+        .non_send_resource::<UiScript>()
+        .run_binding(chunk)
+        .unwrap();
+}
+
+fn looking(world: &World) -> bool {
+    world.resource::<CameraControl>().is_looking()
 }
 
 fn is_mouselooking(world: &World) -> bool {
@@ -195,6 +209,24 @@ fn a_press_the_ui_consumed_over_the_world_turns_nothing() {
     frame(&mut w, 40.0);
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
     assert!(yaw(&mut w) < 0.0, "an unconsumed press turns it");
+}
+
+/// The motion handler hands the facing and pitch to the body on every motion while the mouse
+/// turns it (`0x514400` → `0x51446f` → `0x5103e0`), a yaw-only drag included, and not for a still
+/// mouse or a left-drag orbit.
+#[test]
+fn every_mouselook_motion_reaches_the_hand_off() {
+    let mut w = world(false);
+    lua(&mut w, "MouselookStart()");
+    frame(&mut w, 40.0);
+    assert!(w.resource::<Hand>().handed, "a yaw-only motion");
+    frame(&mut w, 0.0);
+    assert!(!w.resource::<Hand>().handed, "a still mouse");
+    let mut w = world(false);
+    press(&mut w, MouseButton::Left);
+    frame(&mut w, 40.0);
+    assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Left));
+    assert!(!w.resource::<Hand>().handed, "an orbit turns no body");
 }
 
 /// `MouselookStop` (`0x514240`) ends the session: the cursor comes back and the mouse turns
@@ -405,4 +437,133 @@ fn mouselook_start_under_a_left_drag_is_the_both_button_run() {
     frame(&mut w, 0.0);
     assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
     assert!(w.resource::<Messages<WorldClick>>().is_empty());
+}
+
+/// `ToggleMouseMove` with no button enters mouselook (`0x50f910` → `0x50f930`): the cursor locks,
+/// the mouse turns the camera and not the body, since the hand-off wants the TurnOrAction bit
+/// (`0x5145e0`), and `IsMouselooking` still answers nil. It lasts with no button until the next
+/// call leaves it (`0x50f940(0)`).
+#[test]
+fn toggle_mouse_move_turns_the_camera_alone_until_toggled_back() {
+    let mut w = world(false);
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(looking(&w));
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::Locked);
+    frame(&mut w, 100.0);
+    assert!(yaw(&mut w) != 0.0, "the camera turns");
+    assert_eq!(w.resource::<Hand>().face_yaw, 0.0, "the body does not");
+    assert!(!is_mouselooking(&w));
+    frame(&mut w, 0.0);
+    assert!(looking(&w), "no button is needed to stay");
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(!looking(&w));
+    assert_eq!(cursor(&mut w).grab_mode, CursorGrabMode::None);
+}
+
+/// A press under a toggled mouselook sets its bit, and that bit's release is the last mouse
+/// release, which leaves mouselook (`0x514b70` → `0x50f940`).
+#[test]
+fn a_button_released_under_a_toggled_mouselook_ends_it() {
+    let mut w = world(false);
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(looking(&w));
+    press(&mut w, MouseButton::Left);
+    frame(&mut w, 0.0);
+    assert!(looking(&w));
+    release(&mut w, MouseButton::Left);
+    frame(&mut w, 0.0);
+    assert!(!looking(&w));
+}
+
+/// `CameraOrSelectOrMoveStop(1)` at the last mouse release sets the camera's sticky bit
+/// (`0x514c48` → `0x50f958`); a plain release clears it (`0x50f95d`), and so does a toggle's
+/// leave (`0x50f91b`).
+#[test]
+fn a_sticky_release_sets_the_cameras_bit_and_a_plain_one_clears_it() {
+    let mut w = world(false);
+    let sticky = |w: &World| w.resource::<CameraControl>().follow.sticky;
+    let drag = |w: &mut World, body: &str| {
+        press(w, MouseButton::Left);
+        frame(w, 0.0);
+        release(w, MouseButton::Left);
+        binding(w, body);
+        frame(w, 0.0);
+    };
+    drag(&mut w, "CameraOrSelectOrMoveStop(1)");
+    assert!(sticky(&w));
+    drag(&mut w, "CameraOrSelectOrMoveStop()");
+    assert!(!sticky(&w));
+    drag(&mut w, "CameraOrSelectOrMoveStop(1)");
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(sticky(&w), "entering leaves the bit");
+    lua(&mut w, "ToggleMouseMove()");
+    frame(&mut w, 0.0);
+    assert!(!sticky(&w));
+}
+
+/// The look calls a packet's handler makes land after the frame's input latch and before the
+/// frame time's controller, and those of the frame pass's `OnUpdate` after it: the reference's
+/// press handler moves the input control inside the call (`0x514210` → `0x515090` → `0x514840`),
+/// ahead of the input tick in category 5 when a packet's handler makes it, and after it when the
+/// frame pass does.
+#[test]
+fn the_late_look_calls_land_between_the_packets_and_the_controller() {
+    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    use crate::test_support::runs_before;
+    assert!(runs_before(
+        &mut app,
+        crate::lanes::fire_in_order,
+        apply_late_look_calls
+    ));
+    assert!(crate::ui_script::tick_runs_after(
+        &mut app,
+        apply_late_look_calls
+    ));
+    assert!(runs_before(
+        &mut app,
+        apply_late_look_calls,
+        super::super::controller::control
+    ));
+}
+
+/// A `MouselookStart` a packet's handler makes, after the frame's input latch, holds the
+/// TurnOrAction channel for the frame's controller and raises it, and the next frame's input
+/// engages its session, the first motion after the call.
+#[test]
+fn a_mouselook_start_after_the_latch_reaches_the_frames_controller() {
+    let mut w = world(false);
+    frame(&mut w, 0.0);
+    w.resource_mut::<AccumulatedMouseMotion>().delta = Vec2::ZERO;
+    w.run_system_once(latch_world_mouse).unwrap();
+    w.run_system_once(look_frame).unwrap();
+    lua(&mut w, "MouselookStart()");
+    w.run_system_once(apply_late_look_calls).unwrap();
+    let wm = &w.resource::<CameraControl>().world_mouse;
+    assert!(
+        wm.turn() && wm.rose() && wm.late_rise(),
+        "the controller reads the channel risen after its session"
+    );
+    w.resource_mut::<ButtonInput<MouseButton>>().clear();
+    frame(&mut w, 40.0);
+    assert_eq!(w.resource::<CameraControl>().look, Some(LookButton::Right));
+    assert!(yaw(&mut w) < 0.0, "the next motion turns");
+}
+
+/// A `ToggleMouseMove` made after the frame's look session reaches the next one: what a call
+/// hands the session waits for it, not for the frame's end.
+#[test]
+fn a_toggle_after_the_session_reaches_the_next_one() {
+    let mut w = world(false);
+    frame(&mut w, 0.0);
+    w.run_system_once(latch_world_mouse).unwrap();
+    w.run_system_once(look_frame).unwrap();
+    lua(&mut w, "ToggleMouseMove()");
+    w.run_system_once(apply_late_look_calls).unwrap();
+    w.resource_mut::<ButtonInput<MouseButton>>().clear();
+    frame(&mut w, 0.0);
+    assert!(looking(&w), "the toggle entered mouselook");
 }

@@ -65,15 +65,12 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     }
 
     // `OpeningCinematic()` (`0x48c8c0`): sends an empty `CMSG_OPENING_CINEMATIC` (`0xf9`,
-    // `0x48c8c9` into `0x5ab630`) and returns nothing; the server may answer with
+    // `0x48c8c9` into `0x5ab630`) inside the call and returns nothing; the server may answer with
     // `SMSG_TRIGGER_CINEMATIC`. Arguments are ignored.
     g.set(
         "OpeningCinematic",
         lua.create_function(|lua, _: MultiValue| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .opening_cinematic_asks += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::OpeningCinematic)
         })?,
     )?;
 
@@ -168,7 +165,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 return Ok(());
             }
             // The chunk name is the source bytes as given (1).
-            let name = String::from_utf8_lossy(&raw).into_owned();
+            let name = raw.to_vec();
             // The chunk and every call it makes run under `[0x83de24]` (`0x48b9bb`), the macro
             // context the protected-action gate refuses ([`super::taint`]).
             let ran = lua
@@ -184,7 +181,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let bare = super::stdlib::lua_message(&e);
                 lua.app_data_mut::<crate::script::Model>()
                     .expect("model")
-                    .record_script_error(bare.clone(), bare);
+                    .record_error(bare, super::model::HandlerArg::Error(e));
             }
             Ok(())
         })?,
@@ -200,15 +197,13 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `RequestTimePlayed()` queues a `CMSG_PLAYED_TIME` and returns nothing; the answer is the
-    // `TIME_PLAYED_MSG(total, level)` the app fires when `SMSG_PLAYED_TIME` lands.
+    // `RequestTimePlayed()` (`0x48a900`) sends the empty `CMSG_PLAYED_TIME` (0x1cc, `0x48a936`)
+    // inside the call and returns nothing; the answer is the `TIME_PLAYED_MSG(total, level)` the
+    // app fires when `SMSG_PLAYED_TIME` lands (`0x4018df`).
     g.set(
         "RequestTimePlayed",
         lua.create_function(|lua, ()| {
-            lua.app_data_mut::<Model>()
-                .expect("model app_data")
-                .played_time_asks += 1;
-            Ok(())
+            super::calls::submit(lua, super::ScriptCall::RequestTimePlayed)
         })?,
     )?;
 
@@ -223,8 +218,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // `GetFramerate()`: frames per second, a smoothed value the app pushes each tick; 0, a number,
-    // before the first push.
+    // `GetFramerate()` (`0x4893e0`): one number, the [`FrameTimeRing::rate`] the app pushes after
+    // each world frame's render, 1000 before the first.
     g.set(
         "GetFramerate",
         lua.create_function(|lua, ()| {
@@ -237,15 +232,18 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
 }
 
 impl super::UiScript {
-    /// Drain the `RequestTimePlayed()` asks, each a `CMSG_PLAYED_TIME`: a count, as the request
-    /// body is empty.
+    /// The `RequestTimePlayed()` sends a harness's VM kept ([`Self::keep_calls`]): a count, as the
+    /// request body is empty.
     pub fn take_played_time_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().played_time_asks)
+        self.take_calls_where(|call| {
+            matches!(call, super::ScriptCall::RequestTimePlayed).then_some(())
+        })
+        .len() as u32
     }
 
-    /// Drain the `OpeningCinematic()` calls, each an empty `CMSG_OPENING_CINEMATIC`.
+    /// The `OpeningCinematic()` calls a harness's VM kept ([`Self::keep_calls`]).
     pub fn take_opening_cinematic_asks(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().opening_cinematic_asks)
+        self.take_calls_like(&super::ScriptCall::OpeningCinematic) as u32
     }
 
     /// Push the bind location's name, resolved from `SMSG_BINDPOINTUPDATE`'s AreaTable id through
@@ -285,9 +283,49 @@ impl super::UiScript {
         }
     }
 
-    /// Push the current framerate, from the app's frame clock each tick; this crate has no clock.
+    /// Push the current framerate, [`FrameTimeRing::rate`]; this crate has no clock.
     pub fn set_framerate(&mut self, fps: f64) {
         self.model_mut().framerate = fps;
+    }
+}
+
+/// The frame-time ring `GetFramerate` averages: 30 `f32` seconds at `0xc631c8` and the write index
+/// at `0xc7b488`, a static that starts at zero and is never reset. `CGWorldFrame::OnRender`
+/// (`0x482ea0`) records each world frame's step into it (`0x48323f` → `0x66fcc0` stores it,
+/// `0x483297` → `0x66fd50` → `0x672700` writes it at the index and advances, wrapping at 30).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FrameTimeRing {
+    times: [f32; 30],
+    next: usize,
+}
+
+impl FrameTimeRing {
+    /// The f32 1/30 the sum is scaled by (`0x807334`), not the exact third of a tenth.
+    const THIRTIETH: f32 = f32::from_bits(0x3d08_8889);
+    /// The mean below which the rate answers 1000 (`0x801360`).
+    const FLOOR: f32 = 0.001;
+
+    /// `0x672700`: store one frame's seconds at the write index and advance it.
+    pub fn push(&mut self, seconds: f32) {
+        self.times[self.next] = seconds;
+        self.next = (self.next + 1) % self.times.len();
+    }
+
+    /// `0x6724c0`: the 30 times summed from the write index on, oldest first, in double precision,
+    /// scaled by [`Self::THIRTIETH`]; a mean under [`Self::FLOOR`] answers 1000 (`0x6724f7`), any
+    /// other `1 / mean` (`0x6724fe`), so the empty ring reads 1000 and a part-filled one reads
+    /// high.
+    pub fn rate(&self) -> f64 {
+        let n = self.times.len();
+        let sum: f64 = (0..n)
+            .map(|k| f64::from(self.times[(self.next + k) % n]))
+            .sum();
+        let mean = sum * f64::from(Self::THIRTIETH);
+        if mean < f64::from(Self::FLOOR) {
+            1000.0
+        } else {
+            1.0 / mean
+        }
     }
 }
 
@@ -315,6 +353,23 @@ impl UiScript {
         } else {
             0
         };
+    }
+
+    /// `Wow.ini`'s `Region` as seated, 0 until the host seats the install's.
+    pub fn client_region(&self) -> i32 {
+        self.model_ref().client_region
+    }
+
+    /// Seat `Wow.ini`'s `Region`, which start-up hands the name check once (`0x402b7f`); a signed
+    /// word there, and only 1 to 5 picks a charset pair of its own.
+    pub fn set_client_region(&mut self, region: i32) {
+        self.model_mut().client_region = region;
+    }
+
+    /// Seat the word lists the character and guild name checks search, which start-up compiles
+    /// once for the whole client (`0x6c91a0`).
+    pub fn set_name_lists(&mut self, lists: std::rc::Rc<dyn super::NameLists>) {
+        self.model_mut().name_lists = Some(lists);
     }
 }
 
@@ -380,21 +435,73 @@ mod tests {
         );
     }
 
+    /// Before any world frame the ring is empty, whose rate is 1000 (`0x6724f7`).
     #[test]
-    fn get_framerate_is_a_number_before_the_first_push() {
+    fn get_framerate_is_1000_before_the_first_push() {
         let mut s = UiScript::new().unwrap();
-        assert_eq!(s.eval::<f64>("return GetFramerate()").unwrap(), 0.0);
-        assert_eq!(
-            s.eval::<String>("return format(\"%.1f\", GetFramerate())")
-                .unwrap(),
-            "0.0"
-        );
+        assert_eq!(s.arity("GetFramerate()").unwrap(), 1);
+        assert_eq!(s.eval::<f64>("return GetFramerate()").unwrap(), 1000.0);
         s.set_framerate(59.94);
         assert_eq!(
             s.eval::<String>("return format(\"%.1f\", GetFramerate())")
                 .unwrap(),
             "59.9"
         );
+    }
+
+    /// The ring's rate: an empty or barely filled ring answers 1000, a full one 1 over the mean of
+    /// its 30 times as `0x6724c0` scales it, and a hitch shows at once and is gone 30 frames on.
+    #[test]
+    fn the_frame_time_ring_averages_the_last_30_frames() {
+        use super::FrameTimeRing;
+        let mut ring = FrameTimeRing::default();
+        assert_eq!(ring.rate(), 1000.0);
+        ring.push(1.0 / 60.0);
+        assert_eq!(ring.rate(), 1000.0, "a mean of 1/1800 s is under 0.001");
+        for _ in 1..30 {
+            ring.push(1.0 / 60.0);
+        }
+        let frame = f64::from(1.0f32 / 60.0);
+        let thirtieth = f64::from(f32::from_bits(0x3d08_8889));
+        let mut sum = 0.0;
+        for _ in 0..30 {
+            sum += frame;
+        }
+        assert_eq!(ring.rate(), 1.0 / (sum * thirtieth));
+        assert!((ring.rate() - 60.0).abs() < 1e-4, "{}", ring.rate());
+        ring.push(0.5);
+        let hitched = ring.rate();
+        assert!(
+            (hitched - 30.5).abs() < 0.01,
+            "the hitch shows on the next read: {hitched}"
+        );
+        for _ in 0..29 {
+            ring.push(1.0 / 60.0);
+        }
+        assert!(
+            (ring.rate() - hitched).abs() < 1e-9,
+            "29 frames on it is still in the ring"
+        );
+        ring.push(1.0 / 60.0);
+        assert!((ring.rate() - 60.0).abs() < 1e-4, "30 frames on it is gone");
+    }
+
+    /// The sum runs oldest first from the write index (`0x6724c6`): with 2^54 there, each 1.0
+    /// after it rounds away, where a walk from slot 0 would add the 29 ones first and keep 28.
+    #[test]
+    fn the_frame_time_ring_sums_from_the_write_index() {
+        use super::FrameTimeRing;
+        let big = 2f32.powi(54);
+        let mut ring = FrameTimeRing::default();
+        for k in 0..30 {
+            ring.push(if k == 29 { big } else { 1.0 });
+        }
+        for _ in 0..29 {
+            ring.push(1.0); // the write index is now 29, the slot holding 2^54
+        }
+        let thirtieth = f64::from(f32::from_bits(0x3d08_8889));
+        assert_eq!(ring.rate(), 1.0 / (f64::from(big) * thirtieth));
+        assert_ne!(ring.rate(), 1.0 / ((f64::from(big) + 28.0) * thirtieth));
     }
 
     /// A failure is recorded, not raised: `0x704ae0` runs the chunk under `lua_pcall(L, 0, 0, -2)`
@@ -448,17 +555,18 @@ mod tests {
         assert_eq!(s.arity("GetDebugStats()").unwrap(), 0);
     }
 
-    /// Each `OpeningCinematic()` queues one send and returns nothing.
+    /// Each `OpeningCinematic()` hands the host one send and returns nothing.
     #[test]
-    fn opening_cinematic_queues_one_send_per_call() {
+    fn opening_cinematic_hands_one_send_per_call() {
         let mut s = UiScript::new().unwrap();
+        s.keep_calls();
         assert_eq!(s.arity("OpeningCinematic()").unwrap(), 0);
         s.run("OpeningCinematic(1)").unwrap();
         assert_eq!(s.take_opening_cinematic_asks(), 2);
         assert_eq!(
             s.take_opening_cinematic_asks(),
             0,
-            "the drain empties the queue"
+            "the take empties what was kept"
         );
     }
 
@@ -510,7 +618,7 @@ mod tests {
         s.run(
             r#"
             local f = CreateFrame("Frame", "Owner")
-            fs = f:CreateFontString("FS", "ARTWORK")
+            fs = f:CreateFontString("FS", "ARTWORK"); fs:SetFont("Fonts\\FRIZQT__.TTF", 12)
             btn = CreateFrame("Button", "Btn")
             function Put(text)
                 fs:SetText(text)

@@ -9,19 +9,21 @@
 use super::*;
 use benilla_formats::{open_chain, parse_wmo_portals, parse_wmo_root, wmo_group_header};
 
+type CensusBatch = (
+    u16,
+    benilla_formats::WmoBatchClass,
+    bool,
+    bool,
+    Vec<[f32; 3]>,
+);
+
 struct Loaded {
     groups: Vec<WmoGroupInfo>,
     names: Vec<String>,
     portals: benilla_formats::WmoPortals,
     slices: Vec<(u16, u16)>,
     /// `(group, class, window, sidn, positions)` per render batch.
-    batches: Vec<(
-        u16,
-        benilla_formats::WmoBatchClass,
-        bool,
-        bool,
-        Vec<[f32; 3]>,
-    )>,
+    batches: Vec<CensusBatch>,
 }
 
 fn group_names(bytes: &[u8]) -> Vec<String> {
@@ -41,7 +43,9 @@ fn group_names(bytes: &[u8]) -> Vec<String> {
     let (Some(mogn), Some(mogi)) = (mogn, mogi) else {
         return Vec::new();
     };
-    mogi.chunks_exact(32)
+    mogi.as_chunks::<32>()
+        .0
+        .iter()
         .map(|r| {
             let off = i32::from_le_bytes(r[28..32].try_into().unwrap());
             usize::try_from(off)

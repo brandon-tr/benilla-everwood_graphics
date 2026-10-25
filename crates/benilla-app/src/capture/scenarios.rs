@@ -174,48 +174,34 @@ pub(super) const MAP_AZEROTH: u32 = 0;
 pub(super) const MAP_KALIMDOR: u32 = 1;
 pub(super) const MAP_DEEPRUN_TRAM: u32 = 369;
 
-/// A glue-screen capture: a login-side screen with no world, camera or map, sharing only the
-/// shutter with [`Scenario`]. Not in the golden sweep; capturable by name.
+/// A glue-screen capture: a stock glue screen with no world, camera or map, sharing only the
+/// shutter with [`Scenario`]. Each boots on the login screen and presses its own screen up. Not in
+/// the golden sweep; capturable by name. The select screen needs a roster and is not here.
 #[derive(Clone, Copy)]
 pub(super) struct GlueScenario {
     pub(super) name: &'static str,
-    pub(super) screen: GlueScreen,
-    /// The preview's race, sex and class ids, applied through `WOW_CHARCREATE_PICK` unless that is
-    /// already set (`WOW_CHARCREATE_PICK=6,0,11 WOW_CAPTURE=glue-charcreate` is the tauren stage).
+    /// The create screen's body, race, sex and class ids, which `WOW_CHARCREATE_PICK` overrides
+    /// (`WOW_CHARCREATE_PICK=6,0,11 WOW_CAPTURE=glue-charcreate` is the tauren stage)
+    /// ([`super::create_stage`]); `None` stays on the login screen.
     pub(super) pick: Option<(u8, u8, u8)>,
 }
 
-/// Which glue screen a [`GlueScenario`] photographs. The select screen needs a roster and is not
-/// here.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum GlueScreen {
-    /// Character creation: the `UI_*` backdrop scene's rig lighting and per-race fog, the preview
-    /// body in its starting outfit, the GlueXML panel.
-    CharCreate,
-    /// The login screen, `UI_MainMenu` behind the account form. Its backdrop is the narrowest of
-    /// the seven scenes, so a wide window (`WOW_WIN=2560x1440`) reaches its edges first.
-    Login,
-    /// The realm list over the login screen, fed a list in two categories
-    /// (`super::realm_list`).
-    RealmList,
-}
-
 /// The glue scenarios: character creation as a human male warrior, the race the reference's own
-/// screenshots use, the login screen, and the realm list's category tabs over it.
+/// screenshots use, with its `UI_*` backdrop scene, rig lighting and per-race fog; the login
+/// screen, `UI_MainMenu` behind the account form, the narrowest of the seven scenes, so a wide
+/// window (`WOW_WIN=2560x1440`) reaches its edges first; and the realm list's category tabs over
+/// it ([`super::realm_list`]).
 pub(super) const GLUE_SCENARIOS: &[GlueScenario] = &[
     GlueScenario {
         name: "glue-charcreate",
-        screen: GlueScreen::CharCreate,
         pick: Some((1, 0, 1)),
     },
     GlueScenario {
         name: "glue-login",
-        screen: GlueScreen::Login,
         pick: None,
     },
     GlueScenario {
         name: super::realm_list::NAME,
-        screen: GlueScreen::RealmList,
         pick: None,
     },
 ];
@@ -316,7 +302,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-training-yard-day",
         map: Some(MAP_AZEROTH),
         eye: [-8728.0, 341.0, 104.0],
-        look: [-8517.4951, 792.4295, 147.57787],
+        look: [-8_517.495, 792.4295, 147.57787],
         minute: 720,
         ui: None,
     },
@@ -324,7 +310,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-training-yard-dusk",
         map: Some(MAP_AZEROTH),
         eye: [-8728.0, 341.0, 104.0],
-        look: [-8517.4951, 792.4295, 147.57787],
+        look: [-8_517.495, 792.4295, 147.57787],
         minute: 1110,
         ui: None,
     },
@@ -332,7 +318,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-training-yard-night",
         map: Some(MAP_AZEROTH),
         eye: [-8728.0, 341.0, 104.0],
-        look: [-8517.4951, 792.4295, 147.57787],
+        look: [-8_517.495, 792.4295, 147.57787],
         minute: 0,
         ui: None,
     },
@@ -340,7 +326,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-gate-ramp-day",
         map: Some(MAP_AZEROTH),
         eye: [-9095.0, 412.0, 124.0],
-        look: [-8818.3066, 632.09216, -229.55338],
+        look: [-8_818.307, 632.09216, -229.55338],
         minute: 720,
         ui: None,
     },
@@ -348,7 +334,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-gate-ramp-dusk",
         map: Some(MAP_AZEROTH),
         eye: [-9095.0, 412.0, 124.0],
-        look: [-8818.3066, 632.09216, -229.55338],
+        look: [-8_818.307, 632.09216, -229.55338],
         minute: 1110,
         ui: None,
     },
@@ -356,7 +342,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         name: "stormwind-gate-ramp-night",
         map: Some(MAP_AZEROTH),
         eye: [-9095.0, 412.0, 124.0],
-        look: [-8818.3066, 632.09216, -229.55338],
+        look: [-8_818.307, 632.09216, -229.55338],
         minute: 0,
         ui: None,
     },

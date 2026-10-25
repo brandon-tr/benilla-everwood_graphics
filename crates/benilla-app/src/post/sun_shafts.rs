@@ -82,6 +82,7 @@ impl Plugin for SunShaftsPlugin {
     }
 }
 
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn update_views(
     mut commands: Commands,
     video: Res<VideoConfig>,

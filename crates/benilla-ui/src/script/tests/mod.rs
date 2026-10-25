@@ -8,11 +8,13 @@ mod anchor_slots;
 mod anchors;
 mod backdrop;
 mod button;
+mod button_fonts;
 mod capture;
 mod channel;
 mod chat_bubble;
 mod clear_points;
 mod colour_args;
+mod colour_bytes;
 pub(in crate::script) mod common;
 mod cooldown;
 mod create_frame_template;
@@ -23,10 +25,13 @@ mod drag_threshold;
 mod dying_target;
 mod end_to_end;
 mod engine_updates;
+mod european_text;
 mod events;
 mod flag_args;
+mod font_links;
 mod font_object;
 mod frame_api;
+mod frame_state;
 mod generic_for;
 mod glue_surface;
 mod gm_ticket;
@@ -36,7 +41,9 @@ mod host_state;
 mod hover_publish;
 mod hover_walk;
 mod hyperlink;
+mod index_usage;
 mod input;
+mod is_number_gates;
 mod keep_rect;
 mod keyboard;
 mod layout_gate;
@@ -51,20 +58,27 @@ mod modelframe;
 mod movable;
 mod name_targets;
 mod nameplate;
+mod no_font;
+mod number_text;
 mod numeric_shape_gate;
 mod object_model;
 mod one_or_nil_methods;
+mod open_layout;
 mod protected_gate;
 mod reference_surface;
 mod region_map;
 mod regions;
+mod reputation_list;
 mod resize_bounds;
+mod screen_units;
+mod script_lengths;
 mod scrollframe;
 mod set_font_args;
 mod setparent;
 mod shown_bit;
 mod simplehtml;
 mod size_changed;
+mod skill_list;
 mod slider;
 mod statusbar;
 mod stdlib;
@@ -77,13 +91,20 @@ mod texture_art;
 mod tooltip;
 mod tooltip_item;
 mod tooltip_setter_flags;
+mod tooltip_size;
 mod tooltip_spell;
 mod tooltip_unit;
+mod tooltip_unit_status;
 mod toplevel;
 mod update_walk;
+mod usage_lines;
+mod usage_number_args;
+mod usage_range_gates;
 mod visibility;
+mod wheel;
 mod widget_args;
 mod widget_surface;
+mod world_press_hook;
 mod worldframe;
 mod worldmap;
 
@@ -119,6 +140,41 @@ fn an_instruction_budget_turns_a_runaway_loop_into_an_error() {
     assert_eq!(t.eval::<i64>("return BudgetOk").unwrap(), 500_500);
 }
 
+/// The budget's raise reaches the host past every `pcall` and `xpcall`, and runs no handler: a
+/// loop under a protected call is stopped too.
+#[test]
+fn an_instruction_budget_is_caught_by_no_protected_call() {
+    for src in [
+        "while true do pcall(function() while true do end end) end",
+        "xpcall(function() while true do end end, function() while true do end end)",
+    ] {
+        let s = crate::script::UiScript::new().unwrap();
+        s.set_instruction_budget(5_000_000);
+        let err = s.run(src).expect_err(src).to_string();
+        assert!(err.contains("instruction budget exhausted"), "{src}: {err}");
+    }
+}
+
+/// The budget counts Lua that a library function calls, as 5.1's count hook does: a `gsub`
+/// replacement over three million characters runs four instructions a call on either VM
+/// (`GETGLOBAL`, `ADD`, `SETGLOBAL`, `RETURN`), and a runaway one is stopped.
+#[test]
+fn the_instruction_budget_counts_lua_a_library_function_runs() {
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(u64::MAX);
+    s.run("n = 0 string.gsub(string.rep('a', 3000000), 'a', function(c) n = n + 1 return c end)")
+        .unwrap();
+    assert_eq!(s.instructions_used(), 12_000_000);
+
+    let s = crate::script::UiScript::new().unwrap();
+    s.set_instruction_budget(5_000_000);
+    let err = s
+        .run("string.gsub(string.rep('a', 50000000), 'a', function(c) n = 1 return c end)")
+        .expect_err("a library function's callbacks run inside the budget")
+        .to_string();
+    assert!(err.contains("instruction budget exhausted"), "{err}");
+}
+
 /// The hearth location's name, `""` before the packet; `StaticPopup.lua:1742` formats it.
 #[test]
 fn get_bind_location_answers_the_pushed_name_and_never_nil() {
@@ -147,10 +203,12 @@ fn get_bind_location_answers_the_pushed_name_and_never_nil() {
     );
 }
 
-/// `RequestTimePlayed()` queues the ask; `TIME_PLAYED_MSG` carries the answer.
+/// `RequestTimePlayed()` is a call the host sends inside the verb; `TIME_PLAYED_MSG` carries the
+/// answer.
 #[test]
-fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
+fn request_time_played_is_a_call_and_the_answer_arrives_as_an_event() {
     let mut s = crate::script::UiScript::new().unwrap();
+    s.keep_calls();
 
     assert_eq!(s.arity("RequestTimePlayed()").unwrap(), 0);
     // A count, not a latch: the packet is empty, so two asks in a frame are two sends.
@@ -160,7 +218,11 @@ fn request_time_played_queues_an_ask_and_the_answer_arrives_as_an_event() {
         3,
         "the eval above plus two more — each ask is its own CMSG_PLAYED_TIME"
     );
-    assert_eq!(s.take_played_time_asks(), 0, "the drain empties the queue");
+    assert_eq!(
+        s.take_played_time_asks(),
+        0,
+        "the take empties the kept calls"
+    );
 
     s.run(
         r#"

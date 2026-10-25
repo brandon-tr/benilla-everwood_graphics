@@ -20,8 +20,9 @@
 //! and [`seam`]; the OS clipboard is host-side, [`paste`] in and `UiScript::editbox_copy` or
 //! `editbox_cut` out. The host's per-OS keymap sends editing keys as [`EditAction`]s ([`action`]).
 //!
-//! Deviation: word and edge deletes (`Delete{Word,Edge}`), which 1.12 does not have, exist because
-//! the host's OS-native chords (Option/Cmd+Backspace, Ctrl+Backspace/Delete) expect them.
+//! The word deletes are the reference's (`0x77c3f0`, `0x77c310`), and Ctrl+U/K delete to the text's
+//! edges (`0x77c4a0`, `0x77c4d0`). `Delete{Edge}` is the Mac's Cmd+Backspace/Delete, whose chords
+//! are the keymap's.
 
 use mlua::{Lua, Table};
 
@@ -96,6 +97,8 @@ pub(super) fn key_input(lua: &Lua, key: &str) -> bool {
             if with_eb(lua, h, |eb| eb.multi_line).unwrap_or(false) {
                 insert(lua, h, "\n", false);
             } else {
+                // The enter script runs with the gate's edit-box flag up (`0x77b438`-`0x77b459`).
+                let _enter = super::protected::raise(lua, super::protected::Event::Enter);
                 fire_script(lua, id, "OnEnterPressed");
             }
         }
@@ -140,12 +143,19 @@ pub(super) fn action(lua: &Lua, a: EditAction) -> bool {
         },
         EditAction::Delete { unit, back } => match unit {
             EditUnit::Char => delete_dir(lua, h, !back),
-            EditUnit::Word => delete_span(lua, h, |eb| eb.word_boundary(!back)),
+            EditUnit::Word => delete_span(lua, h, |eb| eb.word_delete_target(!back)),
             EditUnit::Edge => delete_span(lua, h, |eb| if back { 0 } else { eb.text.len() }),
             // No keymap deletes by line or row.
             EditUnit::Line | EditUnit::Row => {}
         },
         EditAction::SelectAll => highlight_text(lua, h, 0, -1),
+        EditAction::DeleteToEdge { back } => {
+            if with_eb(lua, h, |eb| eb.delete_to_edge(back)) == Some(true) {
+                sync_text_region(lua, h);
+            }
+        }
+        // In any box, a multi-line one included (`0x77d030`, `0x77cfd0`).
+        EditAction::History { older } => history_step_key(lua, h, older),
     }
     true
 }
@@ -334,8 +344,8 @@ fn set_text(lua: &Lua, h: FrameHandle, s: &str) {
     }
 }
 
-/// Word and edge deletes (no 1.12 counterpart): the selection if any, else the cursor to
-/// `target_of(eb)`.
+/// Word deletes (Ctrl+Backspace and Ctrl+W, `0x77c3f0`) and the Mac's edge delete: the selection
+/// if any, else the cursor to `target_of(eb)`.
 fn delete_span(lua: &Lua, h: FrameHandle, target_of: impl FnOnce(&EditBoxState) -> usize) {
     let changed = with_eb(lua, h, |eb| {
         let t = target_of(eb);
@@ -411,14 +421,15 @@ fn write_region_text(model: &mut Model, rh: RegionHandle, text: String) {
 /// `SetTextInsets(l, r, t, b)` (`0x77a6e0`): store the insets and re-seat the text region by
 /// them (`0x77a707` → `0x77b8c0`).
 fn set_text_insets(lua: &Lua, h: FrameHandle, l: f32, r: f32, t: f32, b: f32) {
-    if with_eb(lua, h, |eb| eb.text_insets = [l, r, t, b]).is_none() {
+    let insets = [l, r, t, b].map(crate::layout::Len::Script);
+    if with_eb(lua, h, |eb| eb.text_insets = insets).is_none() {
         return;
     }
     reseat_text_region(lua, h);
 }
 
 /// Run `0x77b8c0` on the box's text region, creating the region's data if nothing has yet.
-fn reseat_text_region(lua: &Lua, h: FrameHandle) {
+pub(super) fn reseat_text_region(lua: &Lua, h: FrameHandle) {
     if ensure_text_region(lua, h).is_none() {
         return;
     }
@@ -471,6 +482,33 @@ pub(crate) fn apply_xml_bytes(lua: &Lua, frame: &Table, bytes: &str) -> mlua::Re
     Ok(())
 }
 
+/// The history ring's size (`0x77cd90`), which the XML `historyLines` reaches with 0 or more
+/// (`0x77a175`-`0x77a18d`) and `SetHistoryLines` only above 0 (`0x7994f7`); lines past the new size
+/// are dropped, the oldest first.
+pub(crate) fn set_history_lines(lua: &Lua, frame: &Table, n: i32) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, frame)?;
+    with_eb(lua, h, |eb| {
+        eb.history_max = n.max(0) as usize;
+        let over = eb.history.len().saturating_sub(eb.history_max);
+        if over > 0 {
+            eb.history.drain(..over);
+        }
+    })
+    .ok_or_else(|| mlua::Error::runtime("not an EditBox"))
+}
+
+/// `CSimpleEditBox::SetSelectionColor` (`0x77e330`), the XML `<HighlightColor>`'s setter
+/// (`0x77a2a2`): the selection's tint.
+pub(crate) fn set_selection_color(
+    lua: &Lua,
+    frame: &Table,
+    color: crate::color::Rgba8,
+) -> mlua::Result<()> {
+    let h = frame_handle_of(lua, frame)?;
+    with_eb(lua, h, |eb| eb.highlight_color = color);
+    Ok(())
+}
+
 /// Get or create the box's text FontString; an XML-declared one is wired by [`adopt_text_region`].
 pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHandle> {
     let mut model = lua.app_data_mut::<Model>().expect("model app_data");
@@ -478,7 +516,7 @@ pub(super) fn ensure_text_region(lua: &Lua, h: FrameHandle) -> Option<RegionHand
 }
 
 /// [`ensure_text_region`] on a borrowed model.
-fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option<RegionHandle> {
+pub(super) fn ensure_text_region_in(model: &mut Model, h: FrameHandle) -> Option<RegionHandle> {
     let (existing, multi_line) = match model.arena.frame(h).map(|f| &f.kind_state) {
         Some(KindState::EditBox(eb)) => (eb.text_region, eb.multi_line),
         _ => return None,

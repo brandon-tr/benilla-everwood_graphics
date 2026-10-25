@@ -1122,7 +1122,7 @@ impl super::StaticGx {
                         .to_array()
                 }));
                 let added = positions.len() as u32 - base;
-                for tri in item.geometry.indices.chunks_exact(3) {
+                for tri in item.geometry.indices.as_chunks::<3>().0 {
                     if tri.iter().all(|i| *i < added) {
                         indices.extend(tri.iter().map(|i| base + *i));
                     }

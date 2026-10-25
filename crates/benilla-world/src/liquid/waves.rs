@@ -43,7 +43,7 @@ const GRAVITY_YD: f32 = 10.72;
 
 /// `6.2831853` exactly as the shader spells it (`enhanced_water.wgsl`). Identical to `f32::TAU` once
 /// rounded, spelled as the literal so the mirror reads against the line it copies.
-const TWO_PI: f32 = 6.2831853;
+const TWO_PI: f32 = std::f32::consts::TAU;
 
 /// The ADT **ocean**'s wave energy — `liquid/surface.rs` packs `water.mode.y = 1.0` for
 /// `LiquidPath::Adt` + [`benilla_formats::LiquidKind::Ocean`] (river/lake 0.18, WMO exterior 0.26,
@@ -216,7 +216,8 @@ mod tests {
         );
         assert_eq!(GRAVITY_YD, 10.72, "enhanced_water.wgsl gravity");
         assert_eq!(
-            TWO_PI, 6.2831853,
+            TWO_PI,
+            f32::from_bits(0x40c9_0fdb),
             "enhanced_water.wgsl k = 6.2831853/wavelength"
         );
         assert_eq!(WATER_WIND_DIR, 0.35, "enhanced_water.wgsl WATER_WIND_DIR");

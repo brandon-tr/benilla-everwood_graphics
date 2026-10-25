@@ -152,10 +152,10 @@ fn stitch_tag(
     tx: f32,
     ty: f32,
 ) -> f32 {
-    let (a, b, t) = if (fy == 0 || fy + 1 == fine_rows) && fx % SUBDIVISIONS != 0 {
+    let (a, b, t) = if (fy == 0 || fy + 1 == fine_rows) && !fx.is_multiple_of(SUBDIVISIONS) {
         let y = if fy == 0 { 0 } else { rows - 1 };
         (y * cols + sx, y * cols + sx + 1, tx)
-    } else if (fx == 0 || fx + 1 == fine_cols) && fy % SUBDIVISIONS != 0 {
+    } else if (fx == 0 || fx + 1 == fine_cols) && !fy.is_multiple_of(SUBDIVISIONS) {
         let x = if fx == 0 { 0 } else { cols - 1 };
         (sy * cols + x, (sy + 1) * cols + x, ty)
     } else {

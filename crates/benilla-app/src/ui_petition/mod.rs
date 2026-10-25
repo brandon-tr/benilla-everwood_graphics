@@ -18,12 +18,18 @@ use bevy::prelude::*;
 
 use crate::names::NameCache;
 use crate::net::{ClientCommand, NetCommands};
+use crate::query_cache::Ask;
 use crate::query_cache::QueryCache;
-use crate::ui_script::{SweepApp, SweepLeg, UiFeed, UiInput};
+use crate::ui_script::{SweepApp, SweepLeg, UiFeed};
 use crate::ui_session::{LatchApp, LatchedWindow, NpcWindow};
 
+#[cfg(test)]
+mod call_tests;
 mod feed;
 mod lines;
+mod steps;
+
+pub(crate) use steps::PetitionSteps;
 
 /// The open registrar, apart from [`PetitionState`] so a close of the registrar leaves the charter.
 #[derive(Resource, Default)]
@@ -111,14 +117,12 @@ impl LatchedWindow for GuildRegistrarState {
     fn dispatched(world: &mut World) {
         close_core(world);
     }
-
-    fn take_close_verb(script: &mut benilla_ui::script::UiScript) -> bool {
-        script.take_registrar_close()
-    }
 }
 
-/// The close core `0x4f5010`: with a registrar open, the latch release (`0x4f5024`), the cell
-/// cleared, then `GUILD_REGISTRAR_CLOSED` (`0x4f503a`).
+/// The close core `0x4f5010` as `0x493310` and the leave-world sweep enter it: with a registrar
+/// open, the latch release (`0x4f5024`), the cell cleared, then `GUILD_REGISTRAR_CLOSED`
+/// (`0x4f503a`). `CloseGuildRegistrar` and `GetTabardInfo` run it inside their calls
+/// ([`crate::script_calls::ScriptCallHost`]).
 pub(crate) fn close_core(world: &mut World) {
     let Some(npc) = world.resource::<GuildRegistrarState>().npc() else {
         return;
@@ -144,22 +148,20 @@ pub(crate) fn open_registrar(world: &mut World, list: &PetitionShowList, npc_fla
         .open(list, npc_flags);
 }
 
-/// The open charter and the petition-record cache.
+/// The open charter: what the charter verbs write inside their calls ([`PetitionSteps`]).
 #[derive(Resource, Default)]
 pub(crate) struct PetitionState {
     open: Option<OpenCharter>,
-    /// The record cache by petition id, asked once through [`QueryCache`].
-    records: QueryCache<u32, Record>,
     /// `[0xbdce1c]`: set while our sign is outstanding. A close's decline leg is gated on it
     /// (`0x4f3f89`), so closing while our own signature is in flight sends no decline.
     signing: bool,
-    /// One step per landed or patched record. The charter tooltip's hover issues the record query,
-    /// so `ui_items`' bag feed gates its rebuild on this or keeps the `None` it read first.
-    records_epoch: u64,
-    /// Lines composed at apply time, shown by the feed, which holds the `script` handle.
+    /// Lines composed at packet time, shown by the feed, which holds the `script` handle.
     lines: Vec<lines::Line>,
     /// What the feed last announced of the charter, across a `/reload`.
     fed: feed::FedPetition,
+    /// A show the feed has not read: its signers' names are the show's lookups with a callback
+    /// (`0x4f417d`).
+    shown: bool,
 }
 
 /// The charter the petition window is showing.
@@ -192,15 +194,32 @@ struct Record {
     is_charter: bool,
 }
 
-impl crate::query_cache::AskOnce for PetitionState {
+/// The petition-record cache (`0xc0e0fc`), apart from [`PetitionState`] so the item feeds that read
+/// a charter's tooltip beside the VM can share the call host.
+#[derive(Resource, Default)]
+pub(crate) struct PetitionRecords {
+    /// The record cache by petition id, asked once through [`QueryCache`].
+    records: QueryCache<u32, Record>,
+    /// One step per landed or patched record. The charter tooltip's hover issues the record query,
+    /// so `ui_items`' bag feed gates its rebuild on this or keeps the `None` it read first.
+    records_epoch: u64,
+}
+
+impl crate::query_cache::AskOnce for PetitionRecords {
     fn clear_pending(&mut self) {
         self.records.clear_pending();
     }
 }
 
 impl PetitionState {
-    /// `SMSG_PETITION_SHOW_SIGNATURES`: open this charter and ask for its record once.
-    fn show(&mut self, sigs: PetitionShowSignatures, commands: &NetCommands) {
+    /// `SMSG_PETITION_SHOW_SIGNATURES`: open this charter and look its record up with the
+    /// callback `0x4f4090` (`0x4f4061`), which asks a refused one again.
+    fn show(
+        &mut self,
+        records: &PetitionRecords,
+        sigs: PetitionShowSignatures,
+        commands: &NetCommands,
+    ) {
         let petition_id = sigs.petition_id;
         self.open = Some(OpenCharter {
             item: sigs.item,
@@ -208,16 +227,38 @@ impl PetitionState {
             petition_id,
             signers: sigs.signatures.into_iter().map(|s| s.signer).collect(),
         });
-        self.request_record(petition_id, sigs.item, commands);
+        self.shown = true;
+        records.request_record(petition_id, sigs.item, Ask::Event(commands));
     }
+}
 
-    /// Ask once per petition id; the feed's next rebuild reads the answer.
-    fn request_record(&self, petition_id: u32, item: u64, commands: &NetCommands) {
-        self.records.get_or_ask(petition_id, || {
+impl PetitionRecords {
+    /// Look the record up as `ask` says; the feed's next rebuild reads the answer.
+    fn request_record(&self, petition_id: u32, item: u64, ask: Ask<'_>) {
+        self.records.read(petition_id, ask, |commands| {
             let _ = commands
                 .0
                 .send(ClientCommand::PetitionQuery { petition_id, item });
         });
+    }
+
+    /// The world entry's clear ([`crate::wdb`]): the petition store is built with persistence off
+    /// (`0x554e60`), so `0x555740` clears it (`0x55580c`).
+    pub(crate) fn clear_world_session(&mut self) {
+        self.records.clear();
+        self.records_epoch = self.records_epoch.wrapping_add(1);
+    }
+
+    /// Files a record as its answer does, for a test elsewhere.
+    #[cfg(test)]
+    pub(crate) fn answer_for_test(&mut self, response: PetitionQueryResponse) {
+        self.apply_record(response);
+    }
+
+    /// Whether the store holds a record for `petition_id`, for a test elsewhere.
+    #[cfg(test)]
+    pub(crate) fn holds_for_test(&self, petition_id: u32) -> bool {
+        self.records.get(petition_id).is_some()
     }
 
     /// One step per landed or patched record.
@@ -230,38 +271,43 @@ impl PetitionState {
         self.records_epoch = self.records_epoch.wrapping_add(1);
         self.records.insert(
             response.petition_id,
-            Some(Record {
+            Record {
                 owner: response.owner,
                 name: response.name,
                 body_text: response.body_text,
                 required: response.min_signatures as i32,
                 is_charter: response.flags & 1 != 0,
-            }),
+            },
         );
     }
 
-    /// The charter tooltip's line 3, the guild name and its master: the hover asks for the record,
-    /// so an unseen charter reads `None` until the answer repaints it.
+    /// The charter tooltip's line 3, the guild name and its master, `None` for an unseen charter
+    /// until the answer repaints it.
     pub(crate) fn tooltip_view(
-        &mut self,
+        &self,
         petition_id: u32,
         item: u64,
         names: &NameCache,
-        commands: &NetCommands,
+        ask: Ask<'_>,
     ) -> Option<benilla_ui::script::PetitionSlotView> {
         if petition_id == 0 {
             return None;
         }
-        self.request_record(petition_id, item, commands);
+        // The build's lookups pass the callback `0x52e530` (`0x52b93b`, the owner `0x52b9d2`).
+        self.request_record(petition_id, item, ask);
         let rec = self.records.get(petition_id)?;
         let (is_charter, title, owner_guid) = (rec.is_charter, rec.name.clone(), rec.owner);
         Some(benilla_ui::script::PetitionSlotView {
             is_charter,
             title,
-            owner: names.resolve(owner_guid, commands).map(str::to_string),
+            owner: names.resolve_player(owner_guid, ask).map(str::to_string),
+            // The item object's, which the slot resolve fills.
+            signatures: 0,
         })
     }
+}
 
+impl PetitionState {
     /// The owner's half of a sign: append the signer, as the reference does (`0x4f41c0`), since no
     /// fresh list comes. Returns the name if cached, the condition for `ERR_PETITION_SIGNED_S`.
     fn append_signer(
@@ -275,18 +321,21 @@ impl PetitionState {
         if !open.signers.contains(&signer) {
             open.signers.push(signer);
         }
-        names.resolve(signer, commands).map(str::to_string)
+        // The packet's lookup with the callback `0x4f3f50` (`0x4f42df`).
+        names
+            .resolve_player(signer, Ask::Event(commands))
+            .map(str::to_string)
     }
 
     /// The `MSG_PETITION_DECLINE` `ClosePetition()` sends (`0x4f3f60`'s leg at `0x4f3fb5`), only
     /// when a petition is open (`0x4f3f7c`), no sign of ours is in flight (`0x4f3f89`), a record
     /// is cached (`0x4f3f95`), and we are not the owner (`0x4f3fa5`/`0x4f3fae`). The reference
     /// reads that owner off the cached record (`0x4f3fa2`); this reads the packet's.
-    fn decline_on_close(&mut self, me: u64, commands: &NetCommands) {
+    fn decline_on_close(&self, records: &PetitionRecords, me: u64, commands: &NetCommands) {
         let Some(open) = self.open.as_ref() else {
             return;
         };
-        if self.signing || !self.records.answered(open.petition_id) || open.owner == me {
+        if self.signing || !records.records.answered(open.petition_id) || open.owner == me {
             return;
         }
         let _ = commands
@@ -334,9 +383,10 @@ pub(crate) struct UiPetitionPlugin;
 impl Plugin for UiPetitionPlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        crate::query_cache::register::<PetitionState>(app);
+        crate::query_cache::register::<PetitionRecords>(app);
         app.init_resource::<GuildRegistrarState>()
             .init_resource::<PetitionState>()
+            .init_resource::<PetitionRecords>()
             .add_latched_window::<GuildRegistrarState>()
             // `0x490b07` → `0x4f4fa0` → `0x4f5010`, the core.
             .add_sweep_leg(SweepLeg::Registrar, close_core)
@@ -346,10 +396,9 @@ impl Plugin for UiPetitionPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    feed::feed_petition.in_set(UiFeed),
-                    feed::drain_petition.after(UiInput),
-                ),
+                (feed::feed_petition
+                    .in_set(UiFeed)
+                    .in_set(crate::ui_session::NpcWindowFeed),),
             );
     }
 }
@@ -409,18 +458,19 @@ pub(crate) mod net {
     fn on_show_signatures(
         In(ev): In<SessionEvent>,
         mut petition: ResMut<PetitionState>,
+        records: Res<PetitionRecords>,
         social: Res<SocialState>,
         commands: Res<NetCommands>,
     ) {
         if let SessionEvent::PetitionShowSignatures(sigs) = ev {
             let ignored = social.is_ignored(sigs.owner);
-            show_signatures(&mut petition, sigs, ignored, &commands);
+            show_signatures(&mut petition, &records, sigs, ignored, &commands);
         }
     }
 
-    fn on_query_response(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+    fn on_query_response(In(ev): In<SessionEvent>, mut records: ResMut<PetitionRecords>) {
         if let SessionEvent::PetitionQueryResponse(response) = ev {
-            query_response(&mut petition, response);
+            query_response(&mut records, response);
         }
     }
 
@@ -468,9 +518,13 @@ pub(crate) mod net {
         }
     }
 
-    fn on_renamed(In(ev): In<SessionEvent>, mut petition: ResMut<PetitionState>) {
+    fn on_renamed(
+        In(ev): In<SessionEvent>,
+        petition: Res<PetitionState>,
+        mut records: ResMut<PetitionRecords>,
+    ) {
         if let SessionEvent::PetitionRenamed(rename) = ev {
-            renamed(&mut petition, rename);
+            renamed(&petition, &mut records, rename);
         }
     }
 
@@ -478,6 +532,7 @@ pub(crate) mod net {
     /// suppresses the whole update, silently (`0x5eeefe`-`0x5eef0b`).
     pub(crate) fn show_signatures(
         petition: &mut PetitionState,
+        records: &PetitionRecords,
         sigs: PetitionShowSignatures,
         owner_ignored: bool,
         commands: &NetCommands,
@@ -489,12 +544,12 @@ pub(crate) mod net {
             );
             return;
         }
-        petition.show(sigs, commands);
+        petition.show(records, sigs, commands);
     }
 
     /// `SMSG_PETITION_QUERY_RESPONSE`: the record cache fill.
-    pub(crate) fn query_response(petition: &mut PetitionState, response: PetitionQueryResponse) {
-        petition.apply_record(response);
+    pub(crate) fn query_response(records: &mut PetitionRecords, response: PetitionQueryResponse) {
+        records.apply_record(response);
     }
 
     /// `SMSG_PETITION_SIGN_RESULTS`: signer and owner get identical copies, told apart by the
@@ -542,7 +597,7 @@ pub(crate) mod net {
     /// `MSG_PETITION_DECLINE` inbound: a line only if the decliner's name is already cached, with
     /// no query or retry (`0x5ef12a`/`0x5ef139`), so this arm takes no command channel.
     pub(crate) fn declined(petition: &mut PetitionState, names: &NameCache, player: u64) {
-        if let Some(name) = names.peek(player) {
+        if let Some(name) = names.resolve_unit(player, None, Ask::Read) {
             let line = lines::declined_line(name);
             petition.lines.push(line);
         }
@@ -550,7 +605,11 @@ pub(crate) mod net {
 
     /// `MSG_PETITION_RENAME` inbound: the echo's name overwrites the cached title in place, with
     /// no re-query (`0x5ef292`, which then fires `PETITION_SHOW`).
-    pub(crate) fn renamed(petition: &mut PetitionState, rename: PetitionRename) {
+    pub(crate) fn renamed(
+        petition: &PetitionState,
+        records: &mut PetitionRecords,
+        rename: PetitionRename,
+    ) {
         let Some(id) = petition
             .open
             .as_ref()
@@ -559,14 +618,14 @@ pub(crate) mod net {
         else {
             return;
         };
-        if !petition.records.answered(id) {
-            petition.records.insert(id, Some(Record::default()));
+        if !records.records.answered(id) {
+            records.records.insert(id, Record::default());
         }
-        if let Some(record) = petition.records.get_mut(id) {
+        if let Some(record) = records.records.get_mut(id) {
             record.name = rename.name;
         }
         // A patched title is a changed record: the tooltip's line 3 reads it too.
-        petition.records_epoch = petition.records_epoch.wrapping_add(1);
+        records.records_epoch = records.records_epoch.wrapping_add(1);
     }
 }
 
@@ -599,9 +658,9 @@ mod tests {
     }
 
     /// The open charter's cached title, `GetPetitionInfo`'s second return.
-    fn open_title(p: &PetitionState) -> Option<&str> {
+    fn open_title<'a>(p: &PetitionState, r: &'a PetitionRecords) -> Option<&'a str> {
         let open = p.open.as_ref()?;
-        p.records.get(open.petition_id).map(|r| r.name.as_str())
+        r.records.get(open.petition_id).map(|r| r.name.as_str())
     }
 
     fn signatures(item: u64, owner: u64, id: u32, signers: &[u64]) -> PetitionShowSignatures {
@@ -669,9 +728,11 @@ mod tests {
             world.resource::<crate::ui_session::InteractLatch>().guid(),
             Some(0x2a1f)
         );
-        world
-            .resource_mut::<PetitionState>()
-            .show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+        world.resource_mut::<PetitionState>().show(
+            &PetitionRecords::default(),
+            signatures(0x99, 0xaa, 7, &[0xbb]),
+            &commands,
+        );
 
         crate::ui_session::dispatch(world);
         assert_eq!(world.resource::<GuildRegistrarState>().npc(), None);
@@ -686,8 +747,9 @@ mod tests {
     fn the_record_query_is_asked_once_per_petition() {
         let (commands, rx) = commands();
         let mut petition = PetitionState::default();
-        petition.show(signatures(0x99, 0xaa, 7, &[]), &commands);
-        petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+        let mut records = PetitionRecords::default();
+        petition.show(&records, signatures(0x99, 0xaa, 7, &[]), &commands);
+        petition.show(&records, signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
         let sent: Vec<_> = rx.try_iter().collect();
         assert_eq!(
             sent.len(),
@@ -703,46 +765,53 @@ mod tests {
         ));
 
         // The answer landing does not re-arm the ask.
-        petition.apply_record(PetitionQueryResponse {
+        records.apply_record(PetitionQueryResponse {
             petition_id: 7,
             name: "Legacy".into(),
             min_signatures: 9,
             ..Default::default()
         });
-        petition.show(signatures(0x99, 0xaa, 7, &[0xbb, 0xcc]), &commands);
+        petition.show(
+            &records,
+            signatures(0x99, 0xaa, 7, &[0xbb, 0xcc]),
+            &commands,
+        );
         assert!(rx.try_iter().next().is_none(), "still no second query");
-        assert_eq!(open_title(&petition), Some("Legacy"));
+        assert_eq!(open_title(&petition, &records), Some("Legacy"));
     }
 
     #[test]
     fn a_rename_echo_patches_the_cached_record() {
         let (commands, _rx) = commands();
         let mut petition = PetitionState::default();
-        petition.show(signatures(0x99, 0xaa, 7, &[]), &commands);
-        petition.apply_record(PetitionQueryResponse {
+        let mut records = PetitionRecords::default();
+        petition.show(&records, signatures(0x99, 0xaa, 7, &[]), &commands);
+        records.apply_record(PetitionQueryResponse {
             petition_id: 7,
             name: "First".into(),
             min_signatures: 9,
             ..Default::default()
         });
         net::renamed(
-            &mut petition,
+            &petition,
+            &mut records,
             PetitionRename {
                 item: 0x99,
                 name: "Second".into(),
             },
         );
-        assert_eq!(open_title(&petition), Some("Second"));
+        assert_eq!(open_title(&petition, &records), Some("Second"));
 
         // An echo for a charter we do not have open is not ours to apply.
         net::renamed(
-            &mut petition,
+            &petition,
+            &mut records,
             PetitionRename {
                 item: 0xdead,
                 name: "Wrong".into(),
             },
         );
-        assert_eq!(open_title(&petition), Some("Second"));
+        assert_eq!(open_title(&petition, &records), Some("Second"));
     }
 
     /// Through the real registration: a new login's VM never runs the old one's `OnHide`.
@@ -753,7 +822,11 @@ mod tests {
         app.add_plugins(UiPetitionPlugin);
         {
             let mut petition = app.world_mut().resource_mut::<PetitionState>();
-            petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+            petition.show(
+                &PetitionRecords::default(),
+                signatures(0x99, 0xaa, 7, &[0xbb]),
+                &commands,
+            );
             petition.signing = true;
         }
         app.world_mut()
@@ -781,6 +854,58 @@ mod tests {
         );
     }
 
+    /// The show looks its signers up with a callback (`0x4f417d`); the getters the frames after it
+    /// feed only read (`0x4f45a1`), and so does the originator's (`0x4f4459`). A refused signer is
+    /// asked by no frame after it, only by the next show.
+    #[test]
+    fn a_refused_signer_is_asked_by_the_next_show_never_by_a_frame() {
+        let (commands, rx) = commands();
+        let mut records = PetitionRecords::default();
+        records.apply_record(PetitionQueryResponse {
+            petition_id: 7,
+            name: "Legacy".into(),
+            min_signatures: 9,
+            ..Default::default()
+        });
+        let mut app = App::new();
+        app.insert_resource(records)
+            .init_resource::<PetitionState>()
+            .init_resource::<NameCache>()
+            .insert_resource(commands)
+            .init_resource::<GuildRegistrarState>()
+            .init_resource::<crate::net::SelfGuid>()
+            .init_resource::<crate::ui_chat::ChatLog>()
+            .init_resource::<crate::sound::MessageSounds>()
+            .add_systems(Update, feed::feed_petition);
+        app.insert_non_send_resource(benilla_ui::script::UiScript::new().unwrap());
+        let show = |app: &mut App| {
+            let commands = NetCommands(app.world().resource::<NetCommands>().0.clone());
+            app.world_mut()
+                .resource_scope(|world, mut petition: Mut<PetitionState>| {
+                    let records = world.resource::<PetitionRecords>();
+                    petition.show(records, signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+                });
+            app.update();
+        };
+        let named = |rx: &crossbeam_channel::Receiver<ClientCommand>| {
+            crate::query_cache::queries(rx)
+                .into_iter()
+                .filter(|c| matches!(c, ClientCommand::NameQuery { .. }))
+                .count()
+        };
+        show(&mut app);
+        assert_eq!(named(&rx), 1, "the signer, and not the originator");
+        app.world_mut()
+            .resource_mut::<NameCache>()
+            .insert_player(0xbb, String::new(), None);
+        for _ in 0..600 {
+            app.update();
+        }
+        assert_eq!(named(&rx), 0, "no frame asks a refusal");
+        show(&mut app);
+        assert_eq!(named(&rx), 1, "the next show asks again");
+    }
+
     /// A `/reload` with a charter shown: every `PETITION_SHOW` answers a packet, so the new VM
     /// hears none, and the sweep's petition leg (`0x490b11` → `0x4f3eb0`) frees the signers with
     /// no event; the new VM reads none.
@@ -794,8 +919,9 @@ mod tests {
         names.insert_player(0xbb, "Signer".to_string(), None);
         names.insert_player(0xaa, "Owner".to_string(), None);
         let mut petition = PetitionState::default();
-        petition.show(signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
-        petition.apply_record(PetitionQueryResponse {
+        let mut records = PetitionRecords::default();
+        petition.show(&records, signatures(0x99, 0xaa, 7, &[0xbb]), &commands);
+        records.apply_record(PetitionQueryResponse {
             petition_id: 7,
             name: "Legacy".into(),
             min_signatures: 9,
@@ -803,6 +929,7 @@ mod tests {
         });
         let mut app = App::new();
         app.insert_resource(petition)
+            .insert_resource(records)
             .insert_resource(names)
             .insert_resource(commands)
             .init_resource::<GuildRegistrarState>()

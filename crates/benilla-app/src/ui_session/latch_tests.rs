@@ -61,11 +61,14 @@ fn event(window: W) -> &'static str {
     }
 }
 
-/// The windows on the latch with their cells, a wire, and a VM that records their closes. Every
-/// unit guid's entry is 0, which a type-9 template makes a book, so any NPC here can be read.
+/// The windows on the latch with their cells, a wire, and a VM that records their closes. A
+/// type-9 template for [`BOOK_ENTRY`] makes a book of any guid that [`open`] streams as that
+/// entry's GameObject, so any NPC here can be read.
 pub(super) fn harness() -> App {
     harness_with_wire().0
 }
+
+const BOOK_ENTRY: u32 = 1;
 
 fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -73,10 +76,14 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
     let mut books = crate::go_templates::GameObjectTemplates::default();
     let mut data = [0i32; 24];
     data[0] = 1;
-    books.insert(0, 9, "Book".into(), &data);
+    books.insert(BOOK_ENTRY, 9, "Book".into(), &data);
+    // Its first page cached, which the reader's begin waits on (`0x4e3465`).
+    let mut pages = crate::ui_item_text::PageTexts::default();
+    pages.insert(1, "Page one.".into(), 0);
     app.insert_resource(NetCommands(tx))
         .add_message::<LatchVocal>()
         .insert_resource(books)
+        .insert_resource(pages)
         .init_resource::<crate::net::GuidIndex>()
         .init_resource::<crate::items::Items>()
         .init_resource::<TradeSession>()
@@ -109,7 +116,7 @@ fn harness_with_wire() -> (App, crossbeam_channel::Receiver<crate::net::ClientCo
     (app, rx)
 }
 
-pub(super) fn latch(app: &App) -> Option<u64> {
+pub(crate) fn latch(app: &App) -> Option<u64> {
     app.world().resource::<InteractLatch>().guid()
 }
 
@@ -148,15 +155,46 @@ fn greeting(npc: u64) -> QuestView {
     })
 }
 
+/// A read of `npc` as a book: the reader finds the template through the object's own descriptor,
+/// so the guid is streamed as a GameObject of [`BOOK_ENTRY`] first.
+fn read_book(world: &mut World, npc: u64) {
+    if !world
+        .resource::<crate::net::GuidIndex>()
+        .0
+        .contains_key(&npc)
+    {
+        crate::items::test_spawn_object(
+            world,
+            npc,
+            crate::go_templates::test_typed_fields(BOOK_ENTRY, 9),
+        );
+    }
+    crate::ui_item_text::read_now(world, npc);
+}
+
 /// Each window's open as its packet handler or click runs it, on `npc`.
-pub(super) fn open(app: &mut App, window: W, npc: u64) {
+pub(crate) fn open(app: &mut App, window: W, npc: u64) {
     let world = app.world_mut();
     match window {
         W::Trade => {
             world.resource_mut::<TradeSession>().begin(npc);
             crate::ui_trade::open_window(world);
         }
-        W::ItemText => crate::ui_item_text::read_now(world, npc),
+        W::ItemText => {
+            // The reader finds the template through the object's own descriptor.
+            if !world
+                .resource::<crate::net::GuidIndex>()
+                .0
+                .contains_key(&npc)
+            {
+                crate::items::test_spawn_object(
+                    world,
+                    npc,
+                    crate::go_templates::test_typed_fields(BOOK_ENTRY, 9),
+                );
+            }
+            crate::ui_item_text::read_now(world, npc)
+        }
         W::Merchant => crate::ui_merchant::open_merchant(world, npc, Vec::new()),
         W::Bank => crate::ui_bank::open_bank(world, npc),
         W::Gossip => crate::ui_gossip::open_menu(world, npc, 0, Vec::new(), Vec::new()),
@@ -329,70 +367,6 @@ fn a_direct_close_of_the_latched_window_fires_its_event_twice_and_quest_once() {
     }
 }
 
-/// The stock frames answer `*_CLOSED` with `HideUIPanel`, whose `OnHide` calls the close verb.
-/// The verb runs inside the fire, as the reference's does. From the X button (the frame already
-/// hidden, its `OnHide` calling the verb) every core fires twice. From a walk-away the merchant's
-/// verb finds its cell already clear (`0x4fae0e` clears before `0x4fae2c` fires), while the bank's
-/// and the trainer's fire before they clear (`0x4f84df`, `0x4d7468`), so their verb fires again.
-#[test]
-fn a_stock_on_hide_close_inside_the_fire_runs_as_the_reference() {
-    for (window, event, verb, walk_away_times) in [
-        (
-            super::NpcWindow::Merchant,
-            "MERCHANT_CLOSED",
-            "CloseMerchant",
-            1,
-        ),
-        (
-            super::NpcWindow::Bank,
-            "BANKFRAME_CLOSED",
-            "CloseBankFrame",
-            2,
-        ),
-        (
-            super::NpcWindow::Trainer,
-            "TRAINER_CLOSED",
-            "CloseTrainer",
-            2,
-        ),
-    ] {
-        for walk_away in [false, true] {
-            let mut app = harness();
-            app.world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .run(&format!(
-                    "SHOWN = true local f = CreateFrame('Frame') f:RegisterEvent('{event}') \
-                     f:SetScript('OnEvent', function() \
-                       if SHOWN then SHOWN = false {verb}() end end)"
-                ))
-                .unwrap();
-            open(&mut app, window, NPC);
-            if walk_away {
-                dispatch(app.world_mut());
-            } else {
-                // The X button: `HideUIPanel` hides the frame, and `OnHide` calls the verb.
-                app.world()
-                    .non_send_resource::<benilla_ui::script::UiScript>()
-                    .run("SHOWN = false")
-                    .unwrap();
-                close(&mut app, window);
-            }
-            let times = if walk_away { walk_away_times } else { 2 };
-            assert_eq!(
-                seen_in(&app),
-                vec![event; times],
-                "{window:?}, walk-away {walk_away}"
-            );
-            assert_eq!(latch(&app), None);
-            assert!(app
-                .world()
-                .non_send_resource::<benilla_ui::script::UiScript>()
-                .errors()
-                .is_empty());
-        }
-    }
-}
-
 /// A trade holds the latch like an NPC window: a vendor's list closes it through the trade arm
 /// (`0x493365`), `TRADE_CLOSED` once and `CMSG_CANCEL_TRADE` once (`0x4bf527`); a trade's open
 /// closes the vendor and sends nothing of its own.
@@ -463,7 +437,7 @@ fn a_book_over_a_trade_cancels_it_before_the_begin() {
         .resource_mut::<TradeSession>()
         .begin(PARTNER);
     crate::ui_trade::open_window(app.world_mut());
-    crate::ui_item_text::read_now(app.world_mut(), NPC);
+    read_book(app.world_mut(), NPC);
     assert_eq!(seen_in(&app), ["TRADE_CLOSED", "ITEM_TEXT_BEGIN"]);
     let sent: Vec<ClientCommand> = rx.try_iter().collect();
     assert!(
@@ -480,7 +454,7 @@ fn a_book_over_a_trade_cancels_it_before_the_begin() {
 fn a_book_and_an_npc_window_close_each_other() {
     let mut app = harness();
     crate::ui_merchant::open_merchant(app.world_mut(), VENDOR, Vec::new());
-    crate::ui_item_text::read_now(app.world_mut(), NPC);
+    read_book(app.world_mut(), NPC);
     assert_eq!(seen_in(&app), ["MERCHANT_CLOSED"]);
     assert_eq!(latch(&app), Some(NPC));
 
@@ -555,4 +529,38 @@ fn a_walk_away_says_no_goodbye() {
             "{window:?} again"
         );
     }
+}
+
+/// A window that writes its cell on a latched guid without registering leaves two holders, so a
+/// close verb releasing the latch inside its call (`LatchSteps::release`, which skips
+/// `0x493310`'s walk) would strand the other: the next walk's check trips in a debug build.
+#[test]
+#[should_panic(expected = "still hold the released guid")]
+fn a_second_holder_of_a_latched_guid_trips_the_walks_check() {
+    let mut app = harness();
+    let world = app.world_mut();
+    crate::ui_gossip::open_menu(world, NPC, 0, Vec::new(), Vec::new());
+    world
+        .resource_mut::<GuildRegistrarState>()
+        .open_for_test(NPC);
+    dispatch(world);
+}
+
+/// The leash (`0x493230`) runs in the frame time: the reference calls it from the world frame's
+/// update (`0x4818c0` in `CGWorldFrame::OnUpdate`, `0x481790`), after the frame's input records
+/// and its packets, so a click on an open window's button reads the latch as the last frame left
+/// it and a walk-away closes it after.
+#[test]
+fn the_leash_runs_after_the_input_records_and_the_packets() {
+    let mut app = crate::game_plugins::schedule_tests::headless_client();
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::net::apply_net_updates,
+        super::latch::watch_interaction_range
+    ));
+    assert!(crate::test_support::runs_before(
+        &mut app,
+        crate::player::camera::latch_world_mouse,
+        super::latch::watch_interaction_range
+    ));
 }

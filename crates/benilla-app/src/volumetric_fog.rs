@@ -231,6 +231,7 @@ fn select_fog_lamps(
     selected
 }
 
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn update_fog(
     mut commands: Commands,
     video: Res<VideoConfig>,

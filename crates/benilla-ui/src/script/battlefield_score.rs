@@ -129,6 +129,12 @@ impl super::UiScript {
         model.battlefield_board.rebuild();
     }
 
+    /// The world-enter cascade's clear (`0x4a9db0`): no rows, not ended, no winner, no columns, the
+    /// filter back to `-1`. It signals nothing.
+    pub fn clear_battlefield_scores(&mut self) {
+        self.model_mut().battlefield_board = ScoreBoard::default();
+    }
+
     /// Whether a newer board waits on names the app is still resolving (`[0xb6ebd4]`).
     pub fn set_battlefield_score_names_pending(&mut self, pending: bool) {
         self.model_mut().battlefield_board.names_pending = pending;
@@ -146,17 +152,6 @@ impl super::UiScript {
     /// `GetBattlefieldInstanceRunTime()`'s answer in ms, pushed each frame.
     pub fn set_battlefield_run_time_ms(&mut self, ms: u32) {
         self.model_mut().battlefield_run_time_ms = ms;
-    }
-
-    /// `RequestBattlefieldScoreData()` calls since the last drain.
-    pub fn take_battlefield_score_requests(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().battlefield_score_requests)
-    }
-
-    /// `LeaveBattlefield()` calls that passed the "ended" gate; the app sends
-    /// `CMSG_LEAVE_BATTLEFIELD` with the active slot's map.
-    pub fn take_battlefield_leave_requests(&mut self) -> u32 {
-        std::mem::take(&mut self.model_mut().battlefield_leave_requests)
     }
 }
 
@@ -308,13 +303,11 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // The app sends an empty `MSG_PVP_LOG_DATA` under the client's 5000 ms throttle (`0x4aa170`).
+    // An empty `MSG_PVP_LOG_DATA` under the client's 5000 ms throttle (`0x4aa170`).
     g.set(
         "RequestBattlefieldScoreData",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            model.battlefield_score_requests += 1;
-            Ok(())
+            super::battlefield_queue::submit(lua, super::BattlefieldCall::ScoreData)
         })?,
     )?;
 
@@ -322,11 +315,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "LeaveBattlefield",
         lua.create_function(|lua, ()| {
-            let mut model = lua.app_data_mut::<Model>().expect("model app_data");
-            if model.battlefield_board.scores.ended {
-                model.battlefield_leave_requests += 1;
+            let ended = {
+                let model = lua.app_data_ref::<Model>().expect("model app_data");
+                model.battlefield_board.scores.ended
+            };
+            if !ended {
+                return Ok(());
             }
-            Ok(())
+            super::battlefield_queue::submit(lua, super::BattlefieldCall::Leave)
         })?,
     )?;
 
@@ -519,10 +515,10 @@ mod tests {
         assert!(s
             .eval::<bool>("return GetBattlefieldWinner() == nil")
             .unwrap());
+        s.keep_calls();
         s.run("LeaveBattlefield()").unwrap();
-        assert_eq!(
-            s.take_battlefield_leave_requests(),
-            0,
+        assert!(
+            s.take_battlefield_calls().is_empty(),
             "not ended: LeaveBattlefield sends nothing"
         );
         s.set_battlefield_scores(BattlefieldScores {
@@ -533,8 +529,13 @@ mod tests {
         assert_eq!(s.eval::<i64>("return GetBattlefieldWinner()").unwrap(), 1);
         s.run("LeaveBattlefield() RequestBattlefieldScoreData()")
             .unwrap();
-        assert_eq!(s.take_battlefield_leave_requests(), 1);
-        assert_eq!(s.take_battlefield_score_requests(), 1);
+        assert_eq!(
+            s.take_battlefield_calls(),
+            vec![
+                crate::script::BattlefieldCall::Leave,
+                crate::script::BattlefieldCall::ScoreData
+            ]
+        );
         s.set_battlefield_run_time_ms(65000);
         assert_eq!(
             s.eval::<i64>("return GetBattlefieldInstanceRunTime()")

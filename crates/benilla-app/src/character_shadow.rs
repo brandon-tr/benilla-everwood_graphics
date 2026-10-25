@@ -51,6 +51,7 @@ struct CharacterLane {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn collect_character_shadows(
     video: Res<VideoConfig>,
     time: Res<Time>,

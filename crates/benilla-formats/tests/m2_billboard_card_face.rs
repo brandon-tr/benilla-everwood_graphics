@@ -116,9 +116,11 @@ fn the_shape_ignores_edge_on_correct_and_degenerate_batches() {
         rgb_seq: None,
         wmo_batch: None,
         env_map: false,
+        stage1: None,
+        combine: 1,
         section: None,
         // MONKEY (integration): the skybox lane's second texture stage.
-        stage1: None,
+        sky_stage1: None,
     };
 
     assert!(

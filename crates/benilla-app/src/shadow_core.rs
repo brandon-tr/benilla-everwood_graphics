@@ -57,7 +57,7 @@ use benilla_world::model_render::{ModelKind, ModelPart, ShadowOccluder};
 use benilla_world::rig_palette::{RigPalettes, RigPart, RigSkin};
 use benilla_world::view::WorldCamera;
 
-use crate::char_select::ClientState;
+use crate::client_state::ClientState;
 use crate::video::VideoConfig;
 
 /// Layer 31 is deliberately private to this feature. Bevy supports 32 render layers; the normal
@@ -456,6 +456,7 @@ fn apply_shadow_quality(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 fn manage_rig(
     state: Res<State<ClientState>>,
     video: Res<VideoConfig>,
@@ -695,7 +696,7 @@ pub(crate) fn append_triangles(
     base: u32,
     indices: &mut Vec<u32>,
 ) {
-    for triangle in source.chunks_exact(3) {
+    for triangle in source.as_chunks::<3>().0 {
         if triangle.iter().all(|index| *index < vertex_count) {
             indices.extend(triangle.iter().map(|index| base + *index));
         }
@@ -753,6 +754,7 @@ pub(crate) fn empty_cutout_mesh() -> Mesh {
 /// `(admitted, occluder-rejected)` for the trace. Range-gates before any vertex work. The `parts`
 /// query is written inline (not aliased) so a lane can pass its own identically-typed query.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)] // Bevy query tuples include disjoint render populations.
 pub(crate) fn collect_entity_geometry(
     parts: &Query<
         (
@@ -885,7 +887,7 @@ fn append_skinned(
         let (Some(joints), Some(weights)) = (pick.0.joints.get(index), pick.0.weights.get(index))
         else {
             let fallback = palette
-                .get(0)
+                .first()
                 .map(|matrix| matrix.transform_point3(wow_to_bevy(*position)))
                 .unwrap_or(Vec3::ZERO);
             positions.push(fallback.to_array());

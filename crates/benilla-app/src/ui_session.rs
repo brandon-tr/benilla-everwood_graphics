@@ -16,15 +16,17 @@ use benilla_world::schedule::WorldStage;
 
 mod latch;
 #[cfg(test)]
-mod latch_tests;
+pub(crate) mod latch_tests;
 mod release;
 #[cfg(test)]
 mod release_tests;
 
 pub(crate) use latch::{
-    dispatch, fire, note_closed, queue, register, release, with_script, CoreCloses, InteractLatch,
-    LatchApp, LatchVocal, LatchedWindow, NpcWindow,
+    dispatch, fire, latch_reads, note_closed, queue, register, release, release_cell,
+    release_latch, with_script, CoreCloses, InteractLatch, LatchApp, LatchCloses, LatchSteps,
+    LatchVocal, LatchedWindow, NpcWindow,
 };
+pub(crate) use release::form_bars_interaction;
 
 /// Owns [`InteractLatch`], its watchdog and [`InteractNpc`], read by the `"npc"` portrait and the
 /// interaction face-me.
@@ -32,7 +34,9 @@ pub(crate) struct UiSessionPlugin;
 
 impl Plugin for UiSessionPlugin {
     fn build(&self, app: &mut App) {
+        app.configure_sets(Update, NpcWindowFeed.after(crate::ui_unit::UnitFeed));
         app.init_resource::<InteractLatch>()
+            .init_resource::<LatchCloses>()
             .add_message::<LatchVocal>()
             .init_resource::<InteractNpc>()
             .net_handler(
@@ -45,9 +49,14 @@ impl Plugin for UiSessionPlugin {
             .add_systems(
                 Update,
                 (
-                    // Before the feeds, so a walk-away's `*_CLOSED` lands the frame it happens.
-                    latch::watch_interaction_range.before(crate::ui_script::UiFeed),
-                    // The unit events that release the latch, off the apply pass's field edges.
+                    // In the frame time, after the input records and the packets, as the reference
+                    // calls it from the world frame's update (`0x4818c0`); before the feeds, so a
+                    // walk-away's `*_CLOSED` lands the frame it happens.
+                    latch::watch_interaction_range
+                        .after(WorldStage::Net)
+                        .before(crate::ui_script::UiFeed),
+                    // The form change and the service flags that release the latch, off the
+                    // apply pass's field edges; a death's are its handler's (`crate::target`).
                     release::release_on_field_edges
                         .in_set(WorldStage::Net)
                         .after(crate::net::apply_net_updates)
@@ -63,6 +72,14 @@ impl Plugin for UiSessionPlugin {
             );
     }
 }
+
+/// The feeds of the windows on the latch, each also in [`crate::ui_script::UiFeed`], whose show
+/// events the stock handlers answer with `UnitName("npc")` and `SetPortraitTexture(…, "npc")`:
+/// after [`crate::ui_unit::UnitFeed`], which seats the token. The reference writes `[0xb4e2d0]` as
+/// the packet is handled (`0x4e26fa` → `0x4e1fe9` → `0x4930d0`), before the show it fires
+/// (`0x4e27df`), so no show reads it stale.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct NpcWindowFeed;
 
 /// A question bound to a live NPC with a guid of its own, not the latch: the binder and
 /// talent-wipe questions and the pet trainer's, as the reference re-runs its interact-range test
@@ -380,7 +397,7 @@ mod tests {
         ];
 
         // The chain's own source says what is wired.
-        // MONKEY (integration): a CRLF checkout must still find the function's closing brace.
+        // Line endings normalised first: the end of the function is found on `\n`.
         let this_file = include_str!("ui_session.rs").replace("\r\n", "\n");
         let chain = this_file
             .split_once("pub(crate) fn feed_interact_npc")

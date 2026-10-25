@@ -1,12 +1,12 @@
 //! MONKEY (lighting debug panel): a native editor for the LIVE video CVars. Reads are typed
 //! `VideoConfig` fields, never a second settings store; changed widgets alone call
-//! `UiScript::set_cvar_engine`, whose queue is the same one Lua `SetCVar` feeds. The normal host
+//! `Cvars::set`, the registry Lua `SetCVar` feeds. The normal host
 //! sync owns clamps, renderer bridges and persistence, so a slider and a chat command cannot
-//! acquire separate truths. Registry lookup is reserved for an explicit reset, not idle frames.
+//! acquire separate truths. The registry owns the preset name and reset defaults.
 
 use std::ops::RangeInclusive;
 
-use benilla_ui::script::UiScript;
+use crate::cvars::Cvars;
 use bevy_egui::egui;
 
 use crate::cvars::REGISTERED;
@@ -33,7 +33,7 @@ struct Knob {
 // bounds mirror `video::on_cvar`'s MONKEY (lighting) arms — the registry's change-callback
 // observer since 2303 — including their wider ambient/fill/attenuation ranges;
 // shared shadow constants follow the setter directly. Casting the booleans through u32 keeps
-// the descriptor read-only without inventing a parallel configuration type.
+// the decvarsor read-only without inventing a parallel configuration type.
 macro_rules! knob {
     ($name:literal, $field:ident, $widget:expr, $help:literal) => {
         Knob {
@@ -260,17 +260,17 @@ const GROUPS: &[(&str, &[Knob])] = &[
     ),
 ];
 
-fn reset(script: &mut UiScript, knobs: &[Knob]) {
+fn reset(cvars: &mut Cvars, knobs: &[Knob]) {
     for knob in knobs {
         let registered = REGISTERED
             .iter()
             .find(|r| r.name == knob.name)
             .expect("lighting panel knob must be registered");
-        script.set_cvar_engine(registered.name, registered.default);
+        cvars.set(registered.name, registered.default);
     }
 }
 
-fn row(ui: &mut egui::Ui, video: &VideoConfig, script: &mut UiScript, knob: &Knob) {
+fn row(ui: &mut egui::Ui, video: &VideoConfig, cvars: &mut Cvars, knob: &Knob) {
     let mut value = (knob.read)(video);
     // MONKEY (lighting debug panel): stack the label over numeric controls so even the longest
     // CVar fits the existing 280 px panel. Sliders retain their editable current-value readout;
@@ -310,31 +310,27 @@ fn row(ui: &mut egui::Ui, video: &VideoConfig, script: &mut UiScript, knob: &Kno
         })
         .inner;
     if changed {
-        script.set_cvar_engine(knob.name, &value.to_string());
+        cvars.set(knob.name, &value.to_string());
     }
 }
 
-pub(super) fn section(ui: &mut egui::Ui, video: &VideoConfig, script: Option<&mut UiScript>) {
-    let Some(script) = script else {
-        ui.weak("Lighting controls are available once the UI session is ready.");
-        return;
-    };
+pub(super) fn section(ui: &mut egui::Ui, video: &VideoConfig, cvars: &mut Cvars) {
     // MONKEY (advanced graphics): the `lightingQuality` ladder — the same row the player reaches
     // on the Advanced Graphics page, so this panel and that window cannot show different answers.
     // The rungs are `cvars::LIGHTING_PRESETS`, never a second table here; the CURRENT name is read
-    // off the VM mirror rather than derived locally, because the registry's own per-frame
+    // off the registry rather than derived locally, because the registry's own per-frame
     // derivation is the one authority on it and a second derivation would be a second opinion.
     ui.horizontal(|ui| {
         ui.label("Lighting quality").on_hover_text(
             "Writes the member rows below; reads back Custom when they match no rung.",
         );
-        let current = script.cvar("lightingQuality").unwrap_or_default();
+        let current = cvars.get("lightingQuality").unwrap_or_default().to_owned();
         for (name, _) in crate::cvars::LIGHTING_PRESETS {
             if ui
                 .selectable_label(current.eq_ignore_ascii_case(name), *name)
                 .clicked()
             {
-                script.set_cvar_engine("lightingQuality", name);
+                cvars.set("lightingQuality", name);
             }
         }
         if current.eq_ignore_ascii_case(crate::cvars::LIGHTING_CUSTOM) {
@@ -364,10 +360,10 @@ pub(super) fn section(ui: &mut egui::Ui, video: &VideoConfig, script: Option<&mu
             {
                 if let Some(values) = values {
                     for (knob, value) in INTERIOR[1..5].iter().zip(values) {
-                        script.set_cvar_engine(knob.name, value);
+                        cvars.set(knob.name, value);
                     }
                 } else {
-                    reset(script, &INTERIOR[1..5]);
+                    reset(cvars, &INTERIOR[1..5]);
                 }
             }
         }
@@ -378,7 +374,7 @@ pub(super) fn section(ui: &mut egui::Ui, video: &VideoConfig, script: Option<&mu
         .clicked()
     {
         for (_, knobs) in GROUPS {
-            reset(script, knobs);
+            reset(cvars, knobs);
         }
     }
     for (name, knobs) in GROUPS {
@@ -386,10 +382,10 @@ pub(super) fn section(ui: &mut egui::Ui, video: &VideoConfig, script: Option<&mu
             ui.separator();
             ui.strong(*name);
             for knob in *knobs {
-                row(ui, video, script, knob);
+                row(ui, video, cvars, knob);
             }
             if ui.small_button("Reset group to defaults").clicked() {
-                reset(script, knobs);
+                reset(cvars, knobs);
             }
         });
     }

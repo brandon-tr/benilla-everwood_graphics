@@ -1,9 +1,14 @@
 //! Fills the `%` holes of a `GlobalStrings.lua` or `GlueStrings.lua` template read at runtime, as
-//! the client's `SStrPrintf` does: `%s`, `%d`, `%c`, `%f` and `%g` take the next argument left to
-//! right, `%N$s` takes argument N without moving that cursor (`DUEL_WINNER_RETREAT` reorders its
-//! two names), `%%` is `%`, and the precision is the template's. A hole with no argument, or one
-//! this does not know, is copied through literally so a mis-modelled template shows. Reals round
-//! as the MSVC CRT behind `SStrPrintf` does: half up on the decimal digits ([`crt_digits`]).
+//! the client's `SStrPrintf` does. Storm's ordered formatter `vsnoprintf` (`0x6697d0`), which
+//! `ClientMain` switches on (`0x402141`), binds each hole to an argument before it prints: a plain
+//! hole takes the running index, `%N$` sets that index to N - 1 (`0x669af7`-`0x669b0b`, N = 0 gives
+//! 0), and after any hole that takes an argument the running index is its index plus one
+//! (`0x669892`-`0x669895`). So `%2$s` then `%s` takes arguments 2 and 3 (`DUEL_WINNER_RETREAT`
+//! reorders its two names). An argument no hole names is skipped. `%s`, `%d`, `%c`, `%f` and `%g`
+//! print their argument, `%%` is `%`, and the precision is the template's. [`fill`] copies a hole
+//! with no argument, or one this does not know, through literally so a mis-modelled template
+//! shows; [`fill_exact`] refuses the line instead. Reals are the MSVC CRT's behind `SStrPrintf`
+//! ([`crt_float`]).
 
 use std::fmt::Write as _;
 
@@ -143,6 +148,14 @@ impl From<f64> for Arg<'_> {
 }
 
 impl Arg<'_> {
+    /// Whether this is the kind a `conv` hole prints as itself, for [`fill_exact`].
+    fn fits(&self, conv: char) -> bool {
+        matches!(
+            (conv, self),
+            ('s' | 'c', Arg::S(_)) | ('d', Arg::D(_)) | ('f' | 'g', Arg::F(_))
+        )
+    }
+
     /// `%s` and `%c`.
     fn as_s(&self, out: &mut String) {
         match self {
@@ -170,124 +183,32 @@ impl Arg<'_> {
         }
     }
 
-    /// `%f`/`%.Nf`, the precision defaulting to C's 6.
+    /// `%f`/`%.Nf` by the CRT, the precision defaulting to C's 6.
     fn as_f(&self, prec: Option<usize>, out: &mut String) {
-        let p = prec.unwrap_or(6);
         match self {
-            Arg::F(x) => crt_f(*x, p, out),
-            Arg::D(n) => crt_f(*n as f64, p, out),
+            Arg::F(x) => out.push_str(&crt_float(*x, b'f', prec)),
+            Arg::D(n) => out.push_str(&crt_float(*n as f64, b'f', prec)),
             Arg::S(s) => out.push_str(s),
         }
     }
 
-    /// `%g`/`%.Ng` by C's rule, the precision P counting significant digits: with X the exponent
-    /// of the value in `%e` at precision P−1, use `%f` at P−1−X when P > X ≥ −4, else `%e`, then
-    /// drop trailing zeros. 1.12's five `%.3g` cast and cooldown templates need it: a 100-second
-    /// cooldown is "1.67 min", where Rust's shortest round-trip `{}` prints 17 digits.
+    /// `%g`/`%.Ng` by the CRT, the precision counting significant digits: 1.12's five `%.3g`
+    /// cast and cooldown templates need it, a 100-second cooldown being "1.67 min".
     fn as_g(&self, prec: Option<usize>, out: &mut String) {
         let Arg::F(x) = self else {
             return self.as_s(out);
         };
-        let p = prec.unwrap_or(6).max(1);
-        if *x == 0.0 {
-            out.push('0');
-            return;
-        }
-        if !x.is_finite() {
-            let _ = write!(out, "{x}");
-            return;
-        }
-        if x.is_sign_negative() {
-            out.push('-');
-        }
-        // Round to P significant digits first, then read the exponent, so 9.999 at P=3 is "10",
-        // not "10.0"; the style's digits are the rounded ones, never rounded twice.
-        let (digits, decpt) = crt_digits(x.abs(), |_| p as i32);
-        let exp = decpt - 1;
-        if exp < -4 || exp >= p as i32 {
-            // `%e`: C writes at least two exponent digits and always a sign; Rust writes neither.
-            let mantissa = fixed(&digits, 1, p - 1);
-            out.push_str(trim_zeros(&mantissa));
-            let _ = write!(out, "e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs());
-        } else {
-            let decimals = (p as i32 - 1 - exp).max(0) as usize;
-            out.push_str(trim_zeros(&fixed(&digits, decpt, decimals)));
-        }
+        out.push_str(&crt_float(*x, b'g', prec));
     }
 }
 
-/// `%f` by the CRT: the sign, then [`crt_digits`] rounded at `p` decimals.
-fn crt_f(x: f64, p: usize, out: &mut String) {
-    if !x.is_finite() {
-        let _ = write!(out, "{x:.p$}");
-        return;
-    }
-    if x.is_sign_negative() {
-        out.push('-');
-    }
-    let (digits, decpt) = crt_digits(x.abs(), |decpt| decpt + p as i32);
-    out.push_str(&fixed(&digits, decpt, p));
-}
-
-/// The CRT's decimal digits of a finite `a >= 0` and its point position `decpt` (the value is
-/// `0.d1d2… × 10^decpt`): `_fltout2` takes 17 significant digits, then `_fptostr 0x40fef0` keeps
-/// `keep(decpt)` of them and rounds on the next digit, half up (`40ff3d: cmp byte [ecx],0x35`),
-/// a carry out of the first digit moving the point (`40ff4f`). A negative count keeps nothing
-/// and rounds nothing (`40ff3b`). So 41.25 at one decimal is 41.3, where Rust's `{:.1}` rounds
-/// the tie to even.
-fn crt_digits(a: f64, keep: impl FnOnce(i32) -> i32) -> (Vec<u8>, i32) {
-    let sci = format!("{a:.16e}");
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
-    let mant: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
-    let mut decpt = exp.parse::<i32>().unwrap_or(0) + 1;
-    let Ok(n) = usize::try_from(keep(decpt)) else {
-        return (Vec::new(), decpt);
-    };
-    // A leading slot takes the carry.
-    let mut buf = vec![b'0'];
-    buf.extend((0..n).map(|i| mant.get(i).copied().unwrap_or(b'0')));
-    if mant.get(n).is_some_and(|&d| d >= b'5') {
-        let mut i = buf.len() - 1;
-        while buf[i] == b'9' {
-            buf[i] = b'0';
-            i -= 1;
-        }
-        buf[i] += 1;
-    }
-    if buf[0] == b'1' {
-        decpt += 1;
-    } else {
-        buf.remove(0);
-    }
-    (buf, decpt)
-}
-
-/// Lay rounded digits out as `int.frac` with `p` decimals, zero-padded both sides (`_cftof`).
-fn fixed(digits: &[u8], decpt: i32, p: usize) -> String {
-    let digit = |i: i32| -> char {
-        usize::try_from(i)
-            .ok()
-            .and_then(|i| digits.get(i))
-            .map_or('0', |&d| d as char)
-    };
-    let mut s: String = if decpt <= 0 {
-        "0".into()
-    } else {
-        (0..decpt).map(digit).collect()
-    };
-    if p > 0 {
-        s.push('.');
-        s.extend((0..p as i32).map(|k| digit(decpt + k)));
-    }
-    s
-}
-
-/// `%g`'s last step: drop a fraction's trailing zeros, and the point if nothing is left.
-fn trim_zeros(s: &str) -> &str {
-    match s.contains('.') {
-        true => s.trim_end_matches('0').trim_end_matches('.'),
-        false => s,
-    }
+/// A real as `SStrPrintf` (`0x64a7f0`) writes it: `ISStrVPrintf` (`0x64a820`) hands the
+/// template to the CRT's `_vsnprintf` (`0x73f6ad`), or with Storm's positional option set to
+/// `vsnoprintf` (`0x6697d0`), which passes each hole to the CRT's `_snprintf` (`0x6699fb`);
+/// either way MSVC's `__output` formats it, half up on the digit text, with three exponent
+/// digits and `1.#INF` for an infinity.
+fn crt_float(x: f64, conv: u8, prec: Option<usize>) -> String {
+    mlua::benilla_lua::crt_float(x, conv, prec)
 }
 
 /// One parsed `%…` specifier.
@@ -347,6 +268,20 @@ pub fn global(lua: &mlua::Lua, key: &str) -> Option<String> {
     value.filter(|s| !s.is_empty())
 }
 
+/// `FACTION_STANDING_LABEL<rank + 1>` gendered by `0x612bf0`: a female player tries the
+/// `_FEMALE` twin and, when that is absent or empty, the bare key (`0x612c36`). A label absent
+/// altogether is the empty string, as `0x703bf0` never returns NULL. Read by the standing chat
+/// line, the quest log's faction objective and the item and spell tooltips' reputation lines.
+pub fn standing_label(get: &dyn Fn(&str) -> Option<String>, rank: u32, female: bool) -> String {
+    let key = format!("FACTION_STANDING_LABEL{}", rank.wrapping_add(1));
+    let defined = |k: &str| get(k).filter(|v| !v.is_empty());
+    female
+        .then(|| defined(&format!("{key}_FEMALE")))
+        .flatten()
+        .or_else(|| defined(&key))
+        .unwrap_or_default()
+}
+
 /// `GetText(token, nil, ordinal)`'s plural pick: `0x52fa50` formats the key and `0x703bf0`
 /// pcalls the Lua `GetText`, where `GetPluralIndex` (`LocaleProperties.lua:56`) is singular for
 /// `not ordinal or ordinal == 1`. So one or no ordinal takes the bare token, anything else the
@@ -367,10 +302,26 @@ pub fn plural(
 
 /// Fill a reference template, by the rules in the module doc.
 pub fn fill(template: &str, args: &[Arg<'_>]) -> String {
+    run(template, args, false).unwrap_or_default()
+}
+
+/// [`fill`] for a caller whose arguments are the template's by construction: `None`, for no line,
+/// when a hole has no argument, meets one of another kind (`%s` and `%c` take text, `%d` a
+/// number, `%f` and `%g` a real) or is one this does not know. The reference reads each argument
+/// by its hole's kind up to the highest index a hole names (`0x6698b5`-`0x669919`), with no check
+/// against the arguments it was given, so such a template has no sentence to match: a defect to
+/// show. An argument no hole names is not one.
+pub fn fill_exact(template: &str, args: &[Arg<'_>]) -> Option<String> {
+    run(template, args, true)
+}
+
+/// The walk both fills share; `exact` picks the refusal over the literal copy.
+fn run(template: &str, args: &[Arg<'_>], exact: bool) -> Option<String> {
     let mut out = String::with_capacity(template.len() + 16);
     let chars: Vec<char> = template.chars().collect();
     let mut i = 0;
-    let mut next = 0usize; // the sequential cursor
+    // The running index, `[ebp-0x8]` of `0x6697d0`.
+    let mut next = 0usize;
     while i < chars.len() {
         if chars[i] != '%' {
             out.push(chars[i]);
@@ -383,34 +334,31 @@ pub fn fill(template: &str, args: &[Arg<'_>]) -> String {
             continue;
         }
         let Some(spec) = parse_spec(&chars, i + 1) else {
+            if exact {
+                return None;
+            }
             // Unknown: copy the `%` and rescan from the next char, so `50% off` survives.
             out.push('%');
             i += 1;
             continue;
         };
-        // A positional does not move the sequential cursor.
-        let idx = match spec.positional {
-            Some(n) => n.checked_sub(1),
-            None => Some(next),
-        };
-        match idx.and_then(|k| args.get(k)) {
-            Some(a) => {
-                match spec.conv {
-                    's' | 'c' => a.as_s(&mut out),
-                    'd' => a.as_d(&mut out),
-                    'f' => a.as_f(spec.precision, &mut out),
-                    _ => a.as_g(spec.precision, &mut out),
-                }
-                if spec.positional.is_none() {
-                    next += 1;
-                }
-            }
+        let idx = spec.positional.map_or(next, |n| n.saturating_sub(1));
+        next = idx + 1;
+        match args.get(idx) {
+            Some(a) if exact && !a.fits(spec.conv) => return None,
+            Some(a) => match spec.conv {
+                's' | 'c' => a.as_s(&mut out),
+                'd' => a.as_d(&mut out),
+                'f' => a.as_f(spec.precision, &mut out),
+                _ => a.as_g(spec.precision, &mut out),
+            },
+            None if exact => return None,
             // Starved: copy the specifier through so a mis-modelled template shows.
             None => out.extend(&chars[i..spec.end]),
         }
         i = spec.end;
     }
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -438,9 +386,10 @@ mod tests {
         assert_eq!(g("%.3g", 9.999), "10");
         // A bare `%g` is C's default precision of six.
         assert_eq!(g("%g", 1.0 / 3.0), "0.333333");
-        // Outside `P > X >= -4` the style is `%e`, with C's signed two-digit exponent.
-        assert_eq!(g("%.3g", 0.000_012_345), "1.23e-05");
-        assert_eq!(g("%.3g", 123_456.0), "1.23e+05");
+        // Outside `P > X >= -4` the style is `%e`, with MSVC's three exponent digits.
+        assert_eq!(g("%.3g", 0.000_012_345), "1.23e-005");
+        assert_eq!(g("%.3g", 123_456.0), "1.23e+005");
+        assert_eq!(g("%g", f64::INFINITY), "1.#INF");
     }
 
     #[test]
@@ -502,7 +451,7 @@ mod tests {
 
     /// The duel pair, `GlobalStrings.lua:958-959`.
     #[test]
-    fn positional_specifiers_reorder_rather_than_consume() {
+    fn positional_specifiers_reorder_the_arguments() {
         let (a, b) = (Arg::S("Alice"), Arg::S("Bob"));
         assert_eq!(
             fill("%1$s has defeated %2$s in a duel", &[a, b]),
@@ -513,6 +462,51 @@ mod tests {
             "Bob has fled from Alice in a duel"
         );
         assert_eq!(fill("%1$s vs %1$s", &[a]), "Alice vs Alice");
+    }
+
+    /// `vsnoprintf` binds each hole before it prints (`0x6697d0`): after a hole that takes an
+    /// argument the running index is that hole's index plus one (`0x669892`), so a plain hole
+    /// after `%N$` takes argument N + 1, and `%0$` is the first argument (`0x669afa`-`0x669b0b`).
+    #[test]
+    fn a_plain_hole_after_a_positional_takes_the_next_argument() {
+        let (a, b, c) = (Arg::S("A"), Arg::S("B"), Arg::S("C"));
+        assert_eq!(fill("%2$s then %s", &[a, b, c]), "B then C");
+        assert_eq!(fill("%1$s then %s", &[a, b]), "A then B");
+        assert_eq!(fill("%s, %s, %1$s, %s", &[a, b, c]), "A, B, A, B");
+        assert_eq!(fill("%0$s", &[a]), "A");
+        // A hole with no argument still moves the index: the plain hole after it is starved too.
+        assert_eq!(fill("%3$s %s", &[a, b]), "%3$s %s");
+    }
+
+    /// [`fill_exact`] binds as [`fill`] does and skips an argument no hole names
+    /// (`0x6698b5`-`0x669919`), but refuses a hole it cannot fill: none left, of another kind, or
+    /// one it does not know.
+    #[test]
+    fn an_exact_fill_skips_unnamed_arguments_and_refuses_a_hole_it_cannot_fill() {
+        let (name, number) = (Arg::S("Ragnaros"), Arg::D(12));
+        let exact = |template| fill_exact(template, &[name, number]);
+        assert_eq!(
+            exact("You hit %s for %d.").as_deref(),
+            Some("You hit Ragnaros for 12.")
+        );
+        assert_eq!(
+            exact("For %2$d.").as_deref(),
+            Some("For 12."),
+            "the name is unused"
+        );
+        assert_eq!(
+            exact("%2$d, %1$s: 100%%").as_deref(),
+            Some("12, Ragnaros: 100%")
+        );
+        assert_eq!(
+            exact("%1$s hits you for %d.").as_deref(),
+            Some("Ragnaros hits you for 12.")
+        );
+        assert_eq!(exact("%3$s"), None, "no third argument");
+        assert_eq!(exact("%1$d"), None, "text in a number's hole");
+        assert_eq!(exact("%2$s"), None, "a number in a text hole");
+        assert_eq!(exact("50% off"), None, "a hole it does not know");
+        assert_eq!(exact("%s %d %d"), None, "starved after two");
     }
 
     #[test]

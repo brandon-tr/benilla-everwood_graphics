@@ -145,11 +145,9 @@ const NOT_YET: &[(&str, &[&str])] = &[
             "GetBillingPlan",
             "GetBillingTimeRemaining",
             "GetBillingTimeRested",
-            "PINEntered",
             "PatchDownloadApply",
             "PatchDownloadCancel",
             "PatchDownloadProgress",
-            "Screenshot",
             "SetMovieSubtitles",
             "SurveyNotificationDone",
         ],
@@ -218,9 +216,8 @@ fn the_glue_vm_answers_the_glue_surface() {
     );
 }
 
-/// Past its functions the glue `_G` holds the four library tables, the frame metatable
-/// `0x7039e0` publishes, and the compat chunk's `PI`; `_G` itself is benilla's, as in-game
-/// (`reference_surface::BEYOND_1_12`).
+/// Past its functions the glue globals hold the four library tables, the frame metatable
+/// `0x7039e0` publishes, and the compat chunk's `PI`.
 #[test]
 fn the_glue_vm_holds_no_other_global() {
     let others: BTreeMap<String, String> = glue_globals()
@@ -230,7 +227,6 @@ fn the_glue_vm_holds_no_other_global() {
     let want: BTreeMap<String, String> = [
         ("PI", "number"),
         ("__framescript_meta", "table"),
-        ("_G", "table"),
         ("bit", "table"),
         ("math", "table"),
         ("string", "table"),
@@ -293,6 +289,68 @@ fn glue_events_register_by_the_glue_table() {
     );
 }
 
+/// `Screenshot` (`0x46d3d0`, table `0x8373b8`) arms a capture, and its callback `0x46c520` answers
+/// with glue event 14 on success and 15 on failure, the glue table's own names
+/// (`reference/glue_events.tsv`); the in-game pair would reach no glue frame.
+#[test]
+fn the_glue_screenshot_arms_a_capture_and_is_answered_with_the_glue_events() {
+    let mut s = UiScript::new_glue().unwrap();
+    assert_eq!(glue_events()[14], "GLUE_SCREENSHOT_SUCCEEDED");
+    assert_eq!(glue_events()[15], "GLUE_SCREENSHOT_FAILED");
+    s.run(
+        r#"
+        heard = {}
+        f = CreateFrame("Frame")
+        f:SetScript("OnEvent", function() table.insert(heard, event) end)
+        f:RegisterEvent("GLUE_SCREENSHOT_SUCCEEDED")
+        f:RegisterEvent("GLUE_SCREENSHOT_FAILED")
+        f:RegisterEvent("SCREENSHOT_SUCCEEDED")
+        Screenshot()
+        "#,
+    )
+    .expect("the glue VM binds Screenshot");
+    assert_eq!(s.take_screenshot_asks(), 1, "one call, one capture");
+    assert_eq!(s.take_screenshot_asks(), 0, "and the ask is spent");
+    assert!(
+        s.eval::<Vec<String>>("return heard").unwrap().is_empty(),
+        "the call itself answers nothing"
+    );
+    let e = s.screenshot_event(true);
+    s.fire_event(e, vec![]);
+    let e = s.screenshot_event(false);
+    s.fire_event(e, vec![]);
+    s.fire_event("SCREENSHOT_SUCCEEDED", vec![]);
+    assert_eq!(
+        s.eval::<Vec<String>>("return heard").unwrap(),
+        ["GLUE_SCREENSHOT_SUCCEEDED", "GLUE_SCREENSHOT_FAILED"],
+        "the glue names, and neither in-game one"
+    );
+}
+
+/// The in-game state answers with its own names.
+#[test]
+fn the_in_game_screenshot_is_answered_with_the_in_game_events() {
+    let mut s = UiScript::new().unwrap();
+    s.run(
+        r#"
+        heard = {}
+        f = CreateFrame("Frame")
+        f:SetScript("OnEvent", function() table.insert(heard, event) end)
+        f:RegisterEvent("SCREENSHOT_SUCCEEDED")
+        f:RegisterEvent("SCREENSHOT_FAILED")
+        "#,
+    )
+    .unwrap();
+    let e = s.screenshot_event(true);
+    s.fire_event(e, vec![]);
+    let e = s.screenshot_event(false);
+    s.fire_event(e, vec![]);
+    assert_eq!(
+        s.eval::<Vec<String>>("return heard").unwrap(),
+        ["SCREENSHOT_SUCCEEDED", "SCREENSHOT_FAILED"]
+    );
+}
+
 /// The in-game VM registers by its own event table (`0x48feab`): an in-game event registers and
 /// fires there.
 #[test]
@@ -350,7 +408,7 @@ fn the_glue_vm_makes_the_startup_frame_types_only() {
             .run(&format!(r#"CreateFrame("{t}")"#))
             .expect_err(t)
             .to_string();
-        assert!(e.contains(&format!("unknown frame type '{t}'")), "{t}: {e}");
+        assert!(e.contains(&format!("Unknown frame type '{t}'")), "{t}: {e}");
         world.run(&format!(r#"CreateFrame("{t}")"#)).unwrap();
     }
 }

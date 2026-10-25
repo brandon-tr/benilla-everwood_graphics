@@ -25,7 +25,7 @@ use display::{
 };
 
 /// Attaching a visual to each net entity: skeleton, animation, character geosets and skin, fade.
-mod attach;
+pub(crate) mod attach;
 use attach::{attach_entity_visuals, build_dressup_preview, build_glue_pet, build_glue_preview};
 
 /// Composited body skins by look, built off the main thread.
@@ -50,7 +50,7 @@ pub(crate) use carried_light::CarriedLightMotion;
 pub(crate) use carried_light::HeldLight;
 
 /// Equipment from the descriptor and `ItemDisplayInfo`: armour, held items, helm and shoulders.
-mod equipment;
+pub(crate) mod equipment;
 use equipment::{attach_held_items, resolve_corpse_equipment, resolve_equipment};
 
 /// Item and enchant glows, hung on the item's own attachment points.
@@ -66,11 +66,15 @@ use mount::reseat_mounts;
 pub(crate) mod corpse;
 
 mod live_display;
-pub(crate) use live_display::DisplaySwapped;
 use live_display::{refresh_live_display, tick_scale_ease};
+pub(crate) use live_display::{AppliedDisplay, DisplaySwapped};
 
 /// Terrain conform: a model flagged `GlobalModelFlags & 3 ∈ {1,3}` tilts to the ground.
 mod conform;
+
+/// Whether the last render drew a unit, the scene-node test the bubble and plate gates read.
+mod scene_drawn;
+pub(crate) use scene_drawn::SceneDrawn;
 
 /// The per-unit collision height, the `h` the swim, wade, splash and foam depths are fractions of.
 mod collision_height;
@@ -99,11 +103,10 @@ mod chain_beam;
 pub(crate) use chain_beam::ChainHops;
 use chain_beam::{simulate_chain_beams, spawn_chain_beams};
 // `equip_slot` is the one InventoryType → slot table; the dressing room places items by it.
-pub(crate) use attach::{equip_slot, BodyPartsDesc};
+pub(crate) use attach::equip_slot;
 pub(crate) use equipment::ItemDisplays;
+pub(crate) use equipment::{attach_id, DressKey, HeldAttached, HeldItems};
 pub(crate) use equipment::{BoneAttach, Equipment};
-// For the `WOW_DRESS_CENSUS` instrument: what a body wears against what it resolved.
-pub(crate) use equipment::{attach_id, DressKey, HeldAttached, ATTACH_SLOT_NAMES};
 // Only the tests that build a `DressKey` name this type.
 #[cfg(test)]
 pub(crate) use equipment::ItemModelKind;
@@ -250,6 +253,16 @@ pub(crate) struct Creatures {
 }
 
 impl Creatures {
+    /// The display row a unit's records come from (`0x60afb0`).
+    pub(crate) fn records_row(&self, display_id: u32) -> Option<u32> {
+        self.catalog.records_row(display_id)
+    }
+
+    /// Whether `display_id` names other records than the `held` row's (`0x60ae10`).
+    pub(crate) fn display_records_differ(&self, display_id: u32, held: u32) -> bool {
+        self.catalog.display_records_differ(display_id, held)
+    }
+
     /// Whether a display id has a model row behind it (`CreatureDisplayInfo` → `CreatureModelData`),
     /// the chain `0x5ec480` walks after the race row's id.
     pub(crate) fn resolves_model(&self, display_id: u32) -> bool {
@@ -350,8 +363,8 @@ impl Creatures {
     }
 
     /// A built display's booth framing (model-local, pre-scale): its authored cameras, index 0 of
-    /// `cameraLookup` for the round portrait (`0x713540`) and raw index 1 for a `<PlayerModel>`
-    /// pane (`0x505890`), with each path's fallback for a model that has none.
+    /// `cameraLookup` for the round portrait (`0x713540`) and the raw table for a `<PlayerModel>`
+    /// pane (`0x505890`, `SetCamera`), with each path's fallback for a model that has none.
     pub(crate) fn display_anchors(
         &self,
         display_id: u32,
@@ -360,7 +373,7 @@ impl Creatures {
         dm.parts.as_ref()?; // not yet built
         Some(crate::portrait::PortraitAnchors {
             camera: dm.portrait_camera,
-            pane_camera: dm.pane_camera,
+            cameras: dm.cameras.clone(),
             bbox_center: dm.bake_center_local,
             head: crate::portrait::head_anchor(&dm.skeleton, &dm.attachments),
             pivot_height: dm.pivot_height_local,
@@ -424,9 +437,33 @@ pub(crate) struct DisplayRig<'a> {
 
 /// The `GameObjectDisplayInfo` catalog and per-display [`DisplayModel`] cache.
 #[derive(Resource)]
-struct GameObjects {
+pub(crate) struct GameObjects {
     catalog: GameObjectCatalog,
     models: HashMap<u32, DisplayModel>,
+}
+
+impl GameObjects {
+    /// The point test of a transport with this display once its model has loaded, the world
+    /// entity's answer (`0x670a70`): a map object's convex volume, a doodad's file box; `None`
+    /// while the model is unloaded, which holds no rider.
+    pub(crate) fn transport_volume(
+        &self,
+        display_id: u32,
+        wmos: &Assets<WmoModel>,
+        m2s: &Assets<M2Model>,
+    ) -> Option<crate::transport::TransportVolume> {
+        use crate::transport::TransportVolume;
+        match &self.models.get(&display_id)?.handle {
+            ModelHandle::Wmo(h) => Some(TransportVolume::Planes(
+                wmos.get(h)?.convex_volume.clone().into(),
+            )),
+            ModelHandle::M2(h) => {
+                let b = m2s.get(h)?.bounds.as_ref()?;
+                Some(TransportVolume::Box(b.bbox_min, b.bbox_max))
+            }
+            ModelHandle::None => None,
+        }
+    }
 }
 
 /// The customization → visible-geoset tables; without them players render every geoset.
@@ -648,7 +685,15 @@ impl Plugin for EntitiesPlugin {
         // of `0x60abe0`.
         .add_message::<live_display::DisplaySwapped>()
         .add_systems(Startup, setup_entities.after(AssetSet::Open))
-        .add_systems(Update, (evict_display_caches, scope_entity_art))
+        // The eviction ahead of the VM pass, whose sends read the item displays for a ranged
+        // spell's precast visual (`0x60d450`).
+        .add_systems(
+            Update,
+            (
+                evict_display_caches.before(crate::vm_pass::VmPass::Start),
+                scope_entity_art,
+            ),
+        )
         // An arrival is stamped the frame it streams in, before its visual is asked for.
         .add_systems(
             Update,
@@ -930,6 +975,19 @@ fn setup_entities(
             f.err().or(p.err()).expect("at least one of the two failed")
         ),
     }
+    // The unit tooltip's studied-creature block: without `Resistances.dbc` the armor line reads
+    // the reference's no-school slot, and without `CreatureSpellData.dbc` no ability line shows.
+    let armor_school = benilla_formats::load_armor_school(&mut chain)
+        .map_err(|e| warn!("Resistances.dbc unavailable, no armor school: {e:#}"))
+        .ok()
+        .flatten();
+    let pet_spells = benilla_formats::load_creature_spell_data(&mut chain)
+        .map_err(|e| warn!("CreatureSpellData.dbc unavailable, no pet abilities: {e:#}"))
+        .ok();
+    commands.insert_resource(crate::ui_unit::tooltip_facts::StudyTables {
+        armor_school,
+        pet_spells,
+    });
     match CharacterGeosets::load(&mut chain) {
         Ok(geosets) => commands.insert_resource(Characters(geosets)),
         Err(e) => warn!("character geosets unavailable, players show every geoset: {e:#}"),
@@ -982,7 +1040,7 @@ fn setup_entities(
     match benilla_formats::load_random_property_catalog(&mut chain) {
         Ok(props) => {
             info!("random-property catalog: {} suffix rows", props.len());
-            commands.insert_resource(crate::items::RandomProperties(props));
+            commands.insert_resource(crate::items::RandomProperties::new(props));
         }
         Err(e) => {
             warn!("random properties unavailable: no item name suffix, no suffix line: {e:#}")
@@ -1002,11 +1060,15 @@ fn setup_entities(
     }
     match benilla_formats::load_stationery_catalog(&mut chain) {
         Ok(catalog) => commands.insert_resource(crate::ui_mail::Stationery(catalog)),
-        Err(e) => warn!("stationery catalog unavailable, mail uses the default backdrop: {e:#}"),
+        Err(e) => warn!("stationery catalog unavailable, mail has no paper or texture: {e:#}"),
     }
     match benilla_formats::load_packages(&mut chain) {
         Ok(rows) => commands.insert_resource(crate::ui_mail::Packages(rows)),
         Err(e) => warn!("mail packages unavailable, GetNumPackages answers 0: {e:#}"),
+    }
+    match benilla_formats::load_mail_templates(&mut chain) {
+        Ok(rows) => commands.insert_resource(crate::ui_mail::MailTemplates(rows)),
+        Err(e) => warn!("mail templates unavailable, a template letter has no body: {e:#}"),
     }
     match benilla_formats::load_page_text_material_catalog(&mut chain) {
         Ok(catalog) => commands.insert_resource(crate::ui_item_text::PageMaterials(catalog)),

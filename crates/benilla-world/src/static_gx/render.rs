@@ -427,7 +427,7 @@ fn prepare_static_gx(
     // (a bare static_gx harness has no lighting) — absent reads as the shipped Gaussian.
     shadow_filter: Option<Res<crate::lighting::ShadowFilterGaussian>>,
 ) {
-    let shadow_gaussian = shadow_filter.map_or(true, |f| f.0);
+    let shadow_gaussian = shadow_filter.is_none_or(|f| f.0);
     let _t = super::gx_perf_guard(3);
     let Some((view, msaa, _, _)) = views.iter().next() else {
         return;

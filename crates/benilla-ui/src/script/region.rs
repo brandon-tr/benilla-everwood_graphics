@@ -10,18 +10,19 @@ use super::{
     Model, REG_FONTSTRING_META, REG_FONTSTRING_METHODS, REG_REGION_META, REG_REGION_METHODS,
     REG_TEXTURE_META, REG_TEXTURE_METHODS, REG_TITLE_META, REG_TITLE_METHODS, REG_WRAPPERS, SCREEN,
 };
-use crate::layout::{Anchor, Anchors};
+use crate::layout::{Anchor, Anchors, Len};
 use crate::widget::{RegionHandle, RegionKind};
 
-/// Resolve `self` (a region wrapper) to its live [`RegionHandle`].
-pub(super) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHandle> {
+/// Resolve `self` (a region wrapper) to its live [`RegionHandle`]; an object that is no region
+/// fails the type test ([`super::object::ERR_WRONG_TYPE`]).
+pub(crate) fn region_handle_of(lua: &Lua, this: &Table) -> mlua::Result<RegionHandle> {
     let id = decode_id(this)?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     model
         .id_to_region
         .get(&id)
         .copied()
-        .ok_or_else(|| mlua::Error::runtime("stale or invalid region handle"))
+        .ok_or_else(|| mlua::Error::runtime(super::object::ERR_WRONG_TYPE))
 }
 
 /// The Texture object a widget's texture setter was handed, as the setters resolve it: a table
@@ -35,13 +36,7 @@ pub(super) fn texture_object_arg(
     arg: &Table,
     method: &str,
 ) -> mlua::Result<RegionHandle> {
-    let who = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        let name = super::object::frame_handle_of(lua, this)
-            .ok()
-            .and_then(|h| model.arena.frame(h).and_then(|f| f.name.clone()));
-        name.unwrap_or_else(|| "<unnamed>".to_string())
-    };
+    let who = super::binding_abi::name_of(lua, this);
     if decode_id(arg).is_err() {
         return Err(mlua::Error::runtime(format!(
             "{who}:{method}(): Couldn't find 'this' in texture"
@@ -180,19 +175,12 @@ pub(super) fn slot_arg(
         }
         _ => {}
     }
-    let who = {
-        let model = lua.app_data_ref::<Model>().expect("model app_data");
-        super::object::frame_handle_of(lua, this)
-            .ok()
-            .and_then(|h| model.arena.frame(h).and_then(|f| f.name.clone()))
-            .unwrap_or_else(|| "<unnamed>".to_string())
-    };
-    Err(mlua::Error::runtime(format!("Usage: {who}:{usage}")))
+    Err(super::binding_abi::usage(lua, this, usage))
 }
 
 /// A fresh anchorless Texture region of `owner` on `layer`, as the client builds the texture a
 /// path leg loads (`0x76fc40`) before it installs it as an object.
-pub(super) fn new_texture_region(
+fn new_texture_region(
     model: &mut Model,
     owner: crate::widget::FrameHandle,
     layer: crate::order::DrawLayer,
@@ -205,16 +193,32 @@ pub(super) fn new_texture_region(
     Some(rh)
 }
 
-/// `CSimpleTexture::SetTexture(path)` (`0x770200`) on a region: the file replaces a solid fill, and
-/// `""` clears the texture, which `QuestLogFrame.lua:165` relies on.
-pub(super) fn set_texture_path(model: &mut Model, rh: RegionHandle, path: &str) {
-    let set = if path.is_empty() {
-        super::texel::TexSet::None
-    } else {
-        super::texel::TexSet::File(path.to_string())
-    };
-    model.set_texel(rh, set);
-    model.note_art(rh);
+/// A widget's texture path leg (`SetStatusBarTexture` `0x783140`, `SetThumbTexture` `0x7897c0`, a
+/// ColorSelect marker `0x78b7b0`) over its current texture `existing`. That texture loads the path
+/// ([`paint::load_texture_name`]) and keeps its image when the load fails (`0x783165`). With none,
+/// a texture is built on `layer` (`0x76fc40`) and loaded, and one whose load fails is deleted with
+/// nothing installed (`0x7831b4` → `0x7831d9`, `0x789834` → `0x789849`, `0x78b824` → `0x78b837`);
+/// here the verdict comes first, so a failure builds nothing. `""` loads, as no image. Answers the
+/// texture built, for the caller to install.
+pub(super) fn load_path_leg(
+    model: &mut Model,
+    owner: crate::widget::FrameHandle,
+    existing: Option<RegionHandle>,
+    layer: crate::order::DrawLayer,
+    path: &str,
+) -> mlua::Result<Option<RegionHandle>> {
+    if let Some(rh) = existing {
+        paint::load_texture_name(model, rh, path, false);
+        return Ok(None);
+    }
+    let verdict = paint::texture_name_verdict(model, path);
+    if verdict == paint::FileLoad::Failed {
+        return Ok(None);
+    }
+    let rh = new_texture_region(model, owner, layer)
+        .ok_or_else(|| mlua::Error::runtime("stale frame handle"))?;
+    paint::apply_texture_name(model, rh, path, false, verdict);
+    Ok(Some(rh))
 }
 
 /// The loader's install of the texture a `<BarTexture>`, `<ThumbTexture>`, Button state-texture or
@@ -251,21 +255,19 @@ fn region_shown(model: &Model, rh: RegionHandle) -> bool {
 }
 
 /// Argument 1 of a global that takes a Texture as its `this` (`SetLootPortrait` `0x4c2b40`,
-/// `SetInventoryPortaitTexture` `0x4c9150`), with the member prologue's three raises: a non-table
+/// `SetInventoryPortaitTexture` `0x4c9150`, `SetBagPortaitTexture` `0x4fa4f0`,
+/// `SetPortraitTexture` `0x519ef0`, `SetTaxiMap` `0x4dca50`), with the member prologue's three raises: a non-table
 /// (`0x847ef8`), a table with no object at `[0]` (`0x847ec0`), and any object but a Texture, the
 /// `IsA` test against the Texture class token `[0xcf4cdc]` (`0x847e98`).
 pub(super) fn this_texture(lua: &Lua, this: &Value) -> mlua::Result<RegionHandle> {
+    use super::object::{ERR_NON_TABLE, ERR_NO_OBJECT, ERR_WRONG_TYPE};
     let Value::Table(t) = this else {
-        return Err(mlua::Error::runtime(
-            "Attempt to find 'this' in non-table object (used '.' instead of ':' ?)",
-        ));
+        return Err(mlua::Error::runtime(ERR_NON_TABLE));
     };
     if decode_id(t).is_err() {
-        return Err(mlua::Error::runtime(
-            "Attempt to find 'this' in non-framescript object",
-        ));
+        return Err(mlua::Error::runtime(ERR_NO_OBJECT));
     }
-    let wrong = || mlua::Error::runtime("Wrong object type for member function");
+    let wrong = || mlua::Error::runtime(ERR_WRONG_TYPE);
     let rh = region_handle_of(lua, t).map_err(|_| wrong())?;
     let model = lua.app_data_ref::<Model>().expect("model app_data");
     if model.arena.region(rh).map(|r| r.kind) != Some(RegionKind::Texture) {
@@ -282,34 +284,43 @@ pub(super) fn clear_texture(model: &mut Model, rh: RegionHandle) {
     model.note_art(rh);
 }
 
-/// Apply the font parts an XML element supplies (`font=`, `<FontHeight>`, `outline=`), any of
-/// which may be absent. Not the `SetFont` binding: the reference applies XML fonts in `LoadXML`,
-/// and its `SetFont` requires a path and a height (`0x87c69c`). Each part is an explicit set, so it
-/// survives a change to the inherited font object; an empty `font=` keeps the inherited face.
-pub(crate) fn apply_font_parts(
+/// A FontString's XML font file (`font=`, its `<FontHeight>` and the flags word of `outline=` and
+/// `monochrome=`) through the string's own `SetFont` (`0x771214` → `0x7714f0`), not the Lua
+/// binding. The font it already holds, the path matched ignoring case, the height within 2⁻²² and
+/// the same flags, is a success that writes nothing (`0x771502`-`0x771541`); any other goes to the font
+/// load (`0x44d040`), whose failure writes nothing (`0x771575`), answered `false`. A success is an
+/// explicit set that clears the font bit (`0x77121d`), so it outlasts the followed font object's.
+pub(crate) fn load_xml_font_file(
     lua: &Lua,
     this: &Table,
-    path: Option<String>,
-    height: Option<f32>,
-    flags: Option<String>,
-) -> mlua::Result<()> {
+    path: &str,
+    height: Len,
+    (outline, monochrome): (super::Outline, bool),
+) -> mlua::Result<bool> {
     let rh = region_handle_of(lua, this)?;
     let mut model = lua.app_data_mut::<Model>().expect("model");
+    let u = model.layout_units();
+    let held = model.region_data.get(&rh).is_some_and(|d| {
+        d.font_path
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(path))
+            && d.font_height
+                .is_some_and(|h| (h.script(u) - height.script(u)).abs() < super::SAME_FONT_HEIGHT)
+            && (d.outline, d.monochrome) == (outline, monochrome)
+    });
+    if !held && !super::face_loads(&model, path) {
+        return Ok(false);
+    }
     let d = model.region_data.entry(rh).or_default();
-    if let Some(p) = path.filter(|p| !p.is_empty()) {
-        d.font_path = Some(p);
-        d.font_explicit.face = true;
+    if !held {
+        d.font_path = Some(path.to_string());
+        d.font_height = Some(height);
+        d.outline = outline;
+        d.monochrome = monochrome;
     }
-    if let Some(h) = height {
-        d.font_height = Some(h);
-        d.font_explicit.height = true;
-    }
-    if let Some(f) = flags {
-        d.outline = super::Outline::flags(&f);
-        d.font_explicit.outline = true;
-    }
+    d.font_mask.clear(super::FontMask::FONT);
     model.touch_measure(rh);
-    Ok(())
+    Ok(true)
 }
 
 /// A FontString's XML `nonspacewrap` and `maxLines` (`0x77103f`-`0x7710cd`), each written only when
@@ -378,6 +389,42 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// `SetPortraitToTexture`'s target (`0x48d780`): a name looked up as a global, which must hold a
+/// Texture (`0x76c760`), else `0x842c98`'s line; or a table, whose `[0]` must hold an object
+/// (`0x842c58`) that is a Texture (`0x842c1c`).
+fn portrait_target(lua: &Lua, target: &Value) -> mlua::Result<RegionHandle> {
+    let is_texture = |model: &Model, id: u32| {
+        model
+            .id_to_region
+            .get(&id)
+            .copied()
+            .filter(|&rh| model.arena.region(rh).map(|r| r.kind) == Some(RegionKind::Texture))
+    };
+    if let Some(name) = super::binding_abi::optional_string(lua, target) {
+        let found = super::object::prefetch_named_target(lua, &name, None);
+        let model = lua.app_data_ref::<Model>().expect("model");
+        return super::object::resolve_named_target(&model, &found)
+            .and_then(|id| is_texture(&model, id))
+            .ok_or_else(|| {
+                mlua::Error::runtime(format!(
+                    "SetPortraitToTexture(): Couldn't find texture named '{name}'"
+                ))
+            });
+    }
+    let Value::Table(t) = target else {
+        return Err(mlua::Error::runtime(
+            "SetPortraitToTexture(): Couldn't find texture named '(null)'",
+        ));
+    };
+    let id = decode_id(t).map_err(|_| {
+        mlua::Error::runtime("SetPortraitToTexture(): Couldn't find 'this' in texture object")
+    })?;
+    let model = lua.app_data_ref::<Model>().expect("model");
+    is_texture(&model, id).ok_or_else(|| {
+        mlua::Error::runtime("SetPortraitToTexture(): Wrong object type, expected texture")
+    })
+}
+
 /// The two portrait globals, which only the in-game state registers (`SetPortraitTexture` in
 /// table `0x850438`, `SetPortraitToTexture` in `0x83de68`).
 pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
@@ -386,16 +433,17 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
     // or `SetPortraitToTexture` clears it.
     lua.globals().set(
         "SetPortraitTexture",
-        lua.create_function(|lua, (region, unit): (Table, Value)| {
-            // A non-string unit raises this exact error (`0x519fb4`, `0x8513b8`), which stock
-            // `Blizzard_InspectUI.lua:49` hits on a re-open; a token that resolves to nothing only
-            // blanks the portrait.
+        lua.create_function(|lua, (region, unit): (Value, Value)| {
+            // The texture first, the member prologue against the Texture id (`0x519f06`-
+            // `0x519faa`); then a non-string unit raises this exact error (`0x519fb4`,
+            // `0x8513b8`), which stock `Blizzard_InspectUI.lua:49` hits on a re-open. A token that
+            // resolves to nothing only blanks the portrait.
+            let rh = this_texture(lua, &region)?;
             let unit = crate::script::binding_abi::string_arg(
                 lua,
                 unit,
                 r#"Usage: SetPortraitTexture(texture, "unit")"#,
             )?;
-            let rh = region_handle_of(lua, &region)?;
             let mut model = lua.app_data_mut::<Model>().expect("model");
             model.set_texel(rh, super::texel::TexSet::Own(None));
             let data = model.region_data.entry(rh).or_default();
@@ -409,20 +457,23 @@ pub(super) fn install_in_game(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
-    // SetPortraitToTexture(textureName, path), an engine global: sets the texture, drawn masked
-    // to its inscribed circle, and drops any unit binding. It takes the name, as both stock
-    // callers pass (`ContainerFrame.lua:419`, `MailFrame.lua:174`); whether the reference also
-    // takes a region object is untraced.
+    // SetPortraitToTexture(target, path) (`0x48d780`), an engine global: sets the texture, drawn
+    // masked to its inscribed circle, and drops any unit binding. The target is a name, a string or
+    // a number (`lua_isstring`, `0x48d789`), read as a global that must hold a Texture (`0x76c760`
+    // at `0x48d7bf`), or a table (`lua_type` 5, `0x48d7fa`) holding one; anything else raises the
+    // name line with `lua_tostring`'s null (`0x48d7ce`). A path that is no string or number returns
+    // with the texture left alone (`0x48d886`).
     lua.globals().set(
         "SetPortraitToTexture",
-        lua.create_function(|lua, (name, path): (String, String)| {
+        lua.create_function(|lua, args: MultiValue| {
+            let mut args = args.into_iter();
+            let target = args.next().unwrap_or(Value::Nil);
+            let path = args.next().unwrap_or(Value::Nil);
+            let rh = portrait_target(lua, &target)?;
+            let Some(path) = super::binding_abi::optional_string(lua, &path) else {
+                return Ok(());
+            };
             let mut model = lua.app_data_mut::<Model>().expect("model");
-            let Some(id) = model.region_by_name.get(&name).copied() else {
-                return Ok(());
-            };
-            let Some(rh) = model.id_to_region.get(&id).copied() else {
-                return Ok(());
-            };
             model.set_texel(rh, super::texel::TexSet::Portrait(path));
             let data = model.region_data.entry(rh).or_default();
             data.circular = true;
@@ -438,7 +489,11 @@ mod layout;
 mod paint;
 mod text;
 
-pub(crate) use paint::orientation;
+pub(crate) use paint::{
+    apply_texture_name, load_blend_mode, load_texture_file, load_texture_name, orientation,
+    texture_name_verdict, FileLoad,
+};
+pub(crate) use text::store_text_of;
 
 fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
     let m = lua.create_table()?;
@@ -481,17 +536,11 @@ fn install_region_methods(lua: &Lua) -> mlua::Result<()> {
         |lua, (this, want): (Table, Value)| {
             let rh = region_handle_of(lua, &this)?;
             let model = lua.app_data_ref::<Model>().expect("model");
-            let want = match &want {
-                Value::String(s) => s.to_str()?.to_string(),
-                Value::Number(n) => n.to_string(),
-                Value::Integer(i) => i.to_string(),
-                _ => {
-                    let who = region_name_of(&model, decode_id(&this)?)
-                        .unwrap_or_else(|| "<unnamed>".to_string());
-                    return Err(mlua::Error::runtime(format!(
-                        "Usage: {who}:IsObjectType(\"TYPE\")"
-                    )));
-                }
+            let Some(want) = super::binding_abi::optional_string(lua, &want) else {
+                let who = super::binding_abi::region_name(&model, rh);
+                return Err(mlua::Error::runtime(format!(
+                    "Usage: {who}:IsObjectType(\"TYPE\")"
+                )));
             };
             let leaf = region_type_name(&model, rh);
             let hit = want.eq_ignore_ascii_case(leaf) || want.eq_ignore_ascii_case("Region");
@@ -726,9 +775,13 @@ pub(crate) fn free_regions(model: &mut Model, dying: &[RegionHandle]) {
     for &rh in dying {
         if let Some(data) = model.region_data.remove(&rh) {
             model.texels.release(data.tex);
+            // A dying FontString leaves its font's list (`0x773490` → `0x770c60(0)`).
+            if let Some(font) = data.font_object {
+                model.fonts.drop_region(font, rh);
+            }
         }
-        model.region_resolved.remove(&rh);
-        model.region_kept.remove(&rh);
+        model.region_rects.remove(&rh);
+        model.region_kept_rects.remove(&rh);
         let name = model.arena.region(rh).and_then(|r| r.name.clone());
         if let Some(id) = model.region_to_id.remove(&rh) {
             model.id_to_region.remove(&id);
@@ -913,12 +966,10 @@ pub(super) fn region_ladder_context(lua: &Lua, rh: RegionHandle) -> (String, Str
 }
 
 /// Bit-exact size equality, the layout gate's own test, so a setter's no-op check agrees with it.
-pub(super) fn size_bits_eq(a: Option<(f32, f32)>, b: Option<(f32, f32)>) -> bool {
+pub(super) fn size_bits_eq(a: Option<(Len, Len)>, b: Option<(Len, Len)>) -> bool {
     match (a, b) {
         (None, None) => true,
-        (Some((aw, ah)), Some((bw, bh))) => {
-            aw.to_bits() == bw.to_bits() && ah.to_bits() == bh.to_bits()
-        }
+        (Some((aw, ah)), Some((bw, bh))) => aw.bits() == bw.bits() && ah.bits() == bh.bits(),
         _ => false,
     }
 }
@@ -955,22 +1006,61 @@ pub(super) fn region_set_point(lua: &Lua, this: &Table, args: &MultiValue) -> ml
 /// `0x770790`). A FontString answers its authored size unless 0 (`0x77294a`), else its measure,
 /// either floored at one unit (`0x772930`, `0x772a60`); the width is unwrapped, as
 /// `GetStringWidth` gives it (`0x772890`, `0x79e510`), the height wrapped (`0x7729b0`). A title
-/// region answers its field (`0x768420`, `0x768410`).
-pub(super) fn measured_wh(lua: &Lua, this: &Table) -> mlua::Result<(f32, f32)> {
-    let rh = region_handle_of(lua, this)?;
-    // Measures this tick when a host font engine is installed; a no-op for a Texture or a
-    // current measure.
-    super::measure::ensure_measured(lua, rh);
-    let model = lua.app_data_ref::<Model>().expect("model");
-    Ok(virtual_span(&model, rh))
+/// region answers its field (`0x768420`, `0x768410`). In layout units, as the slots return it in
+/// `st0`, so a size the engine stored in layout units reads back as it is. A FontString's measure
+/// still owed answers 0.
+pub(super) fn virtual_slot(model: &Model, rh: RegionHandle) -> (f64, f64) {
+    let units = model.layout_units();
+    let Some(d) = model.region_data.get(&rh) else {
+        return (0.0, 0.0);
+    };
+    let zero = Len::Script(0.0);
+    let (aw, ah) = d.size.unwrap_or((zero, zero));
+    match model.arena.region(rh).map(|r| r.kind) {
+        Some(RegionKind::FontString) => {
+            let scale = model
+                .arena
+                .region(rh)
+                .and_then(|r| model.arena.frame(r.owner))
+                .map_or(1.0, |f| f.effective_scale);
+            let m = d.measured.filter(|m| m.key == d.measure_key(scale, units));
+            let known = |from_measure: fn(&crate::script::types::MeasuredText) -> f32| {
+                if d.text.as_deref().is_none_or(str::is_empty) {
+                    Some(0.0)
+                } else {
+                    m.as_ref().map(from_measure)
+                }
+            };
+            let slot = |a: Len, from_measure| {
+                if !a.is_zero() {
+                    super::layout::fontstring_slot(units, a, None)
+                } else {
+                    known(from_measure)
+                        .map_or(0.0, |v| super::layout::fontstring_slot(units, a, Some(v)))
+                }
+            };
+            (slot(aw, |m| m.natural_w), slot(ah, |m| m.h))
+        }
+        Some(RegionKind::Texture) => {
+            let (sw, sh) = (aw.layout(units), ah.layout(units));
+            let texel = (sw == 0.0 || sh == 0.0)
+                .then(|| super::layout::content_span(d, model.texture_size_probe.as_ref()))
+                .flatten();
+            (
+                super::layout::texture_slot(units, sw, texel.map(|t| t.0)),
+                super::layout::texture_slot(units, sh, texel.map(|t| t.1)),
+            )
+        }
+        _ => (f64::from(aw.layout(units)), f64::from(ah.layout(units))),
+    }
 }
 
-/// [`measured_wh`]'s body on a borrowed model, for the engine's own callers.
+/// [`virtual_slot`] in script units, for the engine's own callers that lay out or draw in them.
 pub(super) fn virtual_span(model: &Model, rh: RegionHandle) -> (f32, f32) {
     let Some(d) = model.region_data.get(&rh) else {
         return (0.0, 0.0);
     };
-    let (aw, ah) = d.size.unwrap_or((0.0, 0.0));
+    let (aw, ah) = d.size_script(model.layout_units()).unwrap_or((0.0, 0.0));
     match model.arena.region(rh).map(|r| r.kind) {
         Some(RegionKind::FontString) => {
             // The measure key carries the owner's effective scale, as the request loop stamps it.
@@ -982,7 +1072,9 @@ pub(super) fn virtual_span(model: &Model, rh: RegionHandle) -> (f32, f32) {
                 .and_then(|r| model.arena.frame(r.owner))
                 .map(|f| f.effective_scale)
                 .unwrap_or(1.0);
-            let m = d.measured.filter(|m| m.key == d.measure_key(scale));
+            let m = d
+                .measured
+                .filter(|m| m.key == d.measure_key(scale, model.layout_units()));
             // The floor applies to a known extent. Empty text is a known zero and floors; a pending
             // measure, possible only in a VM with no measurer installed, answers 0, where the
             // reference measures inline and always knows.
