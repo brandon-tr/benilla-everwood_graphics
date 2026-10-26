@@ -27,6 +27,7 @@ use benilla_ui::script::{
 
 pub(crate) mod disjoint;
 mod engine;
+pub(crate) mod live;
 mod windows;
 
 /// `DoEmote` (`0x5ef560`) in the reference's order: a posture emote's stand change to a state but 0
@@ -137,159 +138,8 @@ disjoint::disjoint_set! {
         /// The console's commands, against what they read and write, and the getters' lookups.
         console: crate::console::ConsoleSteps<'static, 'static>,
         asks: engine::RecordAsks<'static>,
-        /// The unit objects, the items, the stats and the auras the getters read as they run; the
-        /// auras' absent in a harness without the relations' inputs.
-        units: UnitLive<'static, 'static>,
-        items_live: crate::ui_items::live::ItemLive<'static, 'static>,
-        stats_live: StatsLive<'static, 'static>,
-        auras_live: Option<crate::ui_aura::AuraLive<'static, 'static>>,
-        /// The player's cooldown list the cooldown getters query as they run.
-        cooldowns_live: crate::spell::CooldownLive<'static, 'static>,
-    }
-}
-
-/// The unit objects the `Unit*` getters read off as they run, as the reference's read the object
-/// they resolve (`UnitHealth`, `0x5174d0`): by guid through the object manager (`0x468460`), each
-/// store as of the drain's place, so a listener reads its own packet's.
-#[derive(SystemParam)]
-pub(crate) struct UnitLive<'w, 's> {
-    index: Option<Res<'w, crate::net::GuidIndex>>,
-    stores: crate::ui_unit::views::ViewStores<'w, 's>,
-    me: Query<'w, 's, (Entity, &'static crate::net::Guid), With<crate::net::SelfPlayer>>,
-    /// The name caches and the race and class tables a held unit is named through.
-    names: Option<Res<'w, crate::names::NameCache>>,
-    commands: Option<Res<'w, crate::net::NetCommands>>,
-    tables: crate::ui_unit::NameTables<'w>,
-}
-
-impl UnitLive<'_, '_> {
-    /// Hand `read` what names the object held under `guid`, as of here; whether one was held as
-    /// a unit (`0x51710c`, then `0x609210` for a unit).
-    fn read_identity(
-        &self,
-        guid: u64,
-        read: &mut dyn FnMut(&dyn benilla_ui::script::UnitIdentityRead),
-    ) -> bool {
-        let entity = self.index.as_deref().and_then(|i| i.0.get(&guid).copied());
-        let Some(store) = self.stores.at(guid, entity).filter(|s| s.is_unit()) else {
-            return false;
-        };
-        read(&crate::ui_unit::LiveIdentity {
-            guid,
-            store,
-            names: self.names.as_deref(),
-            commands: self.commands.as_deref(),
-            tables: self.tables.get(),
-        });
-        true
-    }
-
-    /// Hand `read` what the unit-token resolver reads off the objects, as of here (`0x515970`).
-    fn read_tokens(&self, read: &mut dyn FnMut(&dyn benilla_ui::script::UnitTokenObjects)) {
-        read(&crate::ui_unit::TokenObjects {
-            index: self.index.as_deref(),
-            stores: &self.stores,
-            me: self.me.iter().next().map(|(e, g)| (e, g.0)),
-        });
-    }
-
-    /// Hand `read` the object held under `guid`, as of here; whether one was held.
-    fn read(
-        &self,
-        guid: u64,
-        read: &mut dyn FnMut(&dyn benilla_ui::script::UnitObjectRead),
-    ) -> bool {
-        // As of here, one a later packet destroys included.
-        let entity = self.index.as_deref().and_then(|i| i.0.get(&guid).copied());
-        let Some(store) = self.stores.at(guid, entity) else {
-            return false;
-        };
-        read(&crate::ui_unit::StoreObject(store));
-        true
-    }
-}
-
-/// The unit objects the stat getters and the active player's getters read off as they run, as
-/// the reference's read the object they resolve (`UnitStat`, `0x518600`) and the active player's
-/// fields (`GetMoney`, `0x518160`): each store as of the drain's place, so a listener reads its
-/// own packet's, and the active player's worn weapons' records, read without asking.
-#[derive(SystemParam)]
-pub(crate) struct StatsLive<'w, 's> {
-    objects: crate::net::Objects<'w, 's>,
-    stores: crate::ui_unit::views::ViewStores<'w, 's>,
-    items: Res<'w, crate::items::Items>,
-}
-
-impl StatsLive<'_, '_> {
-    /// Hand `read` the object held under `guid` and its stats, as of here, the active player's
-    /// with its weapons; whether one was held.
-    fn read(
-        &self,
-        guid: u64,
-        read: &mut dyn FnMut(
-            &dyn benilla_ui::script::UnitObjectRead,
-            &dyn benilla_ui::script::CombatRead,
-        ),
-    ) -> bool {
-        let Some(entity) = self.objects.entity(guid) else {
-            return false;
-        };
-        let Ok(store) = self.stores.get(entity) else {
-            return false;
-        };
-        let entry = |guid| self.item_entry(guid);
-        let stats = if self.objects.player() == Some(entity) {
-            crate::ui_char::StatsObject::player(
-                store,
-                crate::ui_char::Worn::new(store, &entry, &self.items),
-            )
-        } else {
-            crate::ui_char::StatsObject::unit(store)
-        };
-        read(&crate::ui_unit::StoreObject(store), &stats);
-        true
-    }
-
-    /// An item's entry as of here, a worn weapon a later packet destroys included.
-    fn item_entry(&self, guid: u64) -> Option<u32> {
-        self.stores
-            .by_guid(guid, self.objects.store(guid))?
-            .0
-            .object_entry()
-    }
-
-    /// The active player's store as of here, `None` while none is held.
-    fn player(&self) -> Option<&crate::net::ObjectStore> {
-        self.objects.player().and_then(|e| self.stores.get(e).ok())
-    }
-
-    /// Hand `read` the active player's stats, as of here, `None` while none is held.
-    fn read_own(&self, read: &mut dyn FnMut(Option<&dyn benilla_ui::script::CombatRead>)) {
-        let Some(store) = self.player() else {
-            return read(None);
-        };
-        let entry = |guid| self.item_entry(guid);
-        read(Some(&crate::ui_char::StatsObject::player(
-            store,
-            crate::ui_char::Worn::new(store, &entry, &self.items),
-        )));
-    }
-
-    /// Hand `read` the active player's own fields as of here, [`benilla_ui::script::NoPlayer`]'s
-    /// while none is held.
-    fn read_self(&self, read: &mut dyn FnMut(&dyn benilla_ui::script::SelfRead)) {
-        match self.player() {
-            Some(store) => read(&crate::ui_unit::StoreObject(store)),
-            None => read(&benilla_ui::script::NoPlayer),
-        }
-    }
-
-    /// Whether the active player's worn slots, as of here, hold a whole item of `entry`, each item
-    /// found as of here; `false` while none is held.
-    fn wears(&self, entry: u32) -> bool {
-        let items = self.stores.item_objects(&self.objects);
-        self.player()
-            .is_some_and(|store| crate::ui_action::wears_entry(store, &items, entry))
+        /// What the getters read as they run ([`live::LiveReads`]).
+        live: live::LiveReads<'static, 'static>,
     }
 }
 
@@ -710,11 +560,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
         key: benilla_ui::script::ItemKey,
         read: &mut dyn FnMut(&dyn benilla_ui::script::ItemRead),
     ) -> bool {
-        self.appliers.items_live().read(key, read)
-    }
-
-    fn player_name(&mut self, guid: u64) -> Option<String> {
-        self.appliers.asks().player_name(guid)
+        self.appliers.live().items().read(key, read)
     }
 
     fn read_unit_object(
@@ -722,7 +568,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
         guid: u64,
         read: &mut dyn FnMut(&dyn benilla_ui::script::UnitObjectRead),
     ) -> bool {
-        self.appliers.units().read(guid, read)
+        self.appliers.live().units().read(guid, read)
     }
 
     fn read_unit_identity(
@@ -730,14 +576,14 @@ impl CallHost for ScriptCallHost<'_, '_> {
         guid: u64,
         read: &mut dyn FnMut(&dyn benilla_ui::script::UnitIdentityRead),
     ) -> bool {
-        self.appliers.units().read_identity(guid, read)
+        self.appliers.live().units().read_identity(guid, read)
     }
 
     fn read_unit_tokens(
         &mut self,
         read: &mut dyn FnMut(&dyn benilla_ui::script::UnitTokenObjects),
     ) -> bool {
-        self.appliers.units().read_tokens(read);
+        self.appliers.live().units().read_tokens(read);
         true
     }
 
@@ -749,31 +595,20 @@ impl CallHost for ScriptCallHost<'_, '_> {
             &dyn benilla_ui::script::CombatRead,
         ),
     ) -> bool {
-        self.appliers.stats_live().read(guid, read)
+        self.appliers.live().stats().read(guid, read)
     }
 
     fn read_own_stats(
         &mut self,
         read: &mut dyn FnMut(Option<&dyn benilla_ui::script::CombatRead>),
     ) -> bool {
-        self.appliers.stats_live().read_own(read);
+        self.appliers.live().stats().read_own(read);
         true
     }
 
     fn read_self(&mut self, read: &mut dyn FnMut(&dyn benilla_ui::script::SelfRead)) -> bool {
-        self.appliers.stats_live().read_self(read);
+        self.appliers.live().stats().read_self(read);
         true
-    }
-
-    fn wears_item(&mut self, entry: u32) -> Option<bool> {
-        Some(self.appliers.stats_live().wears(entry))
-    }
-
-    fn read_cooldown(
-        &mut self,
-        query: benilla_ui::script::CooldownQuery,
-    ) -> Option<Option<benilla_ui::script::CooldownTriple>> {
-        self.appliers.cooldowns_live().read(query)
     }
 
     fn read_unit_auras(
@@ -781,10 +616,14 @@ impl CallHost for ScriptCallHost<'_, '_> {
         guid: u64,
         read: &mut dyn FnMut(Option<&dyn benilla_ui::script::AuraListRead>),
     ) -> bool {
-        match self.appliers.auras_live() {
+        match self.appliers.live().auras() {
             Some(auras) => auras.read(guid, read),
             None => false,
         }
+    }
+
+    fn read_live(&mut self, ask: &mut benilla_ui::script::live::LiveAsk<'_>) -> bool {
+        self.appliers.live().answer(ask)
     }
 
     fn apply(&mut self, script: &mut UiScript, call: ScriptCall) -> Option<CallTail> {
@@ -965,7 +804,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 crate::ui_craft::do_craft(&mut appliers.cast(), spell_id);
             }
             ScriptCall::Craft(CraftCall::Close) => appliers.craft().close(),
-            ScriptCall::Battlefield(call) => appliers.battlefield().apply(script, call),
+            ScriptCall::Battlefield(call) => tail = appliers.battlefield().apply(script, call),
             ScriptCall::Death(DeathAction::AcceptAreaSpiritHeal) => {
                 self.accept_area_spirit_heal(script, &mut at.mark);
             }
@@ -1000,7 +839,7 @@ impl CallHost for ScriptCallHost<'_, '_> {
                 }
             }
             ScriptCall::Unserved(send) => appliers.gm_ticket().unserved(send),
-            ScriptCall::Inspect(call) => appliers.inspect().apply(script, call),
+            ScriptCall::Inspect(call) => tail = appliers.inspect().apply(script, call),
             ScriptCall::ItemText(ItemTextCall::Turn(delta)) => {
                 appliers.item_text().turn(script, delta);
             }
@@ -1763,28 +1602,11 @@ mod tests {
     fn with_fortitude(f: &mut Frame) {
         let world = f.app.world_mut();
         let display = benilla_formats::SpellDisplay {
+            name: "Fortitude".into(),
             implicit_target_a1: 21,
             ..Default::default()
         };
-        world.insert_resource(crate::ui_action::Spells {
-            catalog: benilla_formats::SpellCatalog::from_displays([(FORTITUDE, display)].into()),
-            ..crate::ui_action::Spells::empty_for_tests()
-        });
-        world
-            .non_send_resource_mut::<UiScript>()
-            .set_spellbook(SpellBookState {
-                tabs: vec![SpellTabView {
-                    name: "Priest".into(),
-                    texture: None,
-                    offset: 0,
-                    num_spells: 1,
-                }],
-                slots: vec![SpellSlotView {
-                    spell_id: FORTITUDE,
-                    name: "Fortitude".into(),
-                    ..Default::default()
-                }],
-            });
+        seat_book(world, FORTITUDE, display);
     }
 
     /// The bind runs the ordinary relation chain over the player: with a unit we cannot assist
@@ -2317,6 +2139,19 @@ mod tests {
         }
     }
 
+    /// The world's group as a party we lead, `member` alone in `party1`: what the loot setters'
+    /// gates read at the call (`0x4e92a6`-`0x4e92eb`).
+    fn lead_party(world: &mut World, member: u64, name: &str) {
+        let mut group = world.resource_mut::<crate::ui_party::GroupState>();
+        group.members = vec![GroupMemberEntry {
+            name: name.into(),
+            guid: member,
+            status: 1,
+            flags: 0,
+        }];
+        group.leader = ME;
+    }
+
     /// The `CMSG_LOOT_METHOD`s `chunk` sends inside its calls, run with the host lent.
     fn loot_methods_sent(f: &mut Frame, chunk: &str) -> Vec<(u32, u64, u32)> {
         let _ = f.rx.try_iter().count();
@@ -2340,7 +2175,6 @@ mod tests {
     /// dead one is no candidate, so the name finds nobody and the binding sends nothing.
     #[test]
     fn set_loot_method_resolves_a_held_groupmate_only_while_alive() {
-        use benilla_ui::script::{PartyMemberInfo, PartyState};
         for (health, resolved) in [(100, true), (0, false)] {
             let mut f = frame(false);
             // OLD is a friendly player, our groupmate "Olly" in `party1`.
@@ -2352,17 +2186,8 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
+            lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
-            script.set_party(PartyState {
-                members: vec![PartyMemberInfo {
-                    name: "Olly".into(),
-                    guid: OLD,
-                }],
-                leader_index: 0,
-                leader_guid: ME,
-                own_guid: ME,
-                ..Default::default()
-            });
             script.set_unit(
                 "player",
                 Some(benilla_ui::script::UnitState {
@@ -2395,7 +2220,6 @@ mod tests {
     /// above 0 (`0x493eca`): a ghost, at health 1, does; a corpse, at 0, does not.
     #[test]
     fn set_loot_method_resolves_our_own_name_through_the_feed() {
-        use benilla_ui::script::PartyState;
         for (health, resolved) in [(100, true), (1, true), (0, false)] {
             let mut f = frame(false);
             with_factions(&mut f, FRIEND, &[]);
@@ -2416,16 +2240,8 @@ mod tests {
             world
                 .run_system_once(crate::ui_unit::feed_name_candidates)
                 .expect("the candidate feed runs as a one-shot system");
+            lead_party(f.app.world_mut(), OLD, "Olly");
             let mut script = f.app.world_mut().non_send_resource_mut::<UiScript>();
-            script.set_party(PartyState {
-                members: vec![benilla_ui::script::PartyMemberInfo {
-                    name: "Olly".into(),
-                    guid: OLD,
-                }],
-                leader_guid: ME,
-                own_guid: ME,
-                ..Default::default()
-            });
             script.set_unit(
                 "player",
                 Some(benilla_ui::script::UnitState {
@@ -2446,9 +2262,9 @@ mod tests {
 
     /// The commit's `IsSelectable` (`0x4935ee`) refuses a `UNIT_FLAG_NOT_SELECTABLE` unit: the
     /// nearer namesake is the ranked pick and it is refused, so the commit keeps its selection,
-    /// not the farther namesake, and the chunk keeps the old target's view.
+    /// not the farther namesake, and the chunk reads the old target.
     #[test]
-    fn target_by_name_shows_nothing_when_the_commit_refuses_its_pick() {
+    fn target_by_name_keeps_the_old_target_when_the_commit_refuses_its_pick() {
         /// `UNIT_FLAG_NOT_SELECTABLE`, `UNIT_FIELD_FLAGS` bit 25.
         const NOT_SELECTABLE: u32 = 1 << 25;
         /// A selectable namesake of `MOB` farther off, told apart by its health.
@@ -2468,6 +2284,13 @@ mod tests {
             ))
             .id();
         world.resource_mut::<GuidIndex>().0.insert(TWIN, twin);
+        // The old target told apart from the mob by its health.
+        let old = world.resource::<GuidIndex>().0[&OLD];
+        world
+            .get_mut::<ObjectStore>(old)
+            .expect("the old target's store")
+            .0
+            .merge(benilla_protocol::ObjectFields::from_pairs(&[(HEALTH, 70)]));
         let mut names = world.resource_mut::<crate::names::NameCache>();
         names.insert_player(MOB, "Red Affinity".into(), None);
         names.insert_player(TWIN, "Red Affinity".into(), None);
@@ -2479,8 +2302,8 @@ mod tests {
             "TargetByName('Red Affinity') return UnitHealth('target')",
         );
         assert_eq!(
-            shown, 0,
-            "the old target's view, not the twin's 40 or the mob's 100"
+            shown, 70,
+            "the old target's health, not the twin's 40 or the mob's 100"
         );
         assert_eq!(selected(&f), Some(OLD), "the commit refuses the same pick");
     }
@@ -2762,16 +2585,17 @@ mod tests {
     const GHOST_WOLF: u32 = 2645;
 
     /// Ghost Wolf in the catalog, the book and the form bar, and up on us as a cancelable aura.
+    /// The bar admits it by `AttributesEx2 & 0x10` (`0x4b2815`), the arm whose cast toggles by its
+    /// aura (`0x4b48d4`).
     fn with_ghost_wolf_up(f: &mut Frame, up: bool) {
         let world = f.app.world_mut();
         let display = benilla_formats::SpellDisplay {
+            name: "Ghost Wolf".into(),
             active_icon_id: 1,
+            attributes_ex2: 0x10,
             ..Default::default()
         };
-        world.insert_resource(crate::ui_action::Spells {
-            catalog: benilla_formats::SpellCatalog::from_displays([(GHOST_WOLF, display)].into()),
-            ..crate::ui_action::Spells::empty_for_tests()
-        });
+        seat_book(world, GHOST_WOLF, display);
         let me = world.resource::<GuidIndex>().0[&ME];
         let mut pairs = vec![(2, 0x19), (HEALTH, 100), (28, 100), (FLAGS, 0x8)];
         if up {
@@ -2784,26 +2608,6 @@ mod tests {
             .insert(ObjectStore(benilla_protocol::ObjectFields::from_pairs(
                 &pairs,
             )));
-        let mut script = world.non_send_resource_mut::<UiScript>();
-        script.set_spellbook(SpellBookState {
-            tabs: vec![SpellTabView {
-                name: "Druid".into(),
-                texture: None,
-                offset: 0,
-                num_spells: 1,
-            }],
-            slots: vec![SpellSlotView {
-                spell_id: GHOST_WOLF,
-                name: "Ghost Wolf".into(),
-                ..Default::default()
-            }],
-        });
-        script.set_shapeshift_forms(vec![benilla_ui::script::ShapeshiftFormView {
-            spell_id: GHOST_WOLF,
-            name: "Ghost Wolf".into(),
-            castable: true,
-            ..Default::default()
-        }]);
     }
 
     /// The `CMSG_CANCEL_AURA`s sent, as spell ids.
@@ -4061,25 +3865,24 @@ mod tests {
         display: benilla_formats::SpellDisplay,
     ) {
         let world = f.app.world_mut();
+        let display = benilla_formats::SpellDisplay {
+            name: name.into(),
+            ..display
+        };
+        seat_book(world, spell_id, display);
+    }
+
+    /// `spell_id` known and alone in the book, its record `display`, which the book getters read
+    /// through the host.
+    fn seat_book(world: &mut World, spell_id: u32, display: benilla_formats::SpellDisplay) {
         world.insert_resource(crate::ui_action::Spells {
             catalog: benilla_formats::SpellCatalog::from_displays([(spell_id, display)].into()),
             ..crate::ui_action::Spells::empty_for_tests()
         });
         world
-            .non_send_resource_mut::<UiScript>()
-            .set_spellbook(SpellBookState {
-                tabs: vec![SpellTabView {
-                    name: "Book".into(),
-                    texture: None,
-                    offset: 0,
-                    num_spells: 1,
-                }],
-                slots: vec![SpellSlotView {
-                    spell_id,
-                    name: name.into(),
-                    ..Default::default()
-                }],
-            });
+            .resource_mut::<crate::ui_action::PlayerActions>()
+            .spells
+            .insert(spell_id);
     }
 
     /// `party1` (`NEW`) a friendly player-controlled player, alive or dead.

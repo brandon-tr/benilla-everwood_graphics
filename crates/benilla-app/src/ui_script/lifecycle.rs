@@ -405,21 +405,27 @@ pub(crate) fn run_pending_entry_load(world: &mut World) {
 /// (`WorldMapFrame.lua:19-28`), which answer the root while `UIParent` is still at scale 1. With no
 /// atlas yet (it bakes on the first `Update`) the per-frame pass seats the measurer.
 fn seat_raster_seam_for_load(world: &mut World, script: &mut UiScript) {
-    let (w, h) = {
-        let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
-        q.single(world)
-            .map_or((0.0, 0.0), |win| (win.width(), win.height()))
-    };
-    let s = super::seam_scale(h);
-    if w > 0.0 && h > 0.0 {
-        // The VM lives in a 768-tall root, `768·a` wide for the window's aspect `a`. No
+    let screen = interface_screen(world);
+    let s = super::seam_scale(screen.size.y);
+    if screen.size.x > 0.0 && screen.size.y > 0.0 {
+        // The VM lives in a 768-tall root, `768·a` wide for the interface's aspect `a`. No
         // `UIParent_ManageFramePositions` here, unlike `tick_script`: nothing is laid out yet.
-        script.set_window_size(w, h);
+        script.set_screen_aspect(screen.aspect);
     }
     let Some(atlas) = world.get_resource::<crate::ui_text::UiFontAtlas>() else {
         return;
     };
     super::extract::seat_text_measurer(script, atlas, s);
+}
+
+/// The interface's screen for the primary window ([`super::UiScreen`]), of no area with no window.
+fn interface_screen(world: &mut World) -> super::UiScreen {
+    let widescreen = world.get_resource::<crate::video::Widescreen>().copied();
+    let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+    q.single(world)
+        .map_or(super::UiScreen::of(Vec2::ZERO, true), |win| {
+            super::UiScreen::of_window(win, widescreen.as_ref())
+        })
 }
 
 /// Which `"player"` a UI load runs its files under, by the edge that runs it.
@@ -632,12 +638,7 @@ fn load_ingame_ui_seated(world: &mut World, seat: LoadSeat) {
         // done, after the chat reader (`0x4900d6`) and before the `PLAYER_LOGIN` arm (`0x49011d`),
         // through the display handler (`0x49010e` → `0x492e90`). So every `OnLoad` sees `UIParent`
         // at scale 1 and the root's size.
-        let display = {
-            let mut q = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
-            q.single(world).map_or((0, 0), |w| {
-                (w.width().round() as u32, w.height().round() as u32)
-            })
-        };
+        let display = interface_screen(world).display();
         let cached = world.get_resource::<super::UiAutoScaleCache>().map(|c| c.0);
         let mut cache = cached.flatten();
         crate::script_calls::lent_by_world(world, script, |script| {
@@ -991,6 +992,11 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
                 shutdown_ui_state(script, identity.as_ref());
             }
         });
+        // The shutdown's account-data writes (`0x490c55`-`0x490c79` through `0x5afed0`) arm
+        // their uploads, which a `/reload`, staying in the world, lets run.
+        if let Some(data) = world.get_resource::<crate::account_data::AccountData>() {
+            data.shut_down_ui();
+        }
     }
     if silenced {
         unsilence_ui_shutdown(world);
@@ -1030,8 +1036,9 @@ fn close_ui_session(world: &mut World, root: ShutdownRoot) {
     if let Some(mut minimap) = world.get_resource_mut::<crate::minimap::MinimapWidget>() {
         minimap.0 = None;
     }
-    // And the signals the frame's deaths parked in it, for the deaths lane.
+    // And the signals the frame's deaths and releases parked in it, for their lanes.
     crate::target::drop_parked_deaths(world);
+    crate::target::drop_parked_releases(world);
 }
 
 /// A `ReloadUI()` waiting to run: set when [`crate::ui_logout`] drains

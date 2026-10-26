@@ -64,18 +64,11 @@ pub(crate) struct RecordAsks<'w> {
     quest: Option<ResMut<'w, crate::ui_quest::QuestGiver>>,
     craft: Option<ResMut<'w, crate::ui_craft::CraftItemWaits>>,
     trade_skill: Option<ResMut<'w, crate::ui_tradeskill::TradeSkillItemWaits>>,
+    merchant: Option<ResMut<'w, crate::ui_merchant::MerchantOpen>>,
     net: Res<'w, crate::net::NetCommands>,
 }
 
 impl RecordAsks<'_> {
-    /// The player-name cache's record for `guid`, read only ([`benilla_ui::script::CallHost::player_name`]).
-    pub(crate) fn player_name(&self, guid: u64) -> Option<String> {
-        self.names
-            .as_deref()?
-            .resolve_player(guid, crate::query_cache::Ask::Read)
-            .map(str::to_string)
-    }
-
     /// `ask` inside its getter, whose VM a hit the mirror lacked is told.
     pub(crate) fn apply(&mut self, script: &mut UiScript, ask: RecordAsk) {
         use crate::query_cache::Ask;
@@ -152,6 +145,28 @@ impl RecordAsks<'_> {
                     // The VM keeps the callback: the cache only asks.
                     ItemCallback::QuestLog => {
                         let _ = items.template(entry, owner, Ask::Event(&self.net));
+                    }
+                    // A miss registers the callback and counts the window's wait (`0x4faf1a`,
+                    // `0x4faf23`).
+                    ItemCallback::Merchant => {
+                        let owner = self.merchant.as_deref().and_then(|o| o.vendor).unwrap_or(0);
+                        if items
+                            .template(entry, owner, Ask::Event(&self.net))
+                            .is_none()
+                        {
+                            items.wait(entry, crate::items::RecordCallback::Merchant);
+                            if let Some(open) = self.merchant.as_deref_mut() {
+                                open.pending += 1;
+                            }
+                        }
+                    }
+                    ItemCallback::Buyback => {
+                        if items
+                            .template(entry, owner, Ask::Event(&self.net))
+                            .is_none()
+                        {
+                            items.wait(entry, crate::items::RecordCallback::Buyback);
+                        }
                     }
                 }
             }

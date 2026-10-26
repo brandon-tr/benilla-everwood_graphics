@@ -36,7 +36,8 @@ pub(crate) struct UnitFeed;
 
 /// The feeds that seat a new VM with what the reference's caches hold across a `/reload`, ahead of
 /// the world-enter cascade whose handlers read it: the quest log's records, slots and creature
-/// names, the item records, and the reputation list the cascade's rebuild signals over.
+/// names, and the item records. The reputation list is built by the cascade itself, off the lent
+/// host ([`benilla_ui::script::UiScript::fire_world_enter_tail`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct WorldEnterSeats;
 
@@ -651,27 +652,6 @@ impl<'a> UnitNames<'a> {
                 classes.file(class).unwrap_or_default(),
             )
         })
-    }
-}
-
-/// Resolve a UnitPopup token to the other player's guid it names: `"target"` when it is a player,
-/// `"partyN"` through the roster; `"player"` and anything unresolved answer `None`.
-pub(crate) fn player_token_guid(
-    token: &str,
-    selection: &Selection,
-    group: &crate::ui_party::GroupState,
-) -> Option<u64> {
-    match token {
-        "target" => selection
-            .guid
-            .filter(|g| benilla_protocol::guid::is_player(*g)),
-        "player" => None,
-        tok => tok
-            .strip_prefix("party")
-            .and_then(|n| n.parse::<usize>().ok())
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|n| group.party_slots().nth(n))
-            .map(|m| m.guid),
     }
 }
 
@@ -1540,6 +1520,15 @@ pub(crate) fn run_feed_units_once(world: &mut World) {
         .expect("the unit events run as a one-shot system");
 }
 
+/// [`relations::feed_unit_relations`] once, for a test that drives the feeds by hand.
+#[cfg(test)]
+pub(crate) fn run_feed_unit_relations_once(world: &mut World) {
+    use bevy::ecs::system::RunSystemOnce;
+    world
+        .run_system_once(relations::feed_unit_relations)
+        .expect("the relations feed runs as a one-shot system");
+}
+
 /// Whether the unit feed runs before `system` in `app`'s `Update`, for a reader of its pushes.
 #[cfg(test)]
 pub(crate) fn feed_units_runs_before<M>(
@@ -1835,6 +1824,10 @@ fn feed_units(
                 // (`0x5deb60`): alive, `PLAYER_UNGHOST` (`0x5dea2a`), with no gate before it; a
                 // ghost's leg is its tutorial (`crate::tutorial`).
                 owed.unghost = arrived && store.0.player_flags() & 0x10 == 0;
+                // Ahead of both, the arrival's replay learns the list (`0x5dea8b`-`0x5deab9`),
+                // each stance-bar spell an `UPDATE_SHAPESHIFT_FORMS` (`0x4b2904`), then sorts the
+                // book and signals it (`0x5deac2`).
+                owed.book_sorted = arrived;
                 owed.world_enter = Some(WorldEnter {
                     bonus_bar_offset: crate::ui_action::bonus_bar_offset(
                         Some(store),
@@ -1925,6 +1918,13 @@ fn feed_units(
             .is_some_and(|u| std::mem::take(&mut u.0));
     let world_enter = vm.run(|script| {
         let script = script?;
+        if owed.book_sorted {
+            // One per form the list holds, read through the lent host off the known spells.
+            for _ in 0..script.shapeshift_form_count() {
+                script.fire_event("UPDATE_SHAPESHIFT_FORMS", vec![]);
+            }
+            script.fire_event("SPELLS_CHANGED", vec![]);
+        }
         if owed.unghost {
             script.fire_event("PLAYER_UNGHOST", vec![]);
         }
@@ -1974,6 +1974,8 @@ fn feed_units(
 /// The events [`feed_units`]' turn owes, fired after it in its order with the host lent.
 #[derive(Default)]
 struct OwedUnitEvents {
+    /// The arrival's form-list edges and its `SPELLS_CHANGED`, ahead of its ghost state.
+    book_sorted: bool,
     /// `PLAYER_UNGHOST`, ahead of the arrival's cascade.
     unghost: bool,
     /// The world-enter cascade.

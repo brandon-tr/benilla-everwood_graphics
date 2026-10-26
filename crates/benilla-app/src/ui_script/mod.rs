@@ -25,10 +25,14 @@ pub(crate) mod glue_mgr;
 pub(crate) mod glue_scene;
 mod input;
 mod movie;
+mod records;
 /// The server alert's fetch and `LaunchURL`'s browser, for the stock glue screens.
 pub(crate) mod server_alert;
 #[cfg(test)]
 pub(crate) use input::feed_keys;
+#[cfg(test)]
+pub(crate) use records::records_from_planes;
+pub(crate) use records::{collect_input_records, InputRecord, InputRecords, Record};
 // Test-only: the bindings tests run the UI's wheel sweep ahead of the dispatch pass.
 #[cfg(test)]
 pub(crate) use input::feed_wheel;
@@ -150,6 +154,24 @@ pub(crate) struct PlayerUiClickConsumed(pub(crate) bool);
 #[derive(Resource, Default)]
 pub(crate) struct PlayerUiPressConsumed(pub(crate) bool);
 
+/// Who this frame's button presses went to, as the records dispatched them: `(button, over_ui)`
+/// per press, `over_ui` when a frame was hovered, the interface consumed it or the dev overlay held
+/// the pointer. The world frame's binding and the world's mouse latch both read it, so they agree
+/// on who owns a press; a button no record pressed this frame is absent.
+#[derive(Resource, Default)]
+pub(crate) struct WorldPresses(pub(crate) Vec<(MouseButton, bool)>);
+
+impl WorldPresses {
+    /// Whether the frame's last press of `button` was the interface's, `None` with no press.
+    pub(crate) fn over_ui(&self, button: MouseButton) -> Option<bool> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(b, _)| *b == button)
+            .map(|(_, over)| *over)
+    }
+}
+
 /// Whether the cursor carries a payload, a `Send` mirror. A click on sky with one held never
 /// deselects: the reference gates its nothing-leg `SetSelection(0,0)` on no payload (`0x492d30`).
 #[derive(Resource, Default)]
@@ -191,11 +213,12 @@ pub(crate) struct UiDrain;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiPaint;
 
-/// The player-UI input pass (hit test, handlers, then the bindings): the frame's window input
-/// records, which the reference runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of
-/// the net drain ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the
-/// world as the last frame left it. First of the frame's input records, so its
-/// [`PlayerUiHover`] reaches `PointerOverUi` before the world's mouse reads it.
+/// The player-UI input pass: the frame's window input records ([`InputRecords`]), each whole
+/// through the interface's walk and the world frame's binding before the next, which the reference
+/// runs ahead of its packets (`0x423920` at `0x420d23`), so ahead of the net drain
+/// ([`WorldStage::Net`]) and [`UiFeed`]: a handler and the calls it makes read the world as the
+/// last frame left it. First of the frame's input records, so its [`PlayerUiHover`] reaches
+/// `PointerOverUi` before the world's mouse reads it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct UiInput;
 
@@ -294,11 +317,94 @@ pub(crate) fn seam_scale(window_h: f32) -> f32 {
     }
 }
 
+/// The interface's own screen on the window. Its cells take the aspect `0x4901e0` (in glue
+/// `0x46ab40`) answers, the window's while `widescreen` is on and 4/3 when it is 0, through
+/// `0x41ad10` (`0x48fe1e`, `0x46a81c`), and the layout always spans the whole window. So with
+/// `widescreen` 0 the interface lays out 4:3, `4/3` of the window's height across, and is drawn
+/// stretched across the window, as 1.12.1 does on any other shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UiScreen {
+    /// The interface's screen in its own px: the window's height, and its width or `4/3` of it.
+    pub(crate) size: Vec2,
+    /// Window px per interface px across; 1 unless stretched.
+    pub(crate) stretch: f32,
+    /// The display aspect the cells and the automatic scale take (`0x4901e0`, stored at
+    /// `0x48fe1e`): the window's `RN24(w/h)`, or exactly `RN24(4/3)` with `widescreen` 0, never
+    /// derived from a rounded size.
+    pub(crate) aspect: f32,
+    /// The window in logical px, the display size the automatic scale is keyed on (`0x492f70`).
+    pub(crate) window: Vec2,
+}
+
+impl UiScreen {
+    /// The screen for a window of `window` logical px.
+    pub(crate) fn of(window: Vec2, widescreen: bool) -> Self {
+        if window.x <= 0.0 || window.y <= 0.0 {
+            return Self {
+                size: window,
+                stretch: 1.0,
+                aspect: 4.0 / 3.0,
+                window,
+            };
+        }
+        if widescreen {
+            return Self {
+                size: window,
+                stretch: 1.0,
+                aspect: window.x / window.y,
+                window,
+            };
+        }
+        let size = Vec2::new(window.y * (4.0 / 3.0), window.y);
+        Self {
+            size,
+            stretch: window.x / size.x,
+            aspect: 4.0 / 3.0,
+            window,
+        }
+    }
+
+    /// The display size in whole logical px, as the automatic scale takes it (`0x492f70`).
+    pub(crate) fn display(self) -> (u32, u32) {
+        (self.window.x.round() as u32, self.window.y.round() as u32)
+    }
+
+    /// The screen for `window` under the `widescreen` the CVar holds (on when absent).
+    pub(crate) fn of_window(
+        window: &bevy::window::Window,
+        widescreen: Option<&crate::video::Widescreen>,
+    ) -> Self {
+        Self::of(
+            Vec2::new(window.width(), window.height()),
+            widescreen.is_none_or(|w| w.0),
+        )
+    }
+
+    /// A window point (logical px) in the interface's px.
+    pub(crate) fn point(self, window_px: Vec2) -> Vec2 {
+        Vec2::new(window_px.x / self.stretch, window_px.y)
+    }
+
+    /// [`Self::point`]'s inverse: an interface point in window px.
+    pub(crate) fn window_point(self, ui_px: Vec2) -> Vec2 {
+        Vec2::new(ui_px.x * self.stretch, ui_px.y)
+    }
+}
+
+/// [`window_to_ui`]'s inverse: a point in the VM's root units as a window cursor.
+pub(crate) fn ui_to_window(screen: UiScreen, at: Vec2) -> Vec2 {
+    let h = screen.size.y;
+    let s = seam_scale(h);
+    screen.window_point(Vec2::new(at.x * s, h - at.y * s))
+}
+
 /// A window cursor (logical px, y-down from the top left) in the VM's root units, y up: what the
 /// pointer feed hands the engine and `GetCursorPosition` answers (`0x48b820`, no scale divided out).
-pub(crate) fn window_to_ui(window_h: f32, cursor: Vec2) -> Vec2 {
-    let s = seam_scale(window_h);
-    Vec2::new(cursor.x / s, (window_h - cursor.y) / s)
+pub(crate) fn window_to_ui(screen: UiScreen, cursor: Vec2) -> Vec2 {
+    let h = screen.size.y;
+    let s = seam_scale(h);
+    let p = screen.point(cursor);
+    Vec2::new(p.x / s, (h - p.y) / s)
 }
 
 /// The Lua UI host (a `NonSend` resource: an mlua VM is `!Send`) and its per-frame passes.
@@ -360,6 +466,7 @@ impl Plugin for UiScriptPlugin {
             .init_resource::<UiKeyboardCapture>()
             .init_resource::<PlayerUiClickConsumed>()
             .init_resource::<PlayerUiPressConsumed>()
+            .init_resource::<WorldPresses>()
             .init_resource::<CursorPayloadHeld>()
             .init_resource::<UiClock>()
             .init_resource::<benilla_world::frame_pace::FrameStep>()
@@ -455,6 +562,20 @@ impl Plugin for UiScriptPlugin {
             // records meet the rects its last frame pass drained (`0x7656ba`, `0x765799`), and runs
             // in-world only or on the stock glue screens.
             .init_resource::<UiPassState>()
+            // The frame's window input records, read first, ungated, so no frame dispatches a
+            // stale one.
+            .init_resource::<InputRecords>()
+            .add_message::<bevy::window::WindowEvent>()
+            .add_systems(
+                Update,
+                collect_input_records
+                    .in_set(UiInput)
+                    .before(UiInputViews)
+                    .before(crate::bindings::BindingHead),
+            )
+            // In `Last`, after a look session's end has put the cursor back, so the next frame's
+            // records start from where the pointer is.
+            .add_systems(Last, records::note_frame_end_cursor)
             .add_systems(
                 Update,
                 (
@@ -467,8 +588,9 @@ impl Plugin for UiScriptPlugin {
                 )
                     .chain()
                     .in_set(UiInput)
-                    // So a key a focused box consumed never also fires a binding.
-                    .before(crate::bindings::BindingSet),
+                    // Each record's binding runs inside its walk, between the pass's head and tail.
+                    .after(crate::bindings::BindingHead)
+                    .before(crate::bindings::BindingTail),
             )
             .add_systems(
                 Update,
@@ -552,11 +674,12 @@ impl Plugin for UiScriptPlugin {
     }
 }
 
-/// The mouse and key feed once, for a test over the whole client: the input pass's Lua, with the
-/// call host the world lends.
+/// The mouse and key feed once, for a test over the whole client: the input pass's Lua over the
+/// records the test's planes and key messages make, with the call host the world lends.
 #[cfg(test)]
 pub(crate) fn feed_input_once(world: &mut World) {
     use bevy::ecs::system::RunSystemOnce;
+    records_from_planes(world);
     world
         .run_system_once(input::feed_ui_input)
         .expect("the input feeds");
@@ -636,8 +759,15 @@ fn record_world_frame_time(
     times.0.push(step.delta.as_secs_f32());
 }
 
+/// The demo's stances, Battle, Defensive and Berserker, which a UI capture's known spells list
+/// (`crate::capture`) and [`demo_unit_feed`] seeds the entries of.
+pub(crate) const DEMO_STANCES: [u32; 3] = [2457, 71, 2458];
+
 /// Synthetic player and target snapshots for a server-less UI capture, and its first events once.
-fn demo_unit_feed(mut hosted_vm: crate::script_calls::HostedVm, mut fired: Local<VmMemo<bool>>) {
+pub(crate) fn demo_unit_feed(
+    mut hosted_vm: crate::script_calls::HostedVm,
+    mut fired: Local<VmMemo<bool>>,
+) {
     hosted_vm.run(|script| {
         /// The synthetic target's guid: a creature high part; only its distinctness matters.
         const DEMO_TARGET_GUID: u64 = 0xF130_0000_0000_0001;
@@ -793,8 +923,9 @@ fn demo_unit_feed(mut hosted_vm: crate::script_calls::HostedVm, mut fired: Local
                     }),
                 );
             }
-            // The stance bar: battle active (bonus offset 1), defensive uncastable, berserker
-            // cooling.
+            // The stance bar's entries, which its getters read with no player held, for the
+            // [`DEMO_STANCES`] the known spells list: battle active (bonus offset 1), defensive
+            // uncastable, berserker cooling.
             script.set_shapeshift_forms(vec![
                 benilla_ui::script::ShapeshiftFormView {
                     spell_id: 2457,
@@ -908,6 +1039,8 @@ mod cinematic_tests;
 mod glue_input_tests;
 #[cfg(test)]
 mod key_walk_tests;
+#[cfg(test)]
+mod record_order_tests;
 #[cfg(test)]
 mod tick_order_tests;
 
@@ -1239,7 +1372,7 @@ mod world_map_tests;
 
 #[cfg(test)]
 mod seam_scale_tests {
-    use super::{seam_scale, window_to_ui};
+    use super::{seam_scale, ui_to_window, window_to_ui, UiScreen};
     use bevy::math::Vec2;
 
     #[test]
@@ -1255,10 +1388,34 @@ mod seam_scale_tests {
     /// is 0 and its top 768, its middle column `768·a/2`.
     #[test]
     fn the_cursor_reaches_the_vm_in_root_units() {
-        let at = window_to_ui(1080.0, Vec2::new(960.0, 108.0));
+        let screen = UiScreen::of(Vec2::new(1920.0, 1080.0), true);
+        let at = window_to_ui(screen, Vec2::new(960.0, 108.0));
         assert!((at.x - 960.0 * 768.0 / 1080.0).abs() < 1e-3, "{at}");
         assert!((at.y - 972.0 * 768.0 / 1080.0).abs() < 1e-3, "{at}");
-        assert_eq!(window_to_ui(1080.0, Vec2::new(0.0, 1080.0)), Vec2::ZERO);
+        assert_eq!(window_to_ui(screen, Vec2::new(0.0, 1080.0)), Vec2::ZERO);
+        // With `widescreen` 0 the 4:3 root spans the window: its middle column is 512, its right
+        // edge 1024.
+        let stretched = UiScreen::of(Vec2::new(1920.0, 1080.0), false);
+        let mid = window_to_ui(stretched, Vec2::new(960.0, 540.0));
+        assert!((mid - Vec2::new(512.0, 384.0)).length() < 1e-3, "{mid}");
+        let edge = window_to_ui(stretched, Vec2::new(1920.0, 0.0));
+        assert!((edge - Vec2::new(1024.0, 768.0)).length() < 1e-3, "{edge}");
+    }
+
+    /// [`ui_to_window`] undoes [`window_to_ui`], stretched or not.
+    #[test]
+    fn a_root_point_goes_to_the_window_and_back() {
+        for widescreen in [true, false] {
+            let screen = UiScreen::of(Vec2::new(1920.0, 1080.0), widescreen);
+            for p in [
+                Vec2::ZERO,
+                Vec2::new(512.0, 384.0),
+                Vec2::new(1000.0, 700.0),
+            ] {
+                let back = window_to_ui(screen, ui_to_window(screen, p));
+                assert!((back - p).length() < 1e-3, "{widescreen}: {p} -> {back}");
+            }
+        }
     }
 }
 

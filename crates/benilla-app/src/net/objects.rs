@@ -110,8 +110,11 @@ pub(crate) struct Scene<'w, 's> {
     death_net: ResMut<'w, crate::death::DeathNet>,
     group: ResMut<'w, crate::ui_party::GroupState>,
     pet_bar: Option<Res<'w, crate::ui_pet::PetBar>>,
-    /// The selection, whose aura state the usable refresh watches (`0x6048a6`).
-    selection: Option<Res<'w, crate::target::Selection>>,
+    /// The selection, whose aura state the usable refresh watches (`0x6048a6`), and which a
+    /// unit's release ends and a create or a reactivation holds again ([`crate::target`]).
+    selection: Option<ResMut<'w, crate::target::Selection>>,
+    /// The selection teardowns the packet's releases owe.
+    owed_releases: Option<ResMut<'w, crate::target::OwedReleases>>,
     guilds: Option<ResMut<'w, crate::ui_guild::GuildState>>,
     // The own offer the coinage watcher trims (`0x5ddf30`).
     trade: Option<ResMut<'w, crate::ui_trade::TradeSession>>,
@@ -120,6 +123,8 @@ pub(crate) struct Scene<'w, 's> {
     house: Option<ResMut<'w, crate::ui_auction::HouseLane>>,
     // The loot window's rows and the pushes that wait on an item's record.
     loot: Option<ResMut<'w, crate::ui_loot::LootState>>,
+    // The vendor window's row and buy-back callbacks.
+    merchant: crate::ui_merchant::MerchantRecordAnswers<'w>,
     pass: ResMut<'w, update::UpdatePass>,
     released: ResMut<'w, Released>,
     nets: Query<'w, 's, &'static NetEntity>,
@@ -167,8 +172,9 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
             // The callbacks the lookups that missed registered, in the order they asked
             // (`0x55ba30`, the dedupe flag 0): each item's set-up (`0x5d8390`) and entry change's
             // (`0x5d96b0`), the loot window's rows (`0x4c2ac0`) and pushes (`0x491ee0`), the trade
-            // getters' (`0x4c0340`), the ammo getters' (`0x4c84f0`), and the parked swaps'
-            // (`0x5e1020`) and auto-equips' (`0x5e17a0`).
+            // getters' (`0x4c0340`), the ammo getters' (`0x4c84f0`), the parked swaps'
+            // (`0x5e1020`) and auto-equips' (`0x5e17a0`), and the vendor rows' (`0x4fada0`,
+            // `0x4fb570`).
             let callbacks = sc.items.take_callbacks(entry);
             // An answer an item of ours waited on changes what the bag view shows of it.
             if answered
@@ -233,6 +239,9 @@ fn on_item(In(ev): In<SessionEvent>, mut sc: Scene) {
                     // The equip callbacks run with the VM, after the feeds push the answer
                     // ([`crate::ui_bind_confirm::replay_equip_records`]).
                     Cb::Swap | Cb::AutoEquip => sc.items.run_with_vm(entry, callback, answered),
+                    // The vendor's run for a record and a refusal alike (`0x4fb0f0`, `0x4fb570`).
+                    Cb::Merchant => sc.merchant.row_answered(),
+                    Cb::Buyback => sc.merchant.buyback_answered(),
                 }
             }
             // The combat log's callback for its held lines (`0x6294b0`), which writes each one
@@ -686,6 +695,7 @@ fn object_create(
             }
             let e = entity.id();
             sc.index.0.insert(guid, e);
+            crate::target::object_held(sc.selection.as_mut(), guid, e);
             e
         }
     }

@@ -1,7 +1,6 @@
 //! The inspect bindings: `NotifyInspect` and `ClearInspectPlayer` act inside their calls through
-//! the host ([`InspectCall`]), the app pushes
-//! each held player's visible items by guid ([`UiScript::set_visible_equipment`]) for the
-//! `GetInventoryItem*` verbs, and `CanInspect` and `CheckInteractDistance` read a per-guid
+//! the host ([`InspectCall`]), the `GetInventoryItem*` verbs read another player's visible items
+//! through the lent host ([`VisibleSlotQuery`]), and `CanInspect` and `CheckInteractDistance` read a per-guid
 //! distance map ([`UiScript::set_unit_reach`]) through the token resolver ([`super::UnitGuids`]).
 //!
 //! Worn gear is public descriptor state (`PLAYER_VISIBLE_ITEM_<n>_0`), so the window paints from
@@ -67,13 +66,14 @@ impl super::UiScript {
     }
 
     /// The unit tokens that name a unit now ([`super::unit::bound_tokens_in`]): the set a field's
-    /// change is fanned out to (`0x515e50`). The objects are read through the lent host as of the
-    /// place this runs, the client's globals as the VM holds them; with no host to ask, the
-    /// snapshot's ([`super::UnitGuids::bound_tokens`]).
+    /// change is fanned out to (`0x515e50`). The objects, the target and the interaction globals
+    /// are read through the lent host as of the place this runs, the other globals as the VM holds
+    /// them; with no host to ask, the snapshot's ([`super::UnitGuids::bound_tokens`]).
     pub fn bound_unit_tokens(&self) -> Vec<String> {
         let model = self.model_ref();
         let guids = &model.unit_guids;
-        super::unit::with_live_objects(self.lua(), |o| super::unit::bound_tokens_in(guids, o))
+        let globals = super::unit::LiveGlobals::asked(self.lua(), guids);
+        super::unit::with_live_objects(self.lua(), |o| super::unit::bound_tokens_in(&globals, o))
             .unwrap_or_else(|| guids.bound_tokens())
     }
 
@@ -82,7 +82,8 @@ impl super::UiScript {
     pub fn unit_tokens_of(&self, guid: u64) -> Vec<String> {
         let model = self.model_ref();
         let guids = &model.unit_guids;
-        super::unit::with_live_objects(self.lua(), |o| super::unit::tokens_in(guids, o, guid))
+        let globals = super::unit::LiveGlobals::asked(self.lua(), guids);
+        super::unit::with_live_objects(self.lua(), |o| super::unit::tokens_in(&globals, o, guid))
             .unwrap_or_else(|| guids.tokens_of(guid))
     }
 
@@ -91,16 +92,17 @@ impl super::UiScript {
     pub fn unit_has_field_watchers(&self, guid: u64) -> bool {
         let model = self.model_ref();
         let guids = &model.unit_guids;
+        let globals = super::unit::LiveGlobals::asked(self.lua(), guids);
         super::unit::with_live_objects(self.lua(), |o| {
-            super::unit::field_watchers_in(guids, o, guid)
+            super::unit::field_watchers_in(&globals, o, guid)
         })
         .unwrap_or_else(|| guids.has_field_watchers(guid))
     }
 
     /// Push, or clear with `None`, the visible items of the player `guid` by slot id 1..=19:
     /// what the slot getters read through a token naming another player they may read
-    /// (`0x4944a0`). It fires nothing: a change of them is the visible-item bridge's
-    /// `UNIT_INVENTORY_CHANGED` (`0x51bd70`).
+    /// (`0x4944a0`) when no host is free to ask ([`VisibleSlotQuery`]). It fires nothing: a change
+    /// of them is the visible-item bridge's `UNIT_INVENTORY_CHANGED` (`0x51bd70`).
     pub fn set_visible_equipment(&mut self, guid: u64, slots: Option<InventorySlots>) {
         let mut model = self.model_mut();
         match slots {
@@ -120,6 +122,38 @@ impl super::UiScript {
     /// Whether a harness's VM kept a `ClearInspectPlayer` ([`Self::keep_calls`]).
     pub fn take_inspect_clear(&mut self) -> bool {
         self.take_calls_like(&super::ScriptCall::Inspect(InspectCall::Clear)) > 0
+    }
+}
+
+/// A slot getter's question of another player's visible items, through the lent host
+/// ([`super::live::ask`]): the slot, id 1..=19, as the object's `PLAYER_VISIBLE_ITEM_<slot>` block
+/// holds it at the call (`0x4c8328` → `0x5f0d60`). The answer is `None` for an empty slot or a
+/// player no longer held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleSlotQuery {
+    pub guid: u64,
+    pub slot: u8,
+}
+
+impl super::live::LiveQuery for VisibleSlotQuery {
+    type Answer = Option<super::InvSlotView>;
+}
+
+/// The visible item of the player `guid` at slot id `slot`, read through the lent host as of the
+/// call; with no host free to ask, the snapshot ([`super::UiScript::set_visible_equipment`]).
+pub(super) fn visible_slot(
+    lua: &Lua,
+    model: &Model,
+    guid: u64,
+    slot: usize,
+) -> Option<super::InvSlotView> {
+    let query = VisibleSlotQuery {
+        guid,
+        slot: u8::try_from(slot).ok()?,
+    };
+    match super::live::ask(lua, &query) {
+        Some(answer) => answer,
+        None => model.visible_equipment.get(&guid)?.get(slot)?.clone(),
     }
 }
 

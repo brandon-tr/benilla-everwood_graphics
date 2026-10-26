@@ -114,9 +114,10 @@ pub(crate) use probe_vendor_swap::ProbeVendorSwapPlugin;
 pub(crate) use probes::{
     fx_draw_census_plugin, DressCensusPlugin, EntityCensusPlugin, GroundCensusPlugin,
     JitterMeterPlugin, LiftCensusPlugin, LiveFpsPlugin, NodeProbePlugin, ParticleCensusPlugin,
-    ProbeChatPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin, ProbeFocusPlugin,
-    ProbeGlueLuaPlugin, ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin, ProbeResizePlugin,
-    RevealAuditPlugin, SchedCensusPlugin, StallPlugin, TrailCensusPlugin, UnitVisualsPlugin,
+    ProbeChatPlugin, ProbeClickPlugin, ProbeClock, ProbeDragPlugin, ProbeExitPlugin,
+    ProbeFocusPlugin, ProbeGlueLuaPlugin, ProbeHoverPlugin, ProbeKeyPlugin, ProbeLuaPlugin,
+    ProbeResizePlugin, RevealAuditPlugin, SchedCensusPlugin, StallPlugin, TrailCensusPlugin,
+    UnitVisualsPlugin,
 };
 pub(crate) use scenarios::ui_opted_in;
 use scenarios::{
@@ -336,6 +337,27 @@ enum Phase {
     Saving { frames: u32, seen: bool },
     /// Save done; a few grace frames, then `AppExit`.
     Done(u32),
+}
+
+/// A UI capture's stance bar, once: the demo's stances among the known spells, which the bar's
+/// getters read its list off (`crate::ui_shapeshift`), each entry off the VM copy the demo feed
+/// seeds while no player is held. The spellbook fixture's book is its own known spells, so it
+/// lists none.
+fn seed_demo_forms(
+    ctx: Res<CaptureCtx>,
+    actions: Option<ResMut<crate::ui_action::PlayerActions>>,
+    mut done: Local<bool>,
+) {
+    let Some(fixture) = ctx.scenario.and_then(|s| s.ui) else {
+        return;
+    };
+    let Some(mut actions) = actions.filter(|_| !*done) else {
+        return;
+    };
+    *done = true;
+    if fixture != UiFixture::SpellBook {
+        actions.spells.extend(crate::ui_script::DEMO_STANCES);
+    }
 }
 
 #[derive(Resource)]
@@ -685,7 +707,12 @@ impl Plugin for CapturePlugin {
             .add_systems(Update, seed_perf_crowd)
             // Before `UnitFeed`: the seed stands in for wire data live play delivers on earlier
             // frames, so the same frame's feeds and the one-shot `MERCHANT_SHOW` paint must see it.
-            .add_systems(Update, seed_ui_fixture.before(crate::ui_unit::UnitFeed))
+            .add_systems(
+                Update,
+                (seed_demo_forms, seed_ui_fixture)
+                    .chain()
+                    .before(crate::ui_unit::UnitFeed),
+            )
             .add_systems(
                 Update,
                 (

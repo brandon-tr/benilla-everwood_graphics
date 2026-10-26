@@ -22,6 +22,9 @@ use benilla_protocol::messages::ObjectFields;
 use crate::net::{ClientCommand, NetCommands, ObjectStore, Objects};
 use crate::query_cache::{Ask, QueryCache, Refused};
 
+mod live;
+pub(crate) use live::NameLive;
+
 /// The creature template's `type_flags` dword from `SMSG_CREATURE_QUERY_RESPONSE`, cached by the
 /// reference at `[CGUnit+0xb30] + 0x14`. Adjacent bits mean unrelated things, and the reference
 /// gives each its own getter, so every consumer names the bit it reads:
@@ -491,6 +494,8 @@ pub(crate) mod net {
         chat: Option<Res<crate::ui_chat::ChatLog>>,
         // The auction lists whose getters missed a name (`0x4cf167`, `0x4cf1c8`).
         house: Option<ResMut<crate::ui_auction::HouseLane>>,
+        // The battleground's callbacks, which run for a refusal too.
+        mut battlefield: crate::ui_battlefield::BattlefieldNameAnswers,
     ) {
         if let SessionEvent::PlayerName {
             guid,
@@ -501,8 +506,12 @@ pub(crate) mod net {
         } = ev
         {
             // A guid already cached has no lookup waiting, so no callback runs.
-            let found = !name.is_empty() && names.players.get(guid).is_none();
+            let waited = names.players.get(guid).is_none();
+            let found = !name.is_empty() && waited;
             player_name(guid, name, race, class, gender, &mut names);
+            if waited {
+                battlefield.answered(guid, &names);
+            }
             if found {
                 if let Some(chat) = &chat {
                     chat.answer_landed(crate::ui_chat::Answer::Player(guid));
