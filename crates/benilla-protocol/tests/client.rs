@@ -44,6 +44,7 @@ fn client_bodies_golden() {
         ),
         hx(concat!(
             "f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40",
+            "45464e4d0100",
             "56010000",
             "789c75ccbd0ec2300c04e0f21ebc0c614095c842c38c4ce2220bc7a98ccb4f9f1e16240673eb777781",
             "695940cb693367a326c7be5bd5c77adf7d12be16c08c7124e41249a8c2e495480ac9c53dd8b67a064b",
@@ -55,8 +56,61 @@ fn client_bodies_golden() {
     // No secure addons: the tail is absent, never a zero size, which no real client sends.
     assert_eq!(
         messages::auth_session(5875, "TESTUSER", 0x1122_3344, &proof, &[]),
-        hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d40"),
+        hx("f31600000000000054455354555345520044332211070a0d101316191c1f2225282b2e3134373a3d4045464e4d0100"),
         "CMSG_AUTH_SESSION body with no secure addons"
+    );
+    // Custom fork header: literal EFNM, version 1, effective Region. Values outside 1..5
+    // normalize to 0; the addon tail stays byte-for-byte after it.
+    for (region, byte) in [
+        (0, 0x00),
+        (1, 0x01),
+        (2, 0x02),
+        (3, 0x03),
+        (4, 0x04),
+        (5, 0x05),
+        (-1, 0x00),
+        (6, 0x00),
+        (255, 0x00),
+    ] {
+        let body =
+            messages::auth_session_with_region(5875, "TESTUSER", 0x1122_3344, &proof, &[], region);
+        assert_eq!(
+            &body[body.len() - 6..],
+            &[b'E', b'F', b'N', b'M', 0x01, byte],
+            "custom EFNM header for region {region}"
+        );
+    }
+    let no_addons = messages::auth_session(5875, "TESTUSER", 0x1122_3344, &proof, &[]);
+    let header_offset = no_addons.len() - 6;
+    let with_addons = messages::auth_session_with_region(
+        5875,
+        "TESTUSER",
+        0x1122_3344,
+        &proof,
+        &messages::STOCK_SECURE_ADDONS,
+        2,
+    );
+    assert_eq!(
+        &with_addons[header_offset..header_offset + 6],
+        &[b'E', b'F', b'N', b'M', 0x01, 0x02],
+        "header precedes the unchanged addon tail"
+    );
+    assert_eq!(
+        &with_addons[..header_offset],
+        &no_addons[..header_offset],
+        "bytes through the proof are unchanged"
+    );
+    let with_addons_zero = messages::auth_session(
+        5875,
+        "TESTUSER",
+        0x1122_3344,
+        &proof,
+        &messages::STOCK_SECURE_ADDONS,
+    );
+    assert_eq!(
+        &with_addons[header_offset + 6..],
+        &with_addons_zero[header_offset + 6..],
+        "addon tail is unchanged"
     );
     // CMSG_CHAR_CREATE in vmangos's read order (`Packets/Character.cpp:4-19`): name, race, class,
     // gender, skin, face, hairStyle, hairColor, facialHair, outfit.

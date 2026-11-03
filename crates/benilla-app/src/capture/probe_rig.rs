@@ -547,16 +547,21 @@ fn parse_point(at: &str) -> Option<(i32, f32, f32, f32, Option<f32>)> {
 fn rig_char_name(spec: &RigSpec) -> Option<String> {
     let (race, class, gender) = spec.body?;
     let word = crate::run_mode::rig_suffix()?;
-    let name = format!(
+    let first = format!(
         "{}{}{word}{}",
         race_code(race)?,
         class_code(class)?,
         if gender == 1 { "f" } else { "" }
     );
-    // vmangos caps player names at 12 (`ObjectMgr.h:398`); the longest built here is
-    // `Nel` + `Wlk` + `three` + `f`. Normalized as the server does: leading capital, rest lower.
-    let mut chars = name.chars();
-    Some(chars.next()?.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase())
+    // Each part is capped at 12 by the full-name check; the longest first part built here is
+    // `Nel` + `Wlk` + `three` + `f`. The first part is normalized as the server does: leading
+    // capital, rest lower. The last part is the capture probes' fixed one.
+    let mut chars = first.chars();
+    Some(format!(
+        "{} {}",
+        chars.next()?.to_ascii_uppercase().to_string() + &chars.as_str().to_ascii_lowercase(),
+        super::glue_press::DEFAULT_LAST_NAME
+    ))
 }
 
 /// This checkout's rig-named character cheapest to rebuild: lowest level first, ties to the oldest
@@ -579,10 +584,16 @@ fn evictable(
 }
 
 /// Whether a roster name was minted by [`rig_char_name`] for this checkout: a known race code, a
-/// known class code, this checkout's word, and nothing but an optional `f` after it.
+/// known class code, this checkout's word, an optional `f`, then the probes' fixed last part.
 fn is_rig_name(name: &str, word: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    let Some(rest) = lower.get(3..).and_then(|r| r.get(3..)) else {
+    let Some((first, last)) = name.split_once(' ') else {
+        return false;
+    };
+    if !last.eq_ignore_ascii_case(super::glue_press::DEFAULT_LAST_NAME) {
+        return false;
+    }
+    let lower = first.to_ascii_lowercase();
+    let Some(rest) = lower.get(6..) else {
         return false;
     };
     let has_codes = RACE_CODES.iter().any(|(_, c)| lower.starts_with(c))
@@ -763,20 +774,26 @@ mod tests {
 
     #[test]
     fn the_derived_name_is_deterministic_and_fits_the_server_limit() {
-        // `<Race3><Class3><word>[f]`, normalized the way vmangos normalizes a player name.
+        // `<Race3><Class3><word>[f]`, normalized the way vmangos normalizes a player name, then
+        // the probes' fixed last part.
         let name = |spec: &str, slot: &str| {
             let s = RigSpec::parse(spec).unwrap();
             let (race, class, gender) = s.body.unwrap();
             format!(
-                "{}{}{slot}{}",
+                "{}{}{slot}{} {}",
                 race_code(race).unwrap(),
                 class_code(class).unwrap(),
-                if gender == 1 { "f" } else { "" }
+                if gender == 1 { "f" } else { "" },
+                super::super::glue_press::DEFAULT_LAST_NAME
             )
         };
-        assert_eq!(name("tauren druid", "one"), "taudruone");
-        assert_eq!(name("nightelf warlock female", "three"), "nelwlkthreef");
-        // The longest name this scheme can mint is exactly vmangos's `MAX_PLAYER_NAME`.
+        assert_eq!(name("tauren druid", "one"), "taudruone Tester");
+        assert_eq!(
+            name("nightelf warlock female", "three"),
+            "nelwlkthreef Tester"
+        );
+        // Each part is capped at 12 by the full-name check; the longest first part this scheme
+        // can mint is exactly that cap, and the fixed last part fits too.
         const MAX_PLAYER_NAME: usize = 12;
         let longest = RACE_CODES
             .iter()
@@ -793,6 +810,7 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(longest, MAX_PLAYER_NAME);
+        assert!(super::super::glue_press::DEFAULT_LAST_NAME.len() <= MAX_PLAYER_NAME);
     }
 
     /// A roster row with just the fields eviction reads.
@@ -831,21 +849,21 @@ mod tests {
         let slot = "one";
         // Roster order is create order (vmangos enumerates by `create_time`).
         let roster = [
-            row("Probeone", 60, 1),  // the identity, never evictable
-            row("Watcher", 60, 2),   // hand-made, never evictable
-            row("Taudruone", 60, 3), // oldest rig body, but a geared 60
-            row("Orcwarone", 1, 4),  // a level-1 filler: the cheapest to lose
-            row("Undmagone", 1, 5),  // same level, but younger: the tie goes to the older
-            row("Nelwlkonef", 40, 6),
+            row("Probeone", 60, 1),         // the identity, never evictable
+            row("Watcher", 60, 2),          // hand-made, never evictable
+            row("Taudruone Tester", 60, 3), // oldest rig body, but a geared 60
+            row("Orcwarone Tester", 1, 4),  // a level-1 filler: the cheapest to lose
+            row("Undmagone Tester", 1, 5),  // same level, but younger: the tie goes to the older
+            row("Nelwlkonef Tester", 40, 6),
         ];
         assert_eq!(
-            evictable(&roster, Some("Tauwarone"), slot),
-            Some((4, "Orcwarone".into())),
+            evictable(&roster, Some("Tauwarone Tester"), slot),
+            Some((4, "Orcwarone Tester".into())),
         );
         // The body we are about to create is never the one we delete to make room for it.
         assert_eq!(
-            evictable(&roster, Some("Orcwarone"), slot),
-            Some((5, "Undmagone".into())),
+            evictable(&roster, Some("Orcwarone Tester"), slot),
+            Some((5, "Undmagone Tester".into())),
         );
         // Nothing rig-named on this slot, nothing to evict; the caller errors rather than guessing.
         assert_eq!(evictable(&roster[..2], None, slot), None);
@@ -855,13 +873,16 @@ mod tests {
 
     #[test]
     fn eviction_only_ever_sees_rig_characters() {
-        assert!(is_rig_name("Taudruone", "one"));
-        assert!(is_rig_name("Nelwlkthreef", "three"));
+        assert!(is_rig_name("Taudruone Tester", "one"));
+        assert!(is_rig_name("Nelwlkthreef Tester", "three"));
         // The identity character, a human-made character, and another slot's rig: all invisible.
-        assert!(!is_rig_name("Probeone", "one"));
-        assert!(!is_rig_name("Watcher", "one"));
-        assert!(!is_rig_name("Taudruthree", "one"));
-        assert!(!is_rig_name("Taudru", "one"));
-        assert!(!is_rig_name("Taudruoneextra", "one"));
+        assert!(!is_rig_name("Probeone Tester", "one"));
+        assert!(!is_rig_name("Watcher Tester", "one"));
+        assert!(!is_rig_name("Taudruthree Tester", "one"));
+        assert!(!is_rig_name("Taudru Tester", "one"));
+        assert!(!is_rig_name("Taudruoneextra Tester", "one"));
+        // One-part names and a different last part are not this scheme's.
+        assert!(!is_rig_name("Taudruone", "one"));
+        assert!(!is_rig_name("Taudruone Other", "one"));
     }
 }

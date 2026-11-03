@@ -62,5 +62,133 @@
                 getglobal(this:GetName().."HotKey"):SetText("")
             end
         end
+
+        -- Deviation: a character name is a required "First Last" pair, and the stock chat splits
+        -- a whisper at the first word. `ChatEdit_ExtractTellTarget` (ChatFrame.lua:2210-2223)
+        -- takes the word before the first space as the target and leaves the rest as the line,
+        -- so `/w Asha Brightvale hi`, the chat link's `ChatFrame_SendTell` prefill
+        -- (l.1606-1619) and the /who menu's Whisper row all addressed "Asha" with "Brightvale
+        -- hi" as the message. This takes the two words a name has and the message from the
+        -- third, replicating that branch (l.2212-2222) rather than handing stock a marker
+        -- through GetText: `ChatEdit_AddHistory` (l.1924-1925) files `editBox.tellTarget`, so a
+        -- marker there would be recalled into the box.
+        --
+        -- A space pressed while only the first word is typed is the name's separator, not its
+        -- end, so the line is left for the second word (`ChatEdit_OnSpacePressed`, l.1979-1981);
+        -- a prefill from a menu or a link does not wait, and one-word lines still parse there as
+        -- stock parses them. A send with one word runs the stock branch and sends nothing.
+        local benillaIsSpacePressed = nil
+        local benillaWhisperCommands = nil
+        local function benillaIsWhisperCommand(command)
+            if ( not benillaWhisperCommands ) then
+                benillaWhisperCommands = {}
+                local i = 1
+                local cmdString = TEXT(getglobal("SLASH_WHISPER"..i))
+                while ( cmdString ) do
+                    benillaWhisperCommands[strupper(cmdString)] = 1
+                    i = i + 1
+                    cmdString = TEXT(getglobal("SLASH_WHISPER"..i))
+                end
+            end
+            return benillaWhisperCommands[command]
+        end
+
+        if ( ChatEdit_ParseText ) then
+            local refParseText = ChatEdit_ParseText
+            function ChatEdit_ParseText(editBox, send)
+                local text = editBox:GetText()
+                if ( strlen(text) > 0 and strsub(text, 1, 1) == "/" ) then
+                    -- The command and its message, split as the stock body does (l.2099-2105).
+                    local command = gsub(text, "/([^%s]+)%s(.*)", "/%1", 1)
+                    local msg = ""
+                    if ( command ~= text ) then
+                        msg = strsub(text, strlen(command) + 2)
+                    end
+                    command = strupper(gsub(command, "%s+", ""))
+                    if ( benillaIsWhisperCommand(command) ) then
+                        local first = gsub(msg, "^(%s*)([^%s]+)(.*)$", "%2")
+                        local last = ""
+                        local rest = nil
+                        if ( strlen(first) > 0 and strsub(first, 1, 1) ~= "|" ) then
+                            local afterFirst = strsub(msg, strlen(first) + 2)
+                            last = gsub(afterFirst, "^(%s*)([^%s]+)(.*)$", "%2")
+                            if ( strlen(last) > 0 and strsub(last, 1, 1) ~= "|" ) then
+                                rest = strsub(afterFirst, strlen(last) + 2)
+                            end
+                        end
+                        if ( rest ) then
+                            editBox.tellTarget = first.." "..last
+                            editBox.chatType = "WHISPER"
+                            editBox:SetText(rest)
+                            ChatEdit_UpdateHeader(editBox)
+                            return
+                        end
+                        if ( send == 0 and benillaIsSpacePressed ) then
+                            return
+                        end
+                    end
+                end
+                return refParseText(editBox, send)
+            end
+
+            if ( ChatEdit_OnSpacePressed ) then
+                local refOnSpacePressed = ChatEdit_OnSpacePressed
+                function ChatEdit_OnSpacePressed()
+                    benillaIsSpacePressed = 1
+                    refOnSpacePressed()
+                    benillaIsSpacePressed = nil
+                end
+            end
+        end
+
+        -- Deviation: stock `SetItemRef` keeps only the last word of a player link's name (the two
+        -- `gsub` passes at ItemRef.lua:6-7), from before names were pairs: the link is
+        -- `player:First Last` (`ChatFrame.lua:1445-1451`), so click-to-whisper and its right-click
+        -- menu addressed the wrong half. Its player branch (l.3-47) is the stock one, with the
+        -- name read whole; every other link still runs the stock file's own body.
+        if ( SetItemRef ) then
+            local refSetItemRef = SetItemRef
+            function SetItemRef(link, text, button)
+                if ( strsub(link, 1, 6) == "player" ) then
+                    local name = strsub(link, 8);
+                    if ( name and (strlen(name) > 0) ) then
+                        if ( IsShiftKeyDown() ) then
+                            local staticPopup;
+                            staticPopup = StaticPopup_Visible("ADD_IGNORE");
+                            if ( staticPopup ) then
+                                getglobal(staticPopup.."EditBox"):SetText(name);
+                                return;
+                            end
+                            staticPopup = StaticPopup_Visible("ADD_FRIEND");
+                            if ( staticPopup ) then
+                                getglobal(staticPopup.."EditBox"):SetText(name);
+                                return;
+                            end
+                            staticPopup = StaticPopup_Visible("ADD_GUILDMEMBER");
+                            if ( staticPopup ) then
+                                getglobal(staticPopup.."EditBox"):SetText(name);
+                                return;
+                            end
+                            staticPopup = StaticPopup_Visible("ADD_RAIDMEMBER");
+                            if ( staticPopup ) then
+                                getglobal(staticPopup.."EditBox"):SetText(name);
+                                return;
+                            end
+                            if ( ChatFrameEditBox:IsVisible() ) then
+                                ChatFrameEditBox:Insert(name);
+                            else
+                                SendWho("n-"..name);
+                            end
+                        elseif ( button == "RightButton" ) then
+                            FriendsFrame_ShowDropdown(name, 1);
+                        else
+                            ChatFrame_SendTell(name);
+                        end
+                    end
+                    return;
+                end
+                return refSetItemRef(link, text, button);
+            end
+        end
     ]]></Script>
 </Ui>

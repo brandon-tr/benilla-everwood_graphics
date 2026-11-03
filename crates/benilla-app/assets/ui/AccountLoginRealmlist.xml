@@ -30,6 +30,14 @@
             end,
         };
 
+        -- The full-name boxes' own errors: no OnShow, so pressing OKAY closes the dialog
+        -- without the stock OKAY type's StatusDialogClick on the screen behind it.
+        GlueDialogTypes["BENILLA_NAME_ERROR"] = {
+            text = "",
+            button1 = TEXT(OKAY),
+            button2 = nil,
+        };
+
         GlueDialogTypes["BENILLA_REALMLIST_PINNED"] = {
             text = "",
             button1 = TEXT(OKAY),
@@ -124,4 +132,254 @@
             </OnUpdate>
         </Scripts>
     </Button>
-</Ui>
+    <!-- Fork deviation: full names are two entered parts. The stock edit holds the first part;
+         a second edit holds the last. Submission joins the raw parts without writing either edit,
+         so the stock handler still runs and a single-part cap cannot truncate the pair. -->
+    <Script>
+        if ( not BenillaFullName_Installed ) then
+            -- The glue VM has no `_G` (its environment is the bare global table), so every
+            -- lookup goes through the stock `getglobal` the Glue lua uses.
+            local function AddLabel(anchor, name, text)
+                local label = getglobal(name);
+                if ( not label ) then
+                    label = anchor:GetParent():CreateFontString(
+                        name, "ARTWORK", "GlueFontNormalSmall");
+                end
+                label:SetText(text);
+                label:ClearAllPoints();
+                label:SetPoint("RIGHT", anchor, "LEFT", -8, 0);
+                return label;
+            end
+
+            -- `InputBoxTemplate` belongs to FrameXML, not GlueXML, so a template argument here
+            -- raises "Couldn't find inherited node" and no widget is made. The stock create and
+            -- rename edits are templateless too; this one builds the same look by hand.
+            local function AddLastEdit(anchor, name)
+                local edit = getglobal(name);
+                if ( edit ) then
+                    return edit;
+                end
+                edit = CreateFrame("EditBox", name, anchor:GetParent());
+                local width, height = anchor:GetWidth(), anchor:GetHeight();
+                if ( not width or 0 >= width ) then
+                    width = 156;
+                end
+                if ( not height or 0 >= height ) then
+                    height = 40;
+                end
+                edit:SetWidth(width);
+                edit:SetHeight(height);
+                edit:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -10);
+                edit:SetAutoFocus(false);
+                edit:SetMaxLetters(12);
+                edit:SetTextInsets(15, 0, 0, 0);
+                edit:SetFontObject(GlueEditBoxFont);
+                edit:SetBackdrop({
+                    bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+                    edgeFile = "Interface\\Glues\\Common\\Glue-Tooltip-Border",
+                    tile = true, tileSize = 16, edgeSize = 16,
+                    insets = { left = 10, right = 5, top = 4, bottom = 9 },
+                });
+                return edit;
+            end
+
+            -- The create screen colors the stock name box from the picked race's faction; the
+            -- second box copies those colors now and follows every later change the stock code
+            -- makes, so the pair always looks alike.
+            local function CopyBackdropColors(source, target)
+                local br, bg, bb, ba = source:GetBackdropBorderColor();
+                if ( br ) then
+                    target:SetBackdropBorderColor(br, bg, bb, ba);
+                end
+                local r, g, b, a = source:GetBackdropColor();
+                if ( r ) then
+                    target:SetBackdropColor(r, g, b, a);
+                end
+            end
+
+            local function FollowBackdropColors(source, target)
+                CopyBackdropColors(source, target);
+                if ( source.BenillaFullNameFollowed ) then
+                    return;
+                end
+                source.BenillaFullNameFollowed = true;
+                local setBorder = source.SetBackdropBorderColor;
+                source.SetBackdropBorderColor = function(self, r, g, b, a)
+                    setBorder(self, r, g, b, a);
+                    target:SetBackdropBorderColor(r, g, b, a);
+                end;
+                local setColor = source.SetBackdropColor;
+                source.SetBackdropColor = function(self, r, g, b, a)
+                    setColor(self, r, g, b, a);
+                    target:SetBackdropColor(r, g, b, a);
+                end;
+            end
+
+            -- The stock box's caption is an anonymous FontString child, so find it by its text
+            -- and hide it: the pair's own First name/Last name labels replace it.
+            local function HideTextRegion(edit, text)
+                local regions = { edit:GetRegions() };
+                for i = 1, table.getn(regions) do
+                    local region = regions[i];
+                    if ( region.GetText and region:GetText() == text ) then
+                        region:Hide();
+                    end
+                end
+            end
+
+            local function SubmitWithEditText(edit, combined, action)
+                local originalGetText = edit.GetText;
+                edit.GetText = function() return combined end;
+                local ok, err = pcall(action);
+                edit.GetText = originalGetText;
+                if ( not ok ) then
+                    error(err);
+                end
+            end
+
+            -- A part with no character at all (empty or spaces only) is a case the stock
+            -- name check has no part-specific words for, so the overlay names the missing half.
+            local function IsBlank(part)
+                return part == "" or not string.find(part, "%S");
+            end
+
+            local function RejectBlankPart(part, which)
+                if ( not IsBlank(part) ) then
+                    return false;
+                end
+                GlueDialog_Show("BENILLA_NAME_ERROR",
+                    "Enter your character's "..which.." name.");
+                return true;
+            end
+
+            local function Join(first, last)
+                return first.." "..last;
+            end
+
+            function BenillaFullName_SubmitCreation()
+                local first = CharacterCreateNameEdit:GetText() or "";
+                local last = BenillaCharacterCreateLastNameEdit:GetText() or "";
+                if ( RejectBlankPart(first, "first") ) then
+                    return;
+                end
+                if ( RejectBlankPart(last, "last") ) then
+                    return;
+                end
+                local combined = Join(first, last);
+                local action = CharCreateOkayButton.BenillaFullNameOriginal;
+                if ( action ) then
+                    SubmitWithEditText(CharacterCreateNameEdit, combined, action);
+                else
+                    CreateCharacter(combined);
+                end
+            end
+
+            function BenillaFullName_SubmitRename()
+                local first = CharacterRenameEditBox:GetText() or "";
+                local last = BenillaCharacterRenameLastNameEdit:GetText() or "";
+                if ( RejectBlankPart(first, "first") ) then
+                    return;
+                end
+                if ( RejectBlankPart(last, "last") ) then
+                    return;
+                end
+                local combined = Join(first, last);
+                local action = CharacterRenameButton1.BenillaFullNameOriginal;
+                if ( action ) then
+                    SubmitWithEditText(CharacterRenameEditBox, combined, action);
+                end
+            end
+
+            local function ResetPair(firstEdit, lastEdit, seedFirst)
+                if ( seedFirst ) then
+                    firstEdit:SetText(seedFirst);
+                elseif ( firstEdit:GetText() == nil ) then
+                    firstEdit:SetText("");
+                end
+                lastEdit:SetText("");
+            end
+
+            if ( CharacterCreateNameEdit and CharCreateOkayButton ) then
+                -- The stock edit's bottom sits 50 above the screen edge, and its box is 40
+                -- high, so a second field below it would hang off the screen. Lift the pair
+                -- by 60 (the x offset stays the stock 8) and the last field's bottom lands at
+                -- 60, clear of the stock rotate buttons at 0-50 and of the back/okay column.
+                if ( not CharacterCreateNameEdit.BenillaFullNameLifted ) then
+                    CharacterCreateNameEdit.BenillaFullNameLifted = true;
+                    CharacterCreateNameEdit:ClearAllPoints();
+                    CharacterCreateNameEdit:SetPoint("BOTTOM", 8, 110);
+                end
+                local last = AddLastEdit(
+                    CharacterCreateNameEdit, "BenillaCharacterCreateLastNameEdit");
+                AddLabel(CharacterCreateNameEdit,
+                         "BenillaCharacterCreateFirstNameLabel", "First name");
+                AddLabel(last,
+                         "BenillaCharacterCreateLastNameLabel", "Last name");
+                FollowBackdropColors(CharacterCreateNameEdit, last);
+                HideTextRegion(CharacterCreateNameEdit, "NAME");
+
+                if ( not CharCreateOkayButton.BenillaFullNameHooked ) then
+                    CharCreateOkayButton.BenillaFullNameHooked = true;
+                    CharCreateOkayButton.BenillaFullNameOriginal =
+                        CharCreateOkayButton:GetScript("OnClick");
+                    CharCreateOkayButton:SetScript(
+                        "OnClick", BenillaFullName_SubmitCreation);
+                end
+                CharacterCreateNameEdit:SetScript("OnEnterPressed",
+                    BenillaFullName_SubmitCreation);
+                CharacterCreateNameEdit:SetScript("OnTabPressed",
+                    function() last:SetFocus(); end);
+                last:SetScript("OnEnterPressed",
+                    BenillaFullName_SubmitCreation);
+                last:SetScript("OnTabPressed",
+                    function() CharacterCreateNameEdit:SetFocus(); end);
+                if ( not CharacterCreateNameEdit.BenillaFullNameResetHooked ) then
+                    CharacterCreateNameEdit.BenillaFullNameResetHooked = true;
+                    local originalShow = CharacterCreateNameEdit:GetScript("OnShow");
+                    CharacterCreateNameEdit:SetScript("OnShow", function()
+                        if ( originalShow ) then
+                            originalShow();
+                        end
+                        last:SetText("");
+                    end);
+                end
+            end
+
+            if ( CharacterRenameEditBox and CharacterRenameButton1 ) then
+                local last = AddLastEdit(
+                    CharacterRenameEditBox, "BenillaCharacterRenameLastNameEdit");
+                AddLabel(CharacterRenameEditBox,
+                         "BenillaCharacterRenameFirstNameLabel", "First name");
+                AddLabel(last,
+                         "BenillaCharacterRenameLastNameLabel", "Last name");
+
+                if ( not CharacterRenameButton1.BenillaFullNameHooked ) then
+                    CharacterRenameButton1.BenillaFullNameHooked = true;
+                    CharacterRenameButton1.BenillaFullNameOriginal =
+                        CharacterRenameButton1:GetScript("OnClick");
+                    CharacterRenameButton1:SetScript(
+                        "OnClick", BenillaFullName_SubmitRename);
+                end
+                CharacterRenameEditBox:SetScript("OnEnterPressed",
+                    BenillaFullName_SubmitRename);
+                CharacterRenameEditBox:SetScript("OnTabPressed",
+                    function() last:SetFocus(); end);
+                last:SetScript("OnEnterPressed",
+                    BenillaFullName_SubmitRename);
+                last:SetScript("OnTabPressed",
+                    function() CharacterRenameEditBox:SetFocus(); end);
+                if ( not CharacterRenameEditBox.BenillaFullNameResetHooked ) then
+                    CharacterRenameEditBox.BenillaFullNameResetHooked = true;
+                    local originalShow = CharacterRenameEditBox:GetScript("OnShow");
+                    CharacterRenameEditBox:SetScript("OnShow", function()
+                        if ( originalShow ) then
+                            originalShow();
+                        end
+                        last:SetText("");
+                    end);
+                end
+            end
+            -- Set last, so a script error part-way leaves the layer reloadable.
+            BenillaFullName_Installed = true;
+        end
+    </Script></Ui>

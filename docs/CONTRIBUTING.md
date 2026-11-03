@@ -122,7 +122,8 @@ out of scope is closed with the reason.
   worktree shares the main checkout's `benilla-config/`, unless it has a `.probe-identity`: then
   it keeps its own, so no run from it touches your settings. `WOW_CHAR` must already be on the
   account, since the client creates a character only when asked:
-  `WOW_PROBE_CHARCREATE=<name> WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`, makes it.
+  `WOW_PROBE_CHARCREATE="<first last>" WOW_PROBE_CHARCREATE_KEEP=1`, run without `WOW_CHAR`,
+  makes it (a one-part name gets the probe's fixed `Tester` last part).
   The probes drive the body with GM commands, so give that account the top GM level.
 - **Running it unattended.** The rules are `docs/METHOD.md`, "The local server"; these are the
   switches.

@@ -49,6 +49,16 @@ pub(crate) fn chat_frame() -> UiScript {
     s
 }
 
+/// The chat stack with the layer file that adapts the stock whisper branch on top, as production
+/// loads it after every stock FrameXML row. `ItemRef.lua` defines `SetItemRef` before that file
+/// wraps it; `ChatFrame.lua` defines the `ChatEdit_*` pair.
+fn chat_frame_with_layer() -> UiScript {
+    let s = chat_frame();
+    load_xml(&s, r"Interface\FrameXML\ItemRef.lua");
+    load_xml(&s, "FrameXMLFixes.xml");
+    s
+}
+
 fn text_color(quads: &[ExtractedQuad], t: &str) -> Option<[f32; 4]> {
     quads.iter().find_map(|q| match &q.content {
         QuadContent::Text {
@@ -1452,4 +1462,232 @@ fn the_recruitment_join_reaches_the_chat_frame_before_the_verb_returns() {
         .unwrap();
     assert!(listed, "ChatFrame1.channelList lacks GuildRecruitment");
     assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+// ── Whisper targets are the whole two-part name ───────────────────────────────────────────────
+//
+// Stock `ChatEdit_ExtractTellTarget` (`ChatFrame.lua:2210-2223`) takes the word before the first
+// space, so this fork's "First Last" names lost their second half to the message. The layer's
+// `ChatEdit_ParseText` wrapper takes both name words and the message from the third.
+
+/// The host's outgoing line, as [`ChatSend`] lists it: text, type, target.
+fn whisper_sends(s: &mut UiScript) -> Vec<(String, String, Option<String>)> {
+    s.take_chat_sends()
+        .into_iter()
+        .map(|c| (c.text, c.chat_type, c.target))
+        .collect()
+}
+
+/// Every stock alias of the `WHISPER` row (`SLASH_WHISPER1`-`10`) reaches the same branch, and
+/// each sends the two words as the target and everything from the third as the message.
+#[test]
+fn every_whisper_alias_sends_the_whole_two_part_name() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    for line in [
+        "/w Asha Brightvale Hello there",
+        "/whisper Asha Brightvale Hello there",
+        "/t Asha Brightvale Hello there",
+        "/tell Asha Brightvale Hello there",
+        "/send Asha Brightvale Hello there",
+    ] {
+        assert!(s.focus_editbox("ChatFrameEditBox"), "{line}: focus");
+        s.char_input(line);
+        assert!(s.key_input("ENTER"), "{line}: ENTER");
+        assert_eq!(
+            whisper_sends(&mut s),
+            vec![(
+                "Hello there".to_string(),
+                "WHISPER".to_string(),
+                Some("Asha Brightvale".to_string())
+            )],
+            "{line}"
+        );
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// `ChatEdit_ExtractTellTarget` keeps the target's spelling (`l.2219`); the Rust binding and the
+/// server canonicalize the pair, not the edit box.
+#[test]
+fn a_whisper_target_keeps_its_typed_case() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    for (line, target) in [
+        ("/W aSHA bRIGHTVALE hi", "aSHA bRIGHTVALE"),
+        ("/Whisper Asha brightvale hi", "Asha brightvale"),
+    ] {
+        assert!(s.focus_editbox("ChatFrameEditBox"), "{line}: focus");
+        s.char_input(line);
+        assert!(s.key_input("ENTER"), "{line}: ENTER");
+        assert_eq!(
+            whisper_sends(&mut s),
+            vec![(
+                "hi".to_string(),
+                "WHISPER".to_string(),
+                Some(target.to_string())
+            )],
+            "{line}"
+        );
+    }
+}
+
+/// A space after the first name is the pair's separator: stock `ChatEdit_OnSpacePressed`
+/// (`ChatFrame.lua:1979-1981`) parsed the line there, which is what cut the name short.
+#[test]
+fn the_space_after_the_first_name_waits_for_the_second() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("/w Asha ");
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox:GetText()")
+            .unwrap(),
+        ("SAY".to_string(), "/w Asha ".to_string()),
+        "the line is still the pair being typed"
+    );
+    s.char_input("Brightvale ");
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Asha Brightvale".to_string()),
+        "the second space commits the pair"
+    );
+    s.char_input("Hello there");
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        whisper_sends(&mut s),
+        vec![(
+            "Hello there".to_string(),
+            "WHISPER".to_string(),
+            Some("Asha Brightvale".to_string())
+        )]
+    );
+}
+
+/// A chat line's `|Hplayer:First Last|h` link carries the whole name (`ChatFrame.lua:1445-1451`).
+/// The stock `SetItemRef` reduced it to the last word (`ItemRef.lua:6-7`), so a click prefilled
+/// the wrong half; the layer's player branch keeps it whole, and the prefill still lands as a
+/// whisper.
+#[test]
+fn clicking_a_player_link_whispers_the_whole_name() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    s.run(
+        r#"SetItemRef("player:Asha Brightvale", "|Hplayer:Asha Brightvale|h[Asha Brightvale]|h", "LeftButton")"#,
+    )
+    .unwrap();
+    s.tick(0.05);
+    assert_eq!(
+        s.eval::<(String, String, String)>(
+            "return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget, ChatFrameEditBox:GetText()"
+        )
+        .unwrap(),
+        (
+            "WHISPER".to_string(),
+            "Asha Brightvale".to_string(),
+            String::new()
+        ),
+        "the prefill parses into a whisper at the pair"
+    );
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("Hello");
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        whisper_sends(&mut s),
+        vec![(
+            "Hello".to_string(),
+            "WHISPER".to_string(),
+            Some("Asha Brightvale".to_string())
+        )]
+    );
+}
+
+/// Neither an incomplete pair nor a one-word target reaches the host: `/w Asha Brightvale` has no
+/// message, and `/w Asha` has no second word (there is no first-name fallback).
+#[test]
+fn an_incomplete_whisper_sends_nothing() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    for line in ["/w Asha Brightvale", "/w Asha"] {
+        assert!(s.focus_editbox("ChatFrameEditBox"), "{line}: focus");
+        s.char_input(line);
+        assert!(s.key_input("ENTER"), "{line}: ENTER");
+        assert!(
+            whisper_sends(&mut s).is_empty(),
+            "{line} must reach no host"
+        );
+    }
+    assert!(s.errors().is_empty(), "{:?}", s.errors());
+}
+
+/// Non-whisper commands are untouched: `/s` is a SAY line, and `/r` still uses the reply target
+/// (`ChatFrame.lua:2131-2141`), which is a whole pair once the tell was recorded.
+#[test]
+fn say_and_reply_keep_their_stock_paths() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("/s Hello");
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        whisper_sends(&mut s),
+        vec![("Hello".to_string(), "SAY".to_string(), None)]
+    );
+
+    s.run(r#"ChatFrameEditBox.lastTell[1] = "Asha Brightvale""#)
+        .unwrap();
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("/r Hello");
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        whisper_sends(&mut s),
+        vec![(
+            "Hello".to_string(),
+            "WHISPER".to_string(),
+            Some("Asha Brightvale".to_string())
+        )],
+        "/r uses the reply target"
+    );
+}
+
+/// The message is everything after the pair, verbatim: its own spaces, `%`-looking words and a
+/// word that looks like a command all stay in the line (`ChatEdit_AddHistory` files the same).
+#[test]
+fn a_whisper_message_is_preserved_after_the_pair() {
+    benilla_formats::wow_data_or_skip!();
+    let mut s = chat_frame_with_layer();
+    let line = "/w Asha Brightvale Hello   there /w Bob hi";
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input(line);
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        whisper_sends(&mut s),
+        vec![(
+            "Hello   there /w Bob hi".to_string(),
+            "WHISPER".to_string(),
+            Some("Asha Brightvale".to_string())
+        )]
+    );
+    // The history line the send filed is "/w Asha Brightvale Hello   there /w Bob hi"
+    // (`ChatEdit_AddHistory`, `ChatFrame.lua:1924-1925`), and recalling it live-parses back to the
+    // pair and the same message — the layer keeps no marker in `tellTarget`.
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("draft");
+    use benilla_ui::script::{EditAction, EditUnit};
+    s.editbox_action(EditAction::Move {
+        unit: EditUnit::Row,
+        back: true,
+        extend: false,
+    });
+    assert_eq!(
+        s.eval::<(String, String)>(
+            "return ChatFrameEditBox.tellTarget, ChatFrameEditBox:GetText()"
+        )
+        .unwrap(),
+        (
+            "Asha Brightvale".to_string(),
+            "Hello   there /w Bob hi".to_string()
+        )
+    );
 }

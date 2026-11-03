@@ -1957,7 +1957,7 @@ fn rename_character_opens_its_dialog_in_the_call() {
     assert_eq!(
         heard_in(
             &s,
-            "local answer = RenameCharacter(1, 'Newname') \
+            "local answer = RenameCharacter(1, 'Newname Smith') \
              table.insert(HEARD, 'answer ' .. tostring(answer))"
         ),
         ["OPEN_STATUS_DIALOG CANCEL Renaming character", "answer 1"]
@@ -4512,10 +4512,34 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
     vm(&app)
         .run(
             "CharacterSelect_SelectCharacter(2) CharacterRenameDialog:Show() \
-             CharacterRenameEditBox:SetText('X') CharacterRenameButton1:Click()",
+             CharacterRenameEditBox:SetText('X') BenillaCharacterRenameLastNameEdit:SetText('Tester') CharacterRenameButton1:Click()",
         )
         .unwrap();
     assert!(shown(&app, "CharacterRenameDialog"));
+    let (field_shown, width, height, below, clear, inside) = vm(&app)
+        .eval::<(bool, f64, f64, bool, bool, bool)>(
+            r#"local e = BenillaCharacterRenameLastNameEdit
+               local f = CharacterRenameEditBox
+               local bg = CharacterRenameBackground
+               local function overlaps(a, b)
+                   return a:GetLeft() < b:GetRight() and a:GetRight() > b:GetLeft()
+                       and a:GetTop() > b:GetBottom() and a:GetBottom() < b:GetTop()
+               end
+               return e:IsShown() == 1, e:GetWidth(), e:GetHeight(),
+                   e:GetTop() < f:GetBottom(),
+                   not overlaps(e, CharacterRenameButton1)
+                       and not overlaps(e, CharacterRenameButton2),
+                   e:GetLeft() >= bg:GetLeft() and e:GetRight() <= bg:GetRight()
+                       and e:GetTop() <= bg:GetTop()
+                       and e:GetBottom() >= bg:GetBottom()"#,
+        )
+        .unwrap();
+    assert!(field_shown, "the rename last-name field is hidden");
+    assert!(width > 0.0, "the rename last-name field has no width");
+    assert!(height > 0.0, "the rename last-name field has no height");
+    assert!(below, "the rename last-name field is not below the first");
+    assert!(clear, "the rename last-name field overlaps a dialog button");
+    assert!(inside, "the rename last-name field leaves the dialog");
     assert_eq!(
         vm(&app)
             .eval::<String>("return CharacterRenameText1:GetText()")
@@ -4526,9 +4550,30 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
     app.update();
     assert_eq!(mgr(&app).state, ScreenState::Idle);
 
+    // A blank last part: the overlay names it, sends nothing, and leaves the rename dialog up.
+    vm(&app)
+        .run(
+            "CharacterRenameEditBox:SetText('Alice') \
+             BenillaCharacterRenameLastNameEdit:SetText('') \
+             CharacterRenameButton1:Click()",
+        )
+        .unwrap();
+    assert_eq!(
+        dialog(&app),
+        Some((
+            "BENILLA_NAME_ERROR".into(),
+            "Enter your character's last name.".into()
+        ))
+    );
+    assert!(shown(&app, "CharacterRenameDialog"));
+    assert!(world
+        .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_RENAME)
+        .is_empty());
+    vm(&app).run("GlueDialog:Hide()").unwrap();
+
     // A passing one.
     vm(&app)
-        .run("CharacterRenameEditBox:SetText('Newbie') CharacterRenameButton1:Click()")
+        .run("CharacterRenameEditBox:SetText('Newbie') BenillaCharacterRenameLastNameEdit:SetText('Tester') CharacterRenameButton1:Click()")
         .unwrap();
     assert!(!shown(&app, "CharacterRenameDialog"));
     let lists = seen(&app, "CHARACTER_LIST_UPDATE");
@@ -4541,14 +4586,14 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
         seen(app, "CHARACTER_LIST_UPDATE") > lists
     });
     let mut sent = 0x12u64.to_le_bytes().to_vec();
-    sent.extend(b"Newbie\0");
+    sent.extend(b"Newbie Tester\0");
     assert_eq!(
         world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_RENAME),
         [sent]
     );
     assert_eq!(dialog(&app), None, "the reply closed the dialog");
     assert_eq!(world.enumerations(), 1, "the record is renamed in place");
-    assert_eq!(row_names(&app), ["Alpha", "Newbie", "Charlie"]);
+    assert_eq!(row_names(&app), ["Alpha", "Newbie Tester", "Charlie"]);
     assert_eq!(
         mgr(&app).state,
         ScreenState::Rename,
@@ -4569,25 +4614,29 @@ fn the_stock_rename_renames_the_row_and_moves_its_files() {
             c.flags & benilla_protocol::CHARACTER_FLAG_RENAME,
         )
     });
-    assert_eq!(kept, Some(("Newbie".to_string(), 0)));
+    assert_eq!(kept, Some(("Newbie Tester".to_string(), 0)));
     // The world entry names its files by the new name.
     let picked = app
         .world()
         .resource::<crate::glue_session::roster::Roster>();
     assert_eq!(
         crate::ui_macro::identity(picked).map(|(_, name)| name),
-        Some("Newbie".to_string())
+        Some("Newbie Tester".to_string())
     );
 
     // The files moved, and the AddOn state with them.
-    let moved = crate::local_state::macros_character_path("Alpha", "Newbie").unwrap();
+    let moved = crate::local_state::macros_character_path("Alpha", "Newbie Tester").unwrap();
     assert!(moved.exists() && !macros.exists());
     assert_eq!(
-        std::fs::read(home.join("addon-state").join("Alpha-Newbie.txt")).unwrap(),
+        std::fs::read(home.join("addon-state").join("Alpha-Newbie_Tester.txt")).unwrap(),
         b"Alpha: disabled\n"
     );
     assert!(!home.join("addon-state").join("Alpha-Bravo.txt").exists());
-    assert_eq!(enable(&app, "Newbie"), 0.0, "the node came with the file");
+    assert_eq!(
+        enable(&app, "Newbie Tester"),
+        0.0,
+        "the node came with the file"
+    );
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }
 
@@ -4600,7 +4649,7 @@ fn a_refused_stock_rename_asks_again() {
     roster[1].flags |= benilla_protocol::CHARACTER_FLAG_RENAME;
     let (mut app, _realmd, world) = select_screen(&roster, None);
     world.answer_renames(0x2f);
-    vm(&app).run("RenameCharacter(2, 'Newbie')").unwrap();
+    vm(&app).run("RenameCharacter(2, 'Newbie Tester')").unwrap();
     until(&mut app, "the refusal", |app| {
         seen(app, "FORCE_RENAME_CHARACTER CHAR_RENAME_FAILED") == 1
     });
@@ -5203,7 +5252,11 @@ fn the_stock_create_makes_the_character_and_selects_it() {
     assert_eq!((fog.near, fog.far), (0.0, 270.0));
 
     vm(&app)
-        .run("CharacterCreateNameEdit:SetText('Newbie') CharCreateOkayButton:Click()")
+        .run(
+            "CharacterCreateNameEdit:SetText('Newbie') \
+             BenillaCharacterCreateLastNameEdit:SetText('Tester') \
+             CharCreateOkayButton:Click()",
+        )
         .unwrap();
     // `CreateCharacter`'s state 5 and dialog land in its call (`0x46b29e`-`0x46b2c4`), before any
     // frame of the manager; the `CMSG_CHAR_CREATE` waits for the frame.
@@ -5217,10 +5270,10 @@ fn the_stock_create_makes_the_character_and_selects_it() {
         .is_empty());
     let lists = seen(&app, "CHARACTER_LIST_UPDATE");
     app.update();
-    until(&mut app, "the list with Newbie", |app| {
+    until(&mut app, "the list with Newbie Tester", |app| {
         seen(app, "CHARACTER_LIST_UPDATE") > lists && mgr(app).state == ScreenState::Idle
     });
-    let mut sent = b"Newbie\0".to_vec();
+    let mut sent = b"Newbie Tester\0".to_vec();
     sent.extend([
         2,
         3,
@@ -5243,7 +5296,10 @@ fn the_stock_create_makes_the_character_and_selects_it() {
         "the select asked for the list again"
     );
     assert_eq!(seen(&app, "SELECT_LAST_CHARACTER"), 1);
-    assert_eq!(row_names(&app), ["Alpha", "Bravo", "Charlie", "Newbie"]);
+    assert_eq!(
+        row_names(&app),
+        ["Alpha", "Bravo", "Charlie", "Newbie Tester"]
+    );
     assert_eq!(
         vm(&app)
             .eval::<f64>("return CharacterSelect.selectedIndex")
@@ -5264,7 +5320,11 @@ fn a_refused_stock_create_shows_its_text() {
     let (mut app, _realmd, world) = create_screen();
     world.answer_creates(0x31);
     vm(&app)
-        .run("CharacterCreateNameEdit:SetText('Alpha') CharCreateOkayButton:Click()")
+        .run(
+            "CharacterCreateNameEdit:SetText('Alpha') \
+             BenillaCharacterCreateLastNameEdit:SetText('Tester') \
+             CharCreateOkayButton:Click()",
+        )
         .unwrap();
     app.update();
     assert_eq!(mgr(&app).state, ScreenState::Create);
@@ -5287,27 +5347,60 @@ fn a_refused_stock_create_shows_its_text() {
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
 }
 
-/// A name the client's check fails (`0x4711e2`) opens `OKAY` with the check's text and sends
-/// nothing, with no screen state; so does an empty one.
+/// A full name the client's check fails (`0x4711e2`) opens `OKAY` with the check's text and sends
+/// nothing, with no screen state; both the first and the last part reach that check. An empty or
+/// spaces-only part is the overlay's own case: it returns before the stock Okay, sends nothing,
+/// and names the missing half.
 #[test]
 fn a_stock_create_whose_name_fails_the_check_sends_nothing() {
     let _ = benilla_formats::wow_data_or_skip!();
     let (mut app, _realmd, world) = create_screen();
-    for (name, text) in [
-        (
-            "Abbbc",
-            "You cannot use the same letter three times consecutively",
-        ),
-        ("", "Enter a name for your character"),
-    ] {
-        vm(&app)
+    let click = |app: &App, first: &str, last: &str| {
+        vm(app)
             .run(&format!(
-                "CharacterCreateNameEdit:SetText('{name}') CharCreateOkayButton:Click()"
+                "CharacterCreateNameEdit:SetText({first:?}) \
+                 BenillaCharacterCreateLastNameEdit:SetText({last:?}) \
+                 CharCreateOkayButton:Click()"
             ))
             .unwrap();
-        assert_eq!(dialog(&app), Some(("OKAY".into(), text.into())), "{name:?}");
+    };
+
+    // The first and the last part both reach the full-name validator's per-part checks.
+    const TRIPLE: &str = "You cannot use the same letter three times consecutively";
+    const SHORT: &str = "Names must be at least 2 characters";
+    for (first, last, text) in [
+        ("Abbbc", "Tester", TRIPLE),
+        ("Alice", "Abbbc", TRIPLE),
+        ("Alice", "A", SHORT),
+    ] {
+        click(&app, first, last);
+        assert_eq!(
+            dialog(&app),
+            Some(("OKAY".into(), text.into())),
+            "{first:?}/{last:?}"
+        );
         app.update();
-        assert_eq!(mgr(&app).state, ScreenState::Idle);
+        assert_eq!(mgr(&app).state, ScreenState::Idle, "{first:?}/{last:?}");
+        vm(&app).run("GlueDialog:Hide()").unwrap();
+    }
+
+    // One empty or spaces-only part: the overlay names it, and nothing is sent.
+    let first_msg = "Enter your character's first name.";
+    let last_msg = "Enter your character's last name.";
+    for (first, last, text) in [
+        ("", "Tester", first_msg),
+        ("Alice", "", last_msg),
+        ("  ", "Tester", first_msg),
+        ("Alice", "  ", last_msg),
+    ] {
+        click(&app, first, last);
+        app.update();
+        assert_eq!(
+            dialog(&app),
+            Some(("BENILLA_NAME_ERROR".into(), text.into())),
+            "{first:?}/{last:?}"
+        );
+        assert!(shown(&app, "CharacterCreate"), "{first:?}/{last:?}");
         vm(&app).run("GlueDialog:Hide()").unwrap();
     }
     for _ in 0..5 {
@@ -5318,6 +5411,208 @@ fn a_stock_create_whose_name_fails_the_check_sends_nothing() {
         .is_empty());
     assert!(shown(&app, "CharacterCreate"));
     assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// The create screen under the real stock glue shows two name fields: the stock first-name edit
+/// and the layer's last-name field below it, each sized, capped at 12 letters, inside the screen,
+/// each with a nonempty label. Before the layer fixed its `_G` lookup and dropped the FrameXML-only
+/// `InputBoxTemplate`, the second field was never created.
+#[test]
+fn the_create_screen_shows_two_labelled_name_fields() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, _world) = create_screen();
+    assert!(shown(&app, "CharacterCreate"));
+    assert!(
+        vm(&app)
+            .eval::<bool>("return BenillaFullName_Installed == true")
+            .unwrap(),
+        "the layer never installed"
+    );
+
+    for name in [
+        "CharacterCreateNameEdit",
+        "BenillaCharacterCreateLastNameEdit",
+    ] {
+        let (shown, width, height, on_screen, letters) = vm(&app)
+            .eval::<(bool, f64, f64, bool, f64)>(&format!(
+                "local e = {name} \
+                 return e:IsShown() == 1, e:GetWidth(), e:GetHeight(), \
+                    e:GetLeft() >= 0 and e:GetRight() <= GetScreenWidth() \
+                    and e:GetBottom() >= 0 and e:GetTop() <= GetScreenHeight(), \
+                    e:GetMaxLetters()",
+            ))
+            .unwrap();
+        assert!(shown, "{name} is hidden");
+        assert!(width > 0.0, "{name} has no width ({width})");
+        assert!(height > 0.0, "{name} has no height ({height})");
+        assert!(on_screen, "{name} is off screen");
+        assert_eq!(letters, 12.0, "{name}'s letter cap");
+    }
+
+    let (first_bottom, first_left, last_top, last_left) = vm(&app)
+        .eval::<(f64, f64, f64, f64)>(
+            "return CharacterCreateNameEdit:GetBottom(), CharacterCreateNameEdit:GetLeft(), \
+             BenillaCharacterCreateLastNameEdit:GetTop(), \
+             BenillaCharacterCreateLastNameEdit:GetLeft()",
+        )
+        .unwrap();
+    assert!(
+        last_top < first_bottom,
+        "the last-name field's top {last_top} is not below the first's bottom {first_bottom}"
+    );
+    assert_eq!(
+        last_left, first_left,
+        "the two fields share the stock x column"
+    );
+
+    for (label, text) in [
+        ("BenillaCharacterCreateFirstNameLabel", "First name"),
+        ("BenillaCharacterCreateLastNameLabel", "Last name"),
+    ] {
+        assert_eq!(
+            vm(&app)
+                .eval::<(String, bool)>(&format!(
+                    "return {label}:GetText(), {label}:IsShown() == 1"
+                ))
+                .unwrap(),
+            (text.to_string(), true),
+            "{label}"
+        );
+    }
+    // Both boxes carry the stock box's backdrop colors, now and after the faction changes. The
+    // stock `NAME` caption is hidden: the pair has its own labels.
+    let colors_match = |app: &App| {
+        vm(app)
+            .eval::<bool>(
+                "local fr, fg, fb, fa = CharacterCreateNameEdit:GetBackdropColor() \
+                 local lr, lg, lb, la = BenillaCharacterCreateLastNameEdit:GetBackdropColor() \
+                 local fbr, fbg, fbb, fba = \
+                     CharacterCreateNameEdit:GetBackdropBorderColor() \
+                 local lbr, lbg, lbb, lba = \
+                     BenillaCharacterCreateLastNameEdit:GetBackdropBorderColor() \
+                 return fr == lr and fg == lg and fb == lb and fa == la \
+                     and fbr == lbr and fbg == lbg and fbb == lbb and fba == lba",
+            )
+            .unwrap()
+    };
+    let stock_name_hidden = |app: &App| {
+        vm(app)
+            .eval::<bool>(
+                "local regions = { CharacterCreateNameEdit:GetRegions() } \
+                 for i = 1, table.getn(regions) do \
+                     local region = regions[i] \
+                     if region.GetText and region:GetText() == 'NAME' \
+                         and region:IsShown() == 1 then \
+                         return false \
+                     end \
+                 end \
+                 return true",
+            )
+            .unwrap()
+    };
+    assert!(colors_match(&app), "the two boxes' backdrop colors differ");
+    assert!(
+        stock_name_hidden(&app),
+        "the stock NAME caption still shows"
+    );
+    vm(&app).run("CharacterCreateRaceButton5:Click()").unwrap();
+    app.update();
+    assert!(
+        colors_match(&app),
+        "the boxes' colors diverge after the race's faction color changes"
+    );
+    assert_eq!(vm(&app).errors(), Vec::<String>::new());
+}
+
+/// The fork's two create fields reach the one stock path: first and last joined by exactly one
+/// ASCII space, with neither visible field rewritten; one empty part sends nothing and opens the
+/// overlay's named error; and a refused create leaves both parts in place.
+#[test]
+fn the_two_create_fields_send_one_full_name_and_keep_both_parts() {
+    let _ = benilla_formats::wow_data_or_skip!();
+    let (mut app, _realmd, world) = create_screen();
+    let fields = |app: &App| {
+        vm(app)
+            .eval::<(String, String)>(
+                "return CharacterCreateNameEdit:GetText(), \
+                 BenillaCharacterCreateLastNameEdit:GetText()",
+            )
+            .unwrap()
+    };
+
+    // One part empty or spaces only: the handler returns before the stock Okay, so nothing is
+    // sent, and the overlay names the half that is missing.
+    let first_msg = "Enter your character's first name.";
+    let last_msg = "Enter your character's last name.";
+    for (first, last, text) in [
+        ("Alice", "", last_msg),
+        ("", "Smith", first_msg),
+        ("Alice", "  ", last_msg),
+        ("  ", "Smith", first_msg),
+    ] {
+        vm(&app)
+            .run(&format!(
+                "CharacterCreateNameEdit:SetText({first:?}) \
+                 BenillaCharacterCreateLastNameEdit:SetText({last:?}) \
+                 CharCreateOkayButton:Click()"
+            ))
+            .unwrap();
+        app.update();
+        assert!(shown(&app, "CharacterCreate"), "{first:?}/{last:?}");
+        assert_eq!(
+            dialog(&app),
+            Some(("BENILLA_NAME_ERROR".into(), text.into())),
+            "{first:?}/{last:?}"
+        );
+        assert_eq!(fields(&app), (first.to_string(), last.to_string()));
+        vm(&app).run("GlueDialog:Hide()").unwrap();
+    }
+    assert!(world
+        .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE)
+        .is_empty());
+
+    // The server's refusal: one full name goes out, and both parts stay as entered.
+    world.answer_creates(0x31);
+    vm(&app)
+        .run(
+            "CharacterCreateNameEdit:SetText('Alice') \
+             BenillaCharacterCreateLastNameEdit:SetText('Smith') \
+             CharCreateOkayButton:Click()",
+        )
+        .unwrap();
+    app.update();
+    until(&mut app, "the refused create", |app| {
+        mgr(app).state == ScreenState::Idle
+    });
+    let sent = world.bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(&sent[0][..12], b"Alice Smith\0", "one name, one space");
+    assert_eq!(
+        fields(&app),
+        ("Alice".into(), "Smith".into()),
+        "a refusal leaves the fields alone"
+    );
+    assert!(shown(&app, "CharacterCreate"));
+    vm(&app).run("GlueDialog:Hide()").unwrap();
+
+    // Against a served create, both fields stay untouched after the successful send too.
+    world.answer_creates(0x2e);
+    vm(&app).run("CharCreateOkayButton:Click()").unwrap();
+    app.update();
+    until(&mut app, "the created character", |app| {
+        mgr(app).state == ScreenState::Idle
+    });
+    assert_eq!(
+        fields(&app),
+        ("Alice".into(), "Smith".into()),
+        "a successful send does not rewrite the fields"
+    );
+    assert_eq!(
+        world
+            .bodies(benilla_protocol::messages::opcode::CMSG_CHAR_CREATE)
+            .len(),
+        2
+    );
 }
 
 /// The `CANCEL` dialogs a logon walks through as `stages` arrive, one frame each.

@@ -28,12 +28,13 @@ fn send(stream: &mut TcpStream, crypto: Option<&mut HeaderCrypto>, opcode: u16, 
 }
 
 /// Read the client's unencrypted `CMSG_AUTH_SESSION` (6-byte header: BE size + LE u32 opcode).
-fn read_auth_session(stream: &mut TcpStream) {
+fn read_auth_session(stream: &mut TcpStream) -> Vec<u8> {
     let mut header = [0u8; 6];
     stream.read_exact(&mut header).unwrap();
     let size = u16::from_be_bytes([header[0], header[1]]) as usize;
     let mut body = vec![0u8; size - 4];
     stream.read_exact(&mut body).unwrap();
+    body
 }
 
 /// A fake world server that sends the `pre` packets, encrypted and in order, before a successful
@@ -66,10 +67,74 @@ fn fake_server(pre: Vec<(u16, Vec<u8>)>) -> String {
     addr
 }
 
+/// A fake world server that reports the received auth body after sending its challenge, then
+/// admits the session. Used to inspect the custom name-profile header on the real wire.
+fn fake_server_capturing() -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        send(
+            &mut stream,
+            None,
+            opcode::SMSG_AUTH_CHALLENGE,
+            &SERVER_SEED.to_le_bytes(),
+        );
+        let body = read_auth_session(&mut stream);
+        tx.send(body).unwrap();
+        let mut crypto = HeaderCrypto::from_session_key(SESSION_KEY);
+        send(
+            &mut stream,
+            Some(&mut crypto),
+            opcode::SMSG_AUTH_RESPONSE,
+            &[messages::AUTH_OK],
+        );
+        thread::sleep(std::time::Duration::from_secs(2));
+    });
+    (addr, rx)
+}
+
 #[test]
 fn auth_response_alone_completes_the_handshake() {
     let addr = fake_server(vec![]);
     assert!(WorldSession::connect(&addr, "one", SESSION_KEY).is_ok());
+}
+
+/// The real connect path writes the custom six-byte name-profile header after the proof and
+/// before the addon tail. "one" fixes the header at offset 36.
+#[test]
+fn auth_header_carries_region_zero() {
+    let (addr, captured) = fake_server_capturing();
+    let session =
+        WorldSession::connect_queued_with_region(&addr, "one", SESSION_KEY, 0, &mut |_| true)
+            .expect("the connect completes");
+    drop(session);
+    let body = captured
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the server captured the auth body");
+    assert_eq!(
+        &body[36..42],
+        &[b'E', b'F', b'N', b'M', 0x01, 0x00],
+        "literal EFNM header for Region 0"
+    );
+}
+
+#[test]
+fn auth_header_carries_region_override() {
+    let (addr, captured) = fake_server_capturing();
+    let session =
+        WorldSession::connect_queued_with_region(&addr, "one", SESSION_KEY, 2, &mut |_| true)
+            .expect("the connect completes");
+    drop(session);
+    let body = captured
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("the server captured the auth body");
+    assert_eq!(
+        &body[36..42],
+        &[b'E', b'F', b'N', b'M', 0x01, 0x02],
+        "literal EFNM header for Region 2"
+    );
 }
 
 /// The server interleaves its own packets ahead of the auth response.

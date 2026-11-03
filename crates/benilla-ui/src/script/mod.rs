@@ -79,7 +79,10 @@ pub(crate) mod font;
 mod font_block;
 mod frame_enum;
 mod roster_read;
-pub use char_name::{check_char_name, NameCharsets, NameLists, NoNameLists, CHAR_NAME_SUCCESS};
+pub use char_name::{
+    check_char_name, check_full_char_name, prepare_full_char_name, NameCharsets, NameLists,
+    NoNameLists, CHAR_NAME_SUCCESS,
+};
 mod glue;
 mod glue_addons;
 mod glue_core;

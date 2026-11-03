@@ -31,7 +31,7 @@ use mlua::{Lua, MultiValue, Value};
 use super::binding_abi::{number_arg, string_arg};
 use super::glue_core::{call, glue_status_key, GlueCall};
 use super::glue_select::{DEG_TO_RAD, RAD_TO_DEG};
-use super::{check_char_name, Model, ScriptValue, CHAR_NAME_SUCCESS};
+use super::{check_char_name, prepare_full_char_name, Model, ScriptValue, CHAR_NAME_SUCCESS};
 
 /// One race of the create screen's list (`0x470430`), its `ChrRaces` row as the verbs read it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1006,13 +1006,19 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let name = name.map(|n| n.split('\0').next().unwrap_or_default().to_string());
             let (status, request) = {
                 let m = model(lua);
-                let status = match &name {
-                    Some(n) => check_char_name(Some(n), &*m.name_lists(), m.name_charsets()),
-                    None => 0x45,
+                let prepared = match &name {
+                    Some(n) => prepare_full_char_name(Some(n), &*m.name_lists(), m.name_charsets()),
+                    None => Err(0x45),
                 };
+                let status = prepared
+                    .as_ref()
+                    .err()
+                    .copied()
+                    .unwrap_or(CHAR_NAME_SUCCESS);
+                let canonical = prepared.ok().unwrap_or_default();
                 let c = &m.glue.create;
                 let request = c.obj.map(|obj| GlueCreateRequest {
-                    name: name.clone().unwrap_or_default(),
+                    name: canonical,
                     race: obj.race as u8,
                     class: c.class as u8,
                     sex: obj.sex as u8,

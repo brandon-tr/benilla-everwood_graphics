@@ -107,6 +107,18 @@ impl WorldSession {
         session_key: [u8; SESSION_KEY_LENGTH],
         on_event: &mut dyn FnMut(WorldConnectEvent) -> bool,
     ) -> Result<Self> {
+        Self::connect_queued_with_region(address, username, session_key, 0, on_event)
+    }
+
+    /// [`Self::connect_queued`] carrying the client's effective Region in the custom name-profile
+    /// header. The Region is a per-connection snapshot; invalid values normalize to 0 client-side.
+    pub fn connect_queued_with_region(
+        address: &str,
+        username: &str,
+        session_key: [u8; SESSION_KEY_LENGTH],
+        client_region: i32,
+        on_event: &mut dyn FnMut(WorldConnectEvent) -> bool,
+    ) -> Result<Self> {
         let mut queued = false;
         let mut stream = crate::dial_world(address).context("connecting to world server")?;
         // The connect hook's reset (`0x537b90`): the counts start at zero and the clock now.
@@ -137,12 +149,13 @@ impl WorldSession {
 
         // Sent plain; header encryption starts right after. The addon block is required (cmangos
         // kicks a zero-size one); `STOCK_SECURE_ADDONS` is what a stock 1.12.1 install reports.
-        let body = messages::auth_session(
+        let body = messages::auth_session_with_region(
             u32::from(crate::CLIENT_BUILD),
             &username.to_uppercase(),
             client_seed,
             &client_proof,
             &messages::STOCK_SECURE_ADDONS,
+            client_region,
         );
         send_packet(
             &mut stream,

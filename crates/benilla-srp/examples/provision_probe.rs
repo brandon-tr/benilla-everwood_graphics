@@ -1,4 +1,4 @@
-//! Provision a probe account (`probeN`, password `pprobeN`, character `Probe<N spelled>`) in the
+//! Provision a probe account (`probeN`, password `pprobeN`, character `Probe<N spelled> Tester`) in the
 //! local vmangos `realmd` DB, one per checkout that runs probes. It touches no DB: it prints the
 //! SQL and the character-create line to run.
 //!
@@ -67,13 +67,13 @@ fn main() {
             );
             println!("-- then mint the character over the real wire (keep it):");
             println!(
-                "-- WOW_USER={user_s} WOW_PASS={pass_s} WOW_PROBE_CHARCREATE=Probe{} \\",
+                "-- WOW_USER={user_s} WOW_PASS={pass_s} WOW_PROBE_CHARCREATE=\"Probe{} Tester\" \\",
                 spelled(n)
             );
             println!("--   WOW_PROBE_CHARCREATE_KEEP=1 WOW_DATA=<Data> cargo run -q -p benilla");
             println!("-- then GM-on survival for the new character (extra_flags bit 1):");
             println!(
-                "-- UPDATE characters.characters SET extra_flags = extra_flags | 1 WHERE name = 'Probe{}';",
+                "-- UPDATE characters.characters SET extra_flags = extra_flags | 1 WHERE name = 'Probe{} Tester';",
                 spelled(n)
             );
         }

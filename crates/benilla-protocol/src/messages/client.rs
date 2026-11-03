@@ -3,8 +3,9 @@
 use super::addons::{addon_tail, SecureAddon};
 use super::{CharCreateReq, MovementInfo};
 
-/// `CMSG_AUTH_SESSION` body: build, server id, account, seed, proof, then the addon block's
-/// uncompressed size and zlib stream (`0x51d910`); stock sends [`super::STOCK_SECURE_ADDONS`].
+/// `CMSG_AUTH_SESSION` body: build, server id, account, seed, proof, then the custom Region-0
+/// `EFNM` header and the addon block's uncompressed size and zlib stream (`0x51d910`); stock sends
+/// [`super::STOCK_SECURE_ADDONS`].
 pub fn auth_session(
     build: u32,
     username: &str,
@@ -12,14 +13,35 @@ pub fn auth_session(
     client_proof: &[u8; 20],
     addons: &[SecureAddon],
 ) -> Vec<u8> {
+    auth_session_with_region(build, username, client_seed, client_proof, addons, 0)
+}
+
+/// [`auth_session`] carrying the custom fork's six-byte name-profile header after the proof and
+/// before the stock addon tail: `EFNM`, version 1, effective Region. This is a custom protocol
+/// extension: the matching custom server requires it, client and server must agree on it, and it
+/// is compatibility metadata, not attestation.
+pub fn auth_session_with_region(
+    build: u32,
+    username: &str,
+    client_seed: u32,
+    client_proof: &[u8; 20],
+    addons: &[SecureAddon],
+    client_region: i32,
+) -> Vec<u8> {
+    let region = if (1..=5).contains(&client_region) {
+        client_region as u8
+    } else {
+        0
+    };
     let tail = addon_tail(addons);
-    let mut body = Vec::with_capacity(34 + username.len() + tail.len());
+    let mut body = Vec::with_capacity(40 + username.len() + tail.len());
     body.extend_from_slice(&build.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes()); // server_id
     body.extend_from_slice(username.as_bytes());
     body.push(0);
     body.extend_from_slice(&client_seed.to_le_bytes());
     body.extend_from_slice(client_proof);
+    body.extend_from_slice(&[b'E', b'F', b'N', b'M', 1, region]);
     body.extend_from_slice(&tail);
     body
 }

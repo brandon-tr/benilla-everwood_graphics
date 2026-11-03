@@ -193,6 +193,110 @@ pub fn check_char_name(name: Option<&str>, lists: &dyn NameLists, charsets: Name
     }
 }
 
+/// The status of a full character name: two names, each valid by [`check_char_name`], separated by
+/// one ASCII space (`CHAR_NAME_NO_NAME` 0x45 to `CHAR_NAME_SUCCESS` 0x52).
+///
+/// Deviation: 1.12.1 has no full character names; this two-part policy is benilla's own, for the
+/// later names feature. Each part keeps the single-name charset, length, repetition and list rules,
+/// so the cap and triple test apply per part, while all three lists are also searched over the
+/// spaced whole and the parts concatenated, so restricted content spanning the boundary is caught.
+/// The input is neither trimmed nor normalized, and exactly one ASCII space is required.
+pub fn check_full_char_name(
+    name: Option<&str>,
+    lists: &dyn NameLists,
+    charsets: NameCharsets,
+) -> u8 {
+    let Some(name) = name else {
+        return 0x45 + NO_NAME;
+    };
+    if name.is_empty() {
+        return 0x45 + NO_NAME;
+    }
+    let Some((first, last)) = name.split_once(' ') else {
+        return 0x45 + INVALID_CHARACTER;
+    };
+    // Each part is exactly the existing single-name check: its order and cap are preserved, and a
+    // first-part failure is returned before the last part is inspected.
+    let status = check_char_name(Some(first), lists, charsets);
+    if status != CHAR_NAME_SUCCESS {
+        return status;
+    }
+    let status = check_char_name(Some(last), lists, charsets);
+    if status != CHAR_NAME_SUCCESS {
+        return status;
+    }
+    // The combined subjects are word-list checks only; running the single-name walk or cap over
+    // either would reject valid full names such as two 12-unit parts or a boundary triple.
+    let joined = format!("{first}{last}");
+    let restricted = |subject: &str| {
+        lists.names_profanity(subject)
+            || lists.chat_profanity(subject)
+            || lists.names_reserved(subject)
+    };
+    if restricted(name) || restricted(&joined) {
+        return 0x45 + RESERVED;
+    }
+    CHAR_NAME_SUCCESS
+}
+
+/// Prepares a full character name for storage: validates the entered spelling, capitalizes each
+/// part, then validates the canonical spelling again. Returns the canonical `"First Last"` string.
+///
+/// Both checks use the same lists and charsets and both include the per-part checks and the
+/// combined restricted-content checks. The raw spelling is checked first, so its error status is
+/// returned unchanged even when capitalization would fail later. No charset is widened and no
+/// alternate spelling is attempted: for example, a leading `ß` capitalizes to the single character
+/// `ẞ`, which the existing charset rejects, so the result is `Err(0x48)`.
+pub fn prepare_full_char_name(
+    name: Option<&str>,
+    lists: &dyn NameLists,
+    charsets: NameCharsets,
+) -> Result<String, u8> {
+    let status = check_full_char_name(name, lists, charsets);
+    if status != CHAR_NAME_SUCCESS {
+        return Err(status);
+    }
+
+    // A successful full-name check guarantees a present, nonempty, exactly-two-part string.
+    let name = name.ok_or(0x45 + NO_NAME)?;
+    let (first, last) = name.split_once(' ').ok_or(0x45 + INVALID_CHARACTER)?;
+
+    let canonical = format!(
+        "{} {}",
+        capitalize_name_part(first),
+        capitalize_name_part(last)
+    );
+
+    let status = check_full_char_name(Some(&canonical), lists, charsets);
+    if status != CHAR_NAME_SUCCESS {
+        return Err(status);
+    }
+
+    Ok(canonical)
+}
+
+/// Capitalizes one validated name part: the first scalar uppercase, the rest lowercase. The
+/// existing client alphabet admits lowercase ß, þ and ÿ but not their uppercase counterparts, so
+/// those initials deliberately become the single characters ẞ, Þ and Ÿ and are rejected by the
+/// canonical validation. No multi-character expansion or fallback is performed.
+fn capitalize_name_part(part: &str) -> String {
+    let mut chars = part.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+
+    let first = if first == 'ß' {
+        'ẞ'
+    } else {
+        first.to_uppercase().next().unwrap_or(first)
+    };
+
+    let mut capitalized = String::with_capacity(part.len());
+    capitalized.push(first);
+    capitalized.extend(chars.flat_map(|c| c.to_lowercase()));
+    capitalized
+}
+
 /// `0x6c9b70`: the validator's code for guild name `name`, [`SUCCESS`] for one it accepts.
 pub(crate) fn check_guild_name(name: &str, lists: &dyn NameLists, charsets: NameCharsets) -> u8 {
     let profanity = Searched {
@@ -683,5 +787,519 @@ mod tests {
         assert_eq!(guild("Abcdefghij Abcdefghij Abc"), TOO_LONG, "25 units");
         assert_eq!(guild("Ab cd"), SUCCESS);
         assert_eq!(check("Ab cd"), 0x48, "the character check takes no space");
+    }
+
+    /// One word list per predicate, each match ASCII-folded and unanchored, so a test can put a
+    /// restriction in exactly one list.
+    #[derive(Clone, Copy)]
+    struct Lists {
+        names_profanity: &'static [&'static str],
+        chat_profanity: &'static [&'static str],
+        names_reserved: &'static [&'static str],
+    }
+
+    impl Lists {
+        const NONE: Self = Self {
+            names_profanity: &[],
+            chat_profanity: &[],
+            names_reserved: &[],
+        };
+
+        fn any(words: &[&str], name: &str) -> bool {
+            let name = name.to_ascii_lowercase();
+            words.iter().any(|word| name.contains(word))
+        }
+    }
+
+    impl NameLists for Lists {
+        fn names_profanity(&self, name: &str) -> bool {
+            Self::any(self.names_profanity, name)
+        }
+
+        fn chat_profanity(&self, name: &str) -> bool {
+            Self::any(self.chat_profanity, name)
+        }
+
+        fn names_reserved(&self, name: &str) -> bool {
+            Self::any(self.names_reserved, name)
+        }
+    }
+
+    fn check_full(name: &str) -> u8 {
+        check_full_char_name(Some(name), &NoNameLists, NameCharsets::default())
+    }
+
+    fn check_full_with(name: &str, lists: &dyn NameLists) -> u8 {
+        check_full_char_name(Some(name), lists, NameCharsets::default())
+    }
+
+    fn check_full_on(region: i32, locale: usize, name: &str) -> u8 {
+        check_full_char_name(
+            Some(name),
+            &NoNameLists,
+            NameCharsets::for_client(region, locale),
+        )
+    }
+
+    /// Two valid parts, each held to the single-name rules, with the Latin cap applied per part
+    /// rather than to the full string. No capitalization is imposed.
+    #[test]
+    fn full_name_accepts_two_valid_parts_and_maximum_latin_length() {
+        assert_eq!(check_full("Asha Brightvale"), 0x52, "two valid parts");
+        assert_eq!(
+            check_full("aSHA brightVALE"),
+            0x52,
+            "validated, not capitalized"
+        );
+        assert_eq!(
+            check_full("Abcdefghijkl Mnopqrstuvwx"),
+            0x52,
+            "two 12-unit parts, 25 units with the space"
+        );
+        assert_eq!(
+            check_full("Abcdefghijklm Brightvale"),
+            0x47,
+            "13-unit first part"
+        );
+        assert_eq!(check_full("Asha Abcdefghijklm"), 0x47, "13-unit last part");
+    }
+
+    /// The exact two-part shape: one ASCII space, no empty part, no extra component, and no
+    /// repair of tabs, newlines, NBSP, embedded NULs or doubled spaces.
+    #[test]
+    fn full_name_rejects_missing_parts_and_malformed_separators() {
+        assert_eq!(
+            check_full_char_name(None, &NoNameLists, NameCharsets::default()),
+            0x45,
+            "None"
+        );
+        assert_eq!(check_full(""), 0x45, "empty");
+        assert_eq!(check_full("Asha"), 0x48, "no separator");
+        assert_eq!(check_full("Asha "), 0x45, "empty last part");
+        assert_eq!(check_full(" Brightvale"), 0x45, "empty first part");
+        assert_eq!(check_full("Asha  Brightvale"), 0x48, "doubled space");
+        assert_eq!(check_full("Asha Bright vale"), 0x48, "third component");
+        assert_eq!(check_full("Asha Brightvale Extra"), 0x48, "four components");
+        for separator in ["\t", "\n", "\u{a0}"] {
+            assert_eq!(
+                check_full(&format!("Asha{separator}Brightvale")),
+                0x48,
+                "{separator:?} is not the separator"
+            );
+        }
+        assert_eq!(
+            check_full("As\u{0}ha Brightvale"),
+            0x48,
+            "NUL in the first part"
+        );
+        assert_eq!(
+            check_full("Asha Bright\u{0}vale"),
+            0x48,
+            "NUL in the last part"
+        );
+        // Malformed inputs are answered with an error, not repaired into a valid pair.
+        assert_ne!(check_full("Asha "), 0x52);
+        assert_ne!(check_full("Asha\tBrightvale"), 0x52);
+        assert_ne!(check_full("Asha  Brightvale"), 0x52);
+    }
+
+    /// Each part keeps the existing single-name codes and their order, and a first-part failure
+    /// is returned before the last part is checked.
+    #[test]
+    fn full_name_preserves_per_part_errors_and_order() {
+        let reserved = Words(&["blizz"]);
+        assert_eq!(check_full("A Brightvale"), 0x46, "short first part");
+        assert_eq!(check_full("Asha B"), 0x46, "short last part");
+        assert_eq!(check_full("As1a Brightvale"), 0x48, "invalid first part");
+        assert_eq!(check_full("Asha Bright1vale"), 0x48, "invalid last part");
+        assert_eq!(check_full("Aaab Brightvale"), 0x4e, "triple in first part");
+        assert_eq!(check_full("Asha Bbbright"), 0x4e, "triple in last part");
+        assert_eq!(
+            check_full_with("Blizz Brightvale", &reserved),
+            0x4b,
+            "reserved first part"
+        );
+        assert_eq!(
+            check_full_with("Asha Blizz", &reserved),
+            0x4b,
+            "reserved last part"
+        );
+        // Both parts fail, differently: the first part's status wins.
+        assert_eq!(
+            check_full_with("A Blizz", &reserved),
+            0x46,
+            "first part's TOO_SHORT precedes the last part's RESERVED"
+        );
+        assert_eq!(
+            check_full_with("Blizz A", &reserved),
+            0x4b,
+            "first part's RESERVED precedes the last part's TOO_SHORT"
+        );
+        assert_eq!(
+            check_full_with("A1 Blizz", &reserved),
+            0x48,
+            "first part's INVALID_CHARACTER precedes the last part's RESERVED"
+        );
+        // The existing within-part order still decides: the walk by position, then the lists,
+        // then the length cap.
+        assert_eq!(check_full("Aaab1 Brightvale"), 0x4e, "triple before digit");
+        assert_eq!(check_full("A1aaa Brightvale"), 0x48, "digit before triple");
+        assert_eq!(
+            check_full_with("Blizzardbobby Brightvale", &reserved),
+            0x4b,
+            "RESERVED before the 13-unit cap"
+        );
+    }
+
+    /// Every list sees both combined subjects: the name with its space and the two parts joined
+    /// without it. The individual parts pass, so only the boundary checks can reject these.
+    #[test]
+    fn full_name_checks_each_list_across_the_boundary() {
+        let spaced_profanity = Lists {
+            names_profanity: &["asha bright"],
+            ..Lists::NONE
+        };
+        let spaced_chat = Lists {
+            chat_profanity: &["asha bright"],
+            ..Lists::NONE
+        };
+        let spaced_reserved = Lists {
+            names_reserved: &["asha bright"],
+            ..Lists::NONE
+        };
+        for lists in [&spaced_profanity, &spaced_chat, &spaced_reserved] {
+            assert_eq!(
+                check_full_with("Asha Brightvale", lists),
+                0x4b,
+                "each list rejects the spaced form"
+            );
+            for part in ["Asha", "Brightvale"] {
+                assert_eq!(
+                    check_char_name(Some(part), lists, NameCharsets::default()),
+                    0x52,
+                    "{part} passes on its own"
+                );
+            }
+        }
+
+        let joined_profanity = Lists {
+            names_profanity: &["ashabright"],
+            ..Lists::NONE
+        };
+        let joined_chat = Lists {
+            chat_profanity: &["ashabright"],
+            ..Lists::NONE
+        };
+        let joined_reserved = Lists {
+            names_reserved: &["ashabright"],
+            ..Lists::NONE
+        };
+        for lists in [&joined_profanity, &joined_chat, &joined_reserved] {
+            assert_eq!(
+                check_full_with("Asha Brightvale", lists),
+                0x4b,
+                "each list rejects the concatenated form"
+            );
+            for part in ["Asha", "Brightvale"] {
+                assert_eq!(
+                    check_char_name(Some(part), lists, NameCharsets::default()),
+                    0x52,
+                    "{part} passes on its own"
+                );
+            }
+        }
+
+        // "Bl Izza" passes each part; "BlIzza" folded contains "blizz".
+        let restricted = Lists {
+            names_reserved: &["blizz"],
+            ..Lists::NONE
+        };
+        assert_eq!(check("Bl"), 0x52);
+        assert_eq!(check("Izza"), 0x52);
+        assert_eq!(
+            check_full_with("Bl Izza", &restricted),
+            0x4b,
+            "case-folded restriction across the boundary"
+        );
+        assert_eq!(
+            check_full_with("Asha Brightvale", &restricted),
+            0x52,
+            "valid nonmatching control"
+        );
+    }
+
+    /// The single-name cap and triple test apply inside each part only: a valid combined length
+    /// and a triple formed only at the boundary are not rejected.
+    #[test]
+    fn full_name_keeps_length_and_repetition_checks_per_part() {
+        assert_eq!(
+            check_full("Abcdefghijkl Mnopqrstuvwx"),
+            0x52,
+            "two 12-unit parts, 25 units together"
+        );
+        assert_eq!(
+            check_full("Abb Bc"),
+            0x52,
+            "concatenation is AbbBc: b, b, B is not a per-part triple"
+        );
+        assert_eq!(
+            check_full("Ab Bbc"),
+            0x52,
+            "concatenation is AbBbc: b, B, b is not a per-part triple"
+        );
+        assert_eq!(check_full("Abbb Bc"), 0x4e, "triple inside the first part");
+        assert_eq!(check_full("Abb Bccc"), 0x4e, "triple inside the last part");
+        assert_eq!(
+            check_full("Aaab Bc"),
+            0x4e,
+            "case-folded triple inside the first part"
+        );
+    }
+
+    /// Each part chooses its charset and cap under the same [`NameCharsets`]; one name may mix
+    /// the primary in one part and the secondary in the other.
+    #[test]
+    fn full_name_keeps_locale_caps_per_part() {
+        assert_eq!(
+            check_full_on(0, 0, "가나다라마바사아 Abcdefgh"),
+            0x48,
+            "enUS rejects Hangul"
+        );
+        assert_eq!(
+            check_full_on(0, 1, "가나다라마바사아 Abcdefgh"),
+            0x52,
+            "koKR: eight Hangul then eight ASCII"
+        );
+        assert_eq!(
+            check_full_on(0, 1, "가나다라마바사아자 Abcdefgh"),
+            0x47,
+            "koKR: nine Hangul in the first part"
+        );
+        assert_eq!(
+            check_full_on(0, 1, "가나다라마바사아 Abcdefghi"),
+            0x47,
+            "koKR: nine ASCII in the last part"
+        );
+        assert_eq!(
+            check_full_on(0, 1, "Abcdefgh 가나다라마바사아자"),
+            0x47,
+            "koKR: nine Hangul in the last part"
+        );
+        assert_eq!(
+            check_full_on(0, 4, "一二三四五六 李小龙歐陽修"),
+            0x52,
+            "zhCN: six ideographs in each part"
+        );
+        assert_eq!(
+            check_full_on(0, 4, "一二三四五六七 李小龙歐陽修"),
+            0x47,
+            "zhCN: seven ideographs in the first part"
+        );
+        assert_eq!(
+            check_full_on(0, 4, "一二三四五六 李小龙歐陽修文"),
+            0x47,
+            "zhCN: seven ideographs in the last part"
+        );
+        // The parts pick different charsets from the same pair.
+        assert_eq!(
+            check_full_on(0, 1, "Abcdefgh 가나다라"),
+            0x52,
+            "koKR: ASCII (secondary) then Hangul (primary)"
+        );
+        assert_eq!(
+            check_full_on(0, 4, "Abcdefgh 李小龙"),
+            0x52,
+            "zhCN: ASCII (secondary) then ideographs (primary)"
+        );
+    }
+
+    fn prepare(name: &str) -> Result<String, u8> {
+        prepare_full_char_name(Some(name), &NoNameLists, NameCharsets::default())
+    }
+
+    fn prepare_with(name: &str, lists: &dyn NameLists) -> Result<String, u8> {
+        prepare_full_char_name(Some(name), lists, NameCharsets::default())
+    }
+
+    fn prepare_on(region: i32, locale: usize, name: &str) -> Result<String, u8> {
+        prepare_full_char_name(
+            Some(name),
+            &NoNameLists,
+            NameCharsets::for_client(region, locale),
+        )
+    }
+
+    fn assert_ok(result: Result<String, u8>, expected: &str) {
+        match result {
+            Ok(value) => assert_eq!(value, expected),
+            Err(status) => panic!("expected Ok({expected:?}), got Err(0x{status:02x})"),
+        }
+    }
+
+    fn assert_err(result: Result<String, u8>, expected: u8) {
+        match result {
+            Ok(value) => panic!("expected Err(0x{expected:02x}), got Ok({value:?})"),
+            Err(status) => assert_eq!(status, expected),
+        }
+    }
+
+    /// The canonical spelling is produced only after the raw spelling passes.
+    #[test]
+    fn prepare_full_name_capitalizes_each_part() {
+        assert_ok(prepare("aSHA brightVALE"), "Asha Brightvale");
+        assert_ok(prepare("éclair bravo"), "Éclair Bravo");
+        assert_ok(prepare("Asha Brightvale"), "Asha Brightvale");
+        assert_ok(prepare("Éclair Bravo"), "Éclair Bravo");
+    }
+
+    /// The existing alphabet has no uppercase ẞ, Þ, or Ÿ. Raw lowercase is
+    /// accepted, but the capitalized form is rejected rather than widened or
+    /// replaced with an alternate spelling.
+    #[test]
+    fn prepare_full_name_rejects_unrepresentable_initials() {
+        for (raw, capitalized) in [
+            ("ßeta Brightvale", "ẞeta Brightvale"),
+            ("þor Brightvale", "Þor Brightvale"),
+            ("ÿard Brightvale", "Ÿard Brightvale"),
+            ("Asha ßeta", "Asha ẞeta"),
+            ("Asha þor", "Asha Þor"),
+            ("Asha ÿard", "Asha Ÿard"),
+        ] {
+            assert_eq!(check_full(raw), 0x52, "raw spelling is admitted");
+            assert_eq!(check_full(capitalized), 0x48, "capitalized is not");
+            assert_err(prepare(raw), 0x48);
+        }
+        assert_err(prepare("ẞeta Brightvale"), 0x48);
+        assert_err(prepare("Þor Brightvale"), 0x48);
+        assert_err(prepare("Ÿard Brightvale"), 0x48);
+    }
+
+    /// Lowercase exceptional letters remain legal away from the initial. Only
+    /// the canonical initial mapping is rejected.
+    #[test]
+    fn prepare_full_name_preserves_allowed_internal_letters() {
+        assert_ok(prepare("aßa aþa"), "Aßa Aþa");
+        assert_ok(prepare("aÿa brightvale"), "Aÿa Brightvale");
+    }
+
+    /// Raw failures are returned unchanged and take precedence over anything
+    /// capitalization would discover later.
+    #[test]
+    fn prepare_full_name_forwards_raw_errors() {
+        assert_err(
+            prepare_full_char_name(None, &NoNameLists, NameCharsets::default()),
+            0x45,
+        );
+        assert_err(prepare(""), 0x45);
+        assert_err(prepare("Asha "), 0x45);
+        assert_err(prepare("Asha"), 0x48);
+        assert_err(prepare("As1a Brightvale"), 0x48);
+        assert_err(prepare("A Brightvale"), 0x46);
+        assert_err(prepare("Abcdefghijklm Brightvale"), 0x47);
+        assert_err(prepare("Aaab Brightvale"), 0x4e);
+        assert_err(prepare_with("Blizz Brightvale", &Words(&["blizz"])), 0x4b);
+        assert_err(prepare("ßeta A"), 0x46);
+    }
+
+    /// Capitalization can create a repetition the raw spelling did not have;
+    /// the canonical string is checked again.
+    #[test]
+    fn prepare_full_name_rechecks_repetition_after_casing() {
+        assert_eq!(check_full("éÉéÉ Vale"), 0x52);
+        assert_err(prepare("éÉéÉ Vale"), 0x4e);
+        assert_ok(prepare("éÉé Vale"), "Ééé Vale");
+    }
+
+    /// The same three lists are checked against the canonical spaced and
+    /// concatenated forms, even when the raw forms pass.
+    #[test]
+    fn prepare_full_name_rechecks_combined_lists_after_casing() {
+        let spaced_names = Lists {
+            names_profanity: &["Éclair brightvale"],
+            ..Lists::NONE
+        };
+        let spaced_chat = Lists {
+            chat_profanity: &["Éclair brightvale"],
+            ..Lists::NONE
+        };
+        let spaced_reserved = Lists {
+            names_reserved: &["Éclair brightvale"],
+            ..Lists::NONE
+        };
+        for lists in [&spaced_names, &spaced_chat, &spaced_reserved] {
+            assert_eq!(check_full_with("éclair brightVALE", lists), 0x52);
+            assert_eq!(
+                check_char_name(Some("éclair"), lists, NameCharsets::default()),
+                0x52
+            );
+            assert_eq!(
+                check_char_name(Some("brightVALE"), lists, NameCharsets::default()),
+                0x52
+            );
+            assert_err(prepare_with("éclair brightVALE", lists), 0x4b);
+        }
+
+        let joined_names = Lists {
+            names_profanity: &["Éclairbrightvale"],
+            ..Lists::NONE
+        };
+        let joined_chat = Lists {
+            chat_profanity: &["Éclairbrightvale"],
+            ..Lists::NONE
+        };
+        let joined_reserved = Lists {
+            names_reserved: &["Éclairbrightvale"],
+            ..Lists::NONE
+        };
+        for lists in [&joined_names, &joined_chat, &joined_reserved] {
+            assert_eq!(check_full_with("éclair brightVALE", lists), 0x52);
+            assert_eq!(
+                check_char_name(Some("éclair"), lists, NameCharsets::default()),
+                0x52
+            );
+            assert_eq!(
+                check_char_name(Some("brightVALE"), lists, NameCharsets::default()),
+                0x52
+            );
+            assert_err(prepare_with("éclair brightVALE", lists), 0x4b);
+        }
+
+        assert_ok(
+            prepare_with("éclair brightVALE", &Lists::NONE),
+            "Éclair Brightvale",
+        );
+    }
+
+    /// Raw and canonical checks both retain the existing charset and length
+    /// limits; canonicalization does not bypass them.
+    #[test]
+    fn prepare_full_name_keeps_locale_caps_and_maximum_lengths() {
+        assert_ok(
+            prepare("Abcdefghijkl Mnopqrstuvwx"),
+            "Abcdefghijkl Mnopqrstuvwx",
+        );
+        assert_err(prepare("Abcdefghijklm Brightvale"), 0x47);
+        assert_err(prepare("Asha Abcdefghijklm"), 0x47);
+
+        assert_ok(
+            prepare_on(0, 1, "가나다라마바사아 Abcdefgh"),
+            "가나다라마바사아 Abcdefgh",
+        );
+        assert_err(prepare_on(0, 1, "가나다라마바사아자 Abcdefgh"), 0x47);
+        assert_err(prepare_on(0, 1, "가나다라마바사아 Abcdefghi"), 0x47);
+        assert_err(prepare_on(0, 1, "Abcdefgh 가나다라마바사아자"), 0x47);
+
+        assert_ok(
+            prepare_on(0, 4, "一二三四五六 李小龙歐陽修"),
+            "一二三四五六 李小龙歐陽修",
+        );
+        assert_err(prepare_on(0, 4, "一二三四五六七 李小龙歐陽修"), 0x47);
+        assert_err(prepare_on(0, 4, "一二三四五六 李小龙歐陽修文"), 0x47);
+        assert_ok(
+            prepare_on(0, 4, "Abcdefghijkl 李小龙"),
+            "Abcdefghijkl 李小龙",
+        );
+        assert_err(prepare_on(0, 4, "Abcdefghijklm 李小龙"), 0x47);
+        assert_err(prepare_on(0, 0, "가나다라마바사아 Abcdefgh"), 0x48);
     }
 }

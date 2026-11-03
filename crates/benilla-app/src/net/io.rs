@@ -779,10 +779,11 @@ fn world(
             }
             !canceled()
         };
-        let mut session = match WorldSession::connect_queued(
+        let mut session = match WorldSession::connect_queued_with_region(
             &world_addr,
             &req.user,
             logon.session_key,
+            crate::ui_script::client_region(),
             &mut on_queue,
         ) {
             Ok(s) => s,

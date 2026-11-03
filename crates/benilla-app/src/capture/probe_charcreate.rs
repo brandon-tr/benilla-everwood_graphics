@@ -37,10 +37,11 @@ impl Plugin for ProbeCharCreatePlugin {
 }
 
 /// Parse `name[,race,class,gender[,skin,face,hair,haircolor,facial]]` into a request; the name is
-/// required, everything else defaults (Human Warrior male, all appearance dials 0).
+/// required and made a full name ([`glue_press::full_name`]) so a one-token spec still creates,
+/// everything else defaults (Human Warrior male, all appearance dials 0).
 fn parse_req(spec: &str) -> Option<CharCreateReq> {
     let mut parts = spec.split(',').map(str::trim);
-    let name = parts.next().filter(|n| !n.is_empty())?.to_string();
+    let name = glue_press::full_name(parts.next().filter(|n| !n.is_empty())?);
     let mut next_u8 = |default: u8| parts.next().and_then(|p| p.parse().ok()).unwrap_or(default);
     Some(CharCreateReq {
         name,

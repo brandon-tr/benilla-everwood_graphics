@@ -371,6 +371,8 @@ mod tests {
             .unwrap();
         s.run(r#"SendChatMessage("lf1m", "CHANNEL", nil, 2.7)"#)
             .unwrap();
+        s.run(r#"SendChatMessage("hi", "WHISPER", nil, "Alice Smith")"#)
+            .unwrap();
         let sent = s.take_chat_sends();
         assert_eq!(sent[0].target.as_deref(), Some("Bob"));
         assert_eq!(sent[1].target.as_deref(), Some("1"));
@@ -379,6 +381,11 @@ mod tests {
             sent[3].target.as_deref(),
             Some("2.7"),
             "not rounded: the host's `SStrToInt` reads 2"
+        );
+        assert_eq!(
+            sent[4].target.as_deref(),
+            Some("Alice Smith"),
+            "a canonical full-name target keeps its space"
         );
         assert_eq!(sent[1].chat_type, "CHANNEL");
     }

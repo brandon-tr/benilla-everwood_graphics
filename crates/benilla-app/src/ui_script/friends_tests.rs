@@ -2,7 +2,9 @@
 //! read with no host lent, then the list event. The VM keeps the friend and ignore calls its verbs make, which
 //! the client's host applies inside them (`ui_social::call_tests`).
 
-use benilla_ui::script::{FriendInfo, IgnoreInfo, SocialCall, SocialState, UiScript, WhoInfo};
+use benilla_ui::script::{
+    FriendInfo, IgnoreInfo, SocialCall, SocialState, UiScript, UnitState, WhoInfo,
+};
 
 /// The window's own manifest slice, in `load_default_ui` order.
 fn setup() -> UiScript {
@@ -10,6 +12,14 @@ fn setup() -> UiScript {
     s.keep_calls();
     s.set_screen_size(1024.0, 768.0);
     super::test_ui::load_social_ui(&mut s);
+    s
+}
+
+/// [`setup`] with the layer's last file, `FrameXMLFixes.xml`, as the production load seats it: the
+/// chat's stock whisper split is adapted there (a target is a required "First Last" pair).
+fn setup_with_layer() -> UiScript {
+    let s = setup();
+    super::test_ui::load_ui(&s, "FrameXMLFixes.xml");
     s
 }
 
@@ -639,6 +649,72 @@ fn right_clicking_a_who_row_opens_the_friend_menu() {
         s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
             .unwrap(),
         ("WHISPER".to_string(), "Tigole".to_string())
+    );
+}
+
+/// The stock who row's Whisper entry is `ChatFrame_SendTell(name)` (`UnitPopup.lua:545-550`), whose
+/// prefill `/w First Last ` the stock parser cut at the first word. With the layer's whisper
+/// branch the pair is the target, and the row still sends through the box's `ENTER`.
+#[test]
+fn the_who_whisper_row_takes_the_whole_two_part_name() {
+    let _data = benilla_formats::wow_data_or_skip!();
+    let mut s = setup_with_layer();
+    // `SendChatMessage` returns quietly with no local player (`0x49f223`).
+    s.set_unit(
+        "player",
+        Some(UnitState {
+            exists: true,
+            name: Some("Probe".into()),
+            ..Default::default()
+        }),
+    );
+    s.run("ShowWhoPanel()").unwrap();
+    push(
+        &mut s,
+        SocialState {
+            who: vec![WhoInfo {
+                name: "Asha Brightvale".to_string(),
+                level: 40,
+                ..Default::default()
+            }],
+            who_total: 1,
+            ..Default::default()
+        },
+        "WHO_LIST_UPDATE",
+    );
+    s.run("WhoFrameButton1:Click(\"RightButton\")").unwrap();
+    let whisper = r#"
+        for i = 1, UIDROPDOWNMENU_MAXBUTTONS do
+            local b = getglobal("DropDownList1Button" .. i)
+            if b and b:IsVisible() and b.value == "WHISPER" then b:Click() return 1 end
+        end
+        return nil"#;
+    assert_eq!(
+        s.eval::<Option<i64>>(whisper).unwrap(),
+        Some(1),
+        "the menu has a Whisper row"
+    );
+    s.tick(0.05);
+    assert_eq!(
+        s.eval::<(String, String)>("return ChatFrameEditBox.chatType, ChatFrameEditBox.tellTarget")
+            .unwrap(),
+        ("WHISPER".to_string(), "Asha Brightvale".to_string()),
+        "the row's prefill keeps both name words"
+    );
+
+    assert!(s.focus_editbox("ChatFrameEditBox"));
+    s.char_input("Hello there");
+    assert!(s.key_input("ENTER"));
+    assert_eq!(
+        s.take_chat_sends()
+            .into_iter()
+            .map(|c| (c.text, c.chat_type, c.target))
+            .collect::<Vec<_>>(),
+        vec![(
+            "Hello there".to_string(),
+            "WHISPER".to_string(),
+            Some("Asha Brightvale".to_string())
+        )]
     );
 }
 

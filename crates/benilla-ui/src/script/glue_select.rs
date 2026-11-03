@@ -23,7 +23,7 @@ use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi::{flag, number_arg, string_arg};
 use super::glue_core::{call, glue_status_key, GlueCall};
-use super::{check_char_name, Model, ScriptValue, CHAR_NAME_SUCCESS};
+use super::{prepare_full_char_name, Model, ScriptValue};
 
 /// The record flag a server sets on a character it wants renamed (`[rec+0xfc]` bit `0x4000`,
 /// tested at `0x4735ab`, cleared at `0x472722`).
@@ -639,18 +639,27 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     vec![ScriptValue::Str(key.to_string())],
                 );
             };
-            if name.eq_ignore_ascii_case(&old) {
-                force_rename("CHAR_CREATE_NAME_IN_USE");
-                return Ok(MultiValue::new());
-            }
             // `0x46b340`: a zero guid sends nothing and answers 1 (`0x46b355`).
             if guid != 0 {
-                let status = check_char_name(Some(&name), &*lists, charsets);
-                if status != CHAR_NAME_SUCCESS {
-                    force_rename(glue_status_key(i32::from(status)));
-                    return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                let prepared = prepare_full_char_name(Some(&name), &*lists, charsets);
+                let canonical = match prepared {
+                    Ok(canonical) => canonical,
+                    Err(status) => {
+                        force_rename(glue_status_key(i32::from(status)));
+                        return Ok(MultiValue::from_vec(vec![Value::Nil]));
+                    }
+                };
+                if canonical.eq_ignore_ascii_case(&old) {
+                    force_rename("CHAR_CREATE_NAME_IN_USE");
+                    return Ok(MultiValue::new());
                 }
-                call(lua, GlueCall::RenameCharacter { guid, name });
+                call(
+                    lua,
+                    GlueCall::RenameCharacter {
+                        guid,
+                        name: canonical,
+                    },
+                );
             }
             Ok(MultiValue::from_vec(vec![Value::Number(1.0)]))
         })?,
@@ -1266,6 +1275,7 @@ mod tests {
     /// `FORCE_RENAME_CHARACTER`.
     fn rename_vm() -> UiScript {
         let mut roster = three();
+        roster[1].name = "Bravo Jones".to_string();
         roster[1].flags = FLAG_RENAME | 0x2000;
         let mut s = vm(roster);
         s.run("Listener:RegisterEvent('FORCE_RENAME_CHARACTER')")
@@ -1337,7 +1347,7 @@ mod tests {
     fn rename_character_to_the_same_name_is_name_in_use() {
         let mut s = rename_vm();
         assert_eq!(
-            s.eval::<f64>(&count("RenameCharacter(2, 'bRAVO')"))
+            s.eval::<f64>(&count("RenameCharacter(2, 'bRAVO jONES')"))
                 .unwrap(),
             0.0
         );
@@ -1369,12 +1379,21 @@ mod tests {
         let mut s = rename_vm();
         s.set_name_lists(std::rc::Rc::new(Reserved));
         for (call, key) in [
-            ("RenameCharacter(2, 'X')", "CHAR_NAME_TOO_SHORT"),
-            ("RenameCharacter(2, 'Abc1')", "CHAR_NAME_INVALID_CHARACTER"),
+            ("RenameCharacter(2, 'X Smith')", "CHAR_NAME_TOO_SHORT"),
+            (
+                "RenameCharacter(2, 'Abc1 Smith')",
+                "CHAR_NAME_INVALID_CHARACTER",
+            ),
             ("RenameCharacter(2, 12)", "CHAR_NAME_INVALID_CHARACTER"),
-            ("RenameCharacter(2, 'Abbbc')", "CHAR_NAME_THREE_CONSECUTIVE"),
-            ("RenameCharacter(2, 'Abcdefghijklm')", "CHAR_NAME_TOO_LONG"),
-            ("RenameCharacter(2, 'Thrall')", "CHAR_NAME_RESERVED"),
+            (
+                "RenameCharacter(2, 'Abbbc Smith')",
+                "CHAR_NAME_THREE_CONSECUTIVE",
+            ),
+            (
+                "RenameCharacter(2, 'Abcdefghijklm Smith')",
+                "CHAR_NAME_TOO_LONG",
+            ),
+            ("RenameCharacter(2, 'Thrall Smith')", "CHAR_NAME_RESERVED"),
         ] {
             s.run("FIRED = {}").unwrap();
             assert_eq!(
@@ -1402,13 +1421,18 @@ mod tests {
         assert_eq!(
             s.eval::<(f64, f64)>(
                 "local function n(...) return arg.n, arg[1] end \
-                 return n(RenameCharacter(2, 'Newname'))"
+                 return n(RenameCharacter(2, 'Newname Smith'))"
             )
             .unwrap(),
             (1.0, 1.0)
         );
         assert_eq!(
-            s.eval::<f64>("return RenameCharacter('2', 'Zoë\\0Bravo')")
+            s.eval::<f64>("return RenameCharacter('2', 'Zoë Bravo\\0junk')")
+                .unwrap(),
+            1.0
+        );
+        assert_eq!(
+            s.eval::<f64>("return RenameCharacter(2, 'alice smith')")
                 .unwrap(),
             1.0
         );
@@ -1420,7 +1444,8 @@ mod tests {
                 [
                     GlueCall::RenameCharacter { guid: 2, name: a },
                     GlueCall::RenameCharacter { guid: 2, name: b },
-                ] if a == "Newname" && b == "Zoë"
+                    GlueCall::RenameCharacter { guid: 2, name: c },
+                ] if a == "Newname Smith" && b == "Zoë Bravo" && c == "Alice Smith"
             ),
             "{queued:?}"
         );
@@ -1431,7 +1456,7 @@ mod tests {
     /// 2 gives enUS the same Hangul pair.
     #[test]
     fn rename_character_checks_the_clients_charsets() {
-        let hangul = "RenameCharacter(2, '한글')";
+        let hangul = "RenameCharacter(2, '한글 이름')";
         let key = |s: &mut super::super::UiScript| {
             s.run("FIRED = {}").unwrap();
             s.eval::<f64>(&format!(
@@ -1451,7 +1476,7 @@ mod tests {
         assert!(key(&mut s).is_empty(), "koKR takes Hangul");
         assert!(matches!(
             s.take_glue_calls().as_slice(),
-            [GlueCall::RenameCharacter { guid: 2, name }] if name == "한글"
+            [GlueCall::RenameCharacter { guid: 2, name }] if name == "한글 이름"
         ));
 
         s.set_locale(0);
@@ -1508,20 +1533,20 @@ mod tests {
     #[test]
     fn the_rename_applier_renames_the_record_and_clears_its_flag() {
         let mut s = rename_vm();
-        assert_eq!(s.glue_character_name(2).as_deref(), Some("Bravo"));
+        assert_eq!(s.glue_character_name(2).as_deref(), Some("Bravo Jones"));
         s.apply_glue_rename(9, "Nobody");
         assert!(fired(&s).is_empty(), "no record, no event");
-        s.apply_glue_rename(2, "Newname");
+        s.apply_glue_rename(2, "Newname Smith");
         assert_eq!(fired(&s), ["CHARACTER_LIST_UPDATE nil"]);
         assert_eq!(
             s.eval::<(String, Option<i64>)>(
                 "local n, _, _, _, _, _, _, ghost = GetCharacterInfo(2) return n, ghost"
             )
             .unwrap(),
-            ("Newname".to_string(), Some(1)),
+            ("Newname Smith".to_string(), Some(1)),
             "the ghost bit stays"
         );
-        assert_eq!(s.glue_character_name(2).as_deref(), Some("Newname"));
+        assert_eq!(s.glue_character_name(2).as_deref(), Some("Newname Smith"));
         // The flag is clear: a second rename is refused at `0x4735ab`.
         assert_eq!(
             s.eval::<f64>(&count("RenameCharacter(2, 'Othername')"))

@@ -100,13 +100,13 @@ pub use chat::{
     CHAT_MSG_WHISPER_INFORM, CHAT_MSG_YELL, MACRO_EXPANDED_TYPES,
 };
 pub use client::{
-    auth_session, channel_announcements, channel_ban, channel_invite, channel_kick, channel_list,
-    channel_moderate, channel_moderator, channel_mute, channel_owner, channel_password,
-    channel_set_owner, channel_unban, channel_unmoderator, channel_unmute, char_create,
-    char_rename, creature_query, emote, force_speed_ack, full_guid, join_channel, knock_back_ack,
-    leave_channel, messagechat, messagechat_channel, messagechat_kind, messagechat_whisper,
-    move_flag_ack, move_spline_done, move_time_skipped, movement, pet_name_query, ping,
-    played_time, query_time, random_roll, teleport_ack, text_emote,
+    auth_session, auth_session_with_region, channel_announcements, channel_ban, channel_invite,
+    channel_kick, channel_list, channel_moderate, channel_moderator, channel_mute, channel_owner,
+    channel_password, channel_set_owner, channel_unban, channel_unmoderator, channel_unmute,
+    char_create, char_rename, creature_query, emote, force_speed_ack, full_guid, join_channel,
+    knock_back_ack, leave_channel, messagechat, messagechat_channel, messagechat_kind,
+    messagechat_whisper, move_flag_ack, move_spline_done, move_time_skipped, movement,
+    pet_name_query, ping, played_time, query_time, random_roll, teleport_ack, text_emote,
 };
 pub use combat_log::{
     DamageShield, DispelFailed, EnchantmentLog, EnvironmentalDamageLog, ExecuteLog, PartyKillLog,

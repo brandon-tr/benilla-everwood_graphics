@@ -717,7 +717,7 @@ fn create_character_checks_the_name_then_asks_the_host() {
         .unwrap();
     s.take_glue_calls();
     for (call, text) in [
-        ("CreateCharacter('A')", "short"),
+        ("CreateCharacter('A Smith')", "short"),
         ("CreateCharacter()", "none"),
         ("CreateCharacter({})", "none"),
         ("CreateCharacter('')", "none"),
@@ -736,7 +736,8 @@ fn create_character_checks_the_name_then_asks_the_host() {
     assert_eq!(fired(&s), ["OPEN_STATUS_DIALOG OKAY "]);
     assert!(s.take_glue_calls().is_empty());
 
-    s.run("FIRED = {} CreateCharacter('Zoë\\0Bob')").unwrap();
+    s.run("FIRED = {} CreateCharacter('Zoë Bob\\0junk')")
+        .unwrap();
     assert!(fired(&s).is_empty());
     let queued = s.take_glue_calls();
     assert!(
@@ -752,17 +753,40 @@ fn create_character_checks_the_name_then_asks_the_host() {
                 hair_style: 3,
                 hair_color: 4,
                 facial_hair: 5,
-            })] if name == "Zoë"
+            })] if name == "Zoë Bob"
         ),
         "{queued:?}"
     );
+}
+
+/// The binding receives the entered spelling and emits the canonical two-part name; a rejected
+/// spelling sends nothing.
+#[test]
+fn create_character_canonicalizes_and_rejects_full_names() {
+    let mut s = human([1, 2, 3, 4, 5]);
+    s.run("SetSelectedClass(3) CHAR_NAME_TOO_SHORT = 'short' FIRED = {}")
+        .unwrap();
+    s.take_glue_calls();
+    s.run("CreateCharacter('alice smith')").unwrap();
+    let queued = s.take_glue_calls();
+    assert!(
+        matches!(
+            queued.as_slice(),
+            [GlueCall::CreateCharacter(GlueCreateRequest { name, .. })]
+                if name == "Alice Smith"
+        ),
+        "{queued:?}"
+    );
+    s.run("FIRED = {} CreateCharacter('A Smith')").unwrap();
+    assert!(s.take_glue_calls().is_empty());
+    assert_eq!(fired(&s), ["OPEN_STATUS_DIALOG OKAY short"]);
 }
 
 /// With no character built nothing is sent; the check still runs.
 #[test]
 fn create_character_with_no_character_sends_nothing() {
     let mut s = vm();
-    s.run("CreateCharacter('Newbie')").unwrap();
+    s.run("CreateCharacter('Newbie Smith')").unwrap();
     assert!(s.take_glue_calls().is_empty());
     assert!(fired(&s).is_empty());
 }

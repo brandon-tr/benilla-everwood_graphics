@@ -331,6 +331,30 @@ fn the_layers_commands_are_slash_rows_and_convertraid_is_unknown() {
     assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
 }
 
+/// A chat line's player link carries the whole name (`ChatFrame.lua:1445-1451`, the feed's own
+/// `player:` body). Stock `SetItemRef` collapsed it to its last word (the `gsub` passes at
+/// `ItemRef.lua:6-7`), from before names were pairs; the layer's player branch keeps it whole, so
+/// the FRIEND menu that opens from a right-clicked name addresses the pair.
+#[test]
+fn a_chat_names_right_click_offers_the_whole_pair() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (s, failures) = production_load("chatname", false);
+    assert!(failures.is_empty(), "load failures: {failures:#?}");
+    s.run(
+        r#"SetItemRef("player:Asha Brightvale", "|Hplayer:Asha Brightvale|h[Asha Brightvale]|h", "RightButton")"#,
+    )
+    .unwrap();
+    assert_eq!(
+        s.eval::<String>("return FriendsDropDown.name").unwrap(),
+        "Asha Brightvale",
+        "the FRIEND menu addresses the whole name"
+    );
+    assert!(s.errors().is_empty(), "script errors: {:?}", s.errors());
+}
+
 /// In a player build the dev instruments are no `SlashCmdList` row, so a typed one answers
 /// `HELP_TEXT_SIMPLE` once and hands the host nothing to re-run; in a dev build each is a host row
 /// that hands the host its line.

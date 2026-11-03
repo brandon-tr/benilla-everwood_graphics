@@ -147,11 +147,30 @@ pub(super) fn press_body(vm: StockVm, req: &CharCreateReq) -> Result<(), String>
     Ok(())
 }
 
-/// Type `name` into the create screen's name box and press Okay (`CharacterCreate_Okay`), whose
-/// `CreateCharacter` reaches the glue manager's create (`0x46b290`).
+/// The last part a probe name gets when its spec has no ASCII space: the fork's create screen
+/// needs two entered parts, so an older one-token probe spec still creates a character.
+pub(super) const DEFAULT_LAST_NAME: &str = "Tester";
+
+/// The full name a probe creates: `name` when it already has a nonempty part after its first
+/// ASCII space, else `name` plus [`DEFAULT_LAST_NAME`].
+pub(super) fn full_name(name: &str) -> String {
+    let name = name.trim();
+    match name.split_once(' ') {
+        Some((first, last)) if !first.is_empty() && !last.is_empty() => name.to_string(),
+        _ => format!("{name} {DEFAULT_LAST_NAME}"),
+    }
+}
+
+/// Type `name` into the create screen's two name boxes and submit through the fork's overlay
+/// (`BenillaFullName_SubmitCreation`), whose stock path reaches the glue manager's create
+/// (`0x46b290`).
 pub(super) fn press_okay(vm: StockVm, name: &str) {
+    let name = full_name(name);
+    let (first, last) = name.split_once(' ').expect("full_name has a space");
     vm.press(&format!(
-        "CharacterCreateNameEdit:SetText({name:?}) CharacterCreate_Okay()"
+        "CharacterCreateNameEdit:SetText({first:?}) \
+         BenillaCharacterCreateLastNameEdit:SetText({last:?}) \
+         BenillaFullName_SubmitCreation()"
     ));
 }
 
@@ -178,6 +197,16 @@ pub(super) fn press_delete(vm: StockVm, row: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The create screen's two fields: a name with a last part is kept, a one-token spec gets
+    /// the probes' fixed last part, and stray surrounding whitespace goes.
+    #[test]
+    fn a_probe_name_is_made_full_for_the_two_field_create_screen() {
+        assert_eq!(full_name("Alice Smith"), "Alice Smith");
+        assert_eq!(full_name(" Probeone "), "Probeone Tester");
+        assert_eq!(full_name("Probeone"), "Probeone Tester");
+        assert_eq!(full_name("Alice"), "Alice Tester");
+    }
 
     /// Every playable race and class names its file string, and nothing else does.
     #[test]
