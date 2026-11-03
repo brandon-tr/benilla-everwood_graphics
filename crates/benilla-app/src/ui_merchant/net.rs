@@ -43,6 +43,7 @@ fn on_buy_result(
     else {
         return;
     };
+    merchant.settle_world_reset();
     // Another vendor than the list cache's returns at once (`0x5dcf26`).
     if merchant.listed != Some(vendor) {
         return;
@@ -105,6 +106,7 @@ fn vendor_buy_failed(
     lane: &mut MerchantLane,
 ) {
     debug!("net: buy failed (entry {item_entry}, reason {reason})");
+    merchant.settle_world_reset();
     if reason == benilla_protocol::messages::buy_result::ITEM_ALREADY_SOLD
         && merchant.listed == Some(vendor)
     {
@@ -179,14 +181,7 @@ mod tests {
             .init_resource::<MerchantLane>()
             .init_resource::<crate::item_lane::ItemLane>()
             .init_resource::<crate::field_watch::NoticeLane>()
-            .add_systems(
-                Update,
-                (
-                    crate::ui_quest_log::feed_quest_log,
-                    crate::ui_quest_log::fire_quest_events,
-                )
-                    .chain(),
-            );
+            .add_systems(Update, crate::ui_quest_log::fire_quest_events);
         register(&mut app);
         let world = app.world_mut();
         let mut objectives = std::array::from_fn(|_| QuestObjective {
@@ -223,7 +218,8 @@ mod tests {
                 buy_count: 1,
             }],
         );
-        let script = UiScript::new().unwrap();
+        let mut script = UiScript::new().unwrap();
+        crate::ui_quest_log::seat_for_test(world, &mut script);
         script
             .run(
                 r#"

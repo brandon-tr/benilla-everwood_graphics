@@ -10,7 +10,9 @@ use crate::script::binding_abi;
 use crate::script::tick::verb;
 use crate::script::{ActionSlot, Model, SpellBookState};
 
-use super::{clear_cursor, set_cursor, CursorAction, CursorMacro, CursorPayload, CursorSpell};
+use super::{
+    clear_cursor, set_cursor, CursorAction, CursorMacro, CursorPayload, CursorSpell, Setter,
+};
 
 /// The passive-spell refusal's error, errorId `0x9e`: entry `0xb4c0f0` of the table at `0xb4b498`
 /// (stride `0x14`) names this key (`0x84133c`).
@@ -26,8 +28,14 @@ fn pack(kind: u8, action: u32) -> u32 {
 /// `0x4e6450`), a spell the spell setter's mode 3 (`0x4e6254`, `0x4e6494`), a macro the macro
 /// setter's mode 8 (`0x4e629d`, `0x4e64e2`). `None` is an empty slot; `Some(None)` an action no
 /// setter takes, a macro gone from the list (`0x4e6279`) or an unknown kind (`0x4e626e`): a
-/// pickup then sets nothing, and a place clears the cursor as for an empty slot.
-fn lift(model: &Model, id: u32, book: Option<&SpellBookState>) -> Option<Option<CursorPayload>> {
+/// pickup then sets nothing, and a place clears the cursor as for an empty slot. `face` is the
+/// slot's icon as the call reads it ([`crate::script::action::slot_texture`]).
+fn lift(
+    model: &Model,
+    id: u32,
+    book: Option<&SpellBookState>,
+    face: Option<String>,
+) -> Option<Option<CursorPayload>> {
     let slot = model.actions.get(&id)?;
     if let Some(macro_id) = macro_slot_id(slot.kind, slot.action) {
         return Some(model.macros.by_id(macro_id).map(|m| {
@@ -42,14 +50,14 @@ fn lift(model: &Model, id: u32, book: Option<&SpellBookState>) -> Option<Option<
             src_slot: id,
             kind: slot.kind,
             action: slot.action,
-            texture: slot.texture.clone(),
+            texture: face,
             count: slot.count,
             consumable: slot.consumable,
             state: model.action_states.get(&id).copied(),
         })),
         ACTION_KIND_SPELL => Some(CursorPayload::Spell(CursorSpell {
             spell_id: slot.action,
-            texture: slot.texture.clone(),
+            texture: face,
             // The setter reads the spell's record; the book is where the engine has it.
             passive: book
                 .unwrap_or(&model.spellbook)
@@ -70,8 +78,9 @@ fn lift(model: &Model, id: u32, book: Option<&SpellBookState>) -> Option<Option<
 /// `ClearCursor(1,1)` signals on the empty cursor, then its tail. The slot clears even when no
 /// setter takes the action (`0x4e62ba`). Returns whether to repaint.
 pub(super) fn pickup_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
-    // The book as it stands, through the lent host.
+    // The book as it stands, through the lent host, and the slot's icon.
     let book = crate::script::live::ask(lua, &crate::script::spellbook::BookNow);
+    let face = crate::script::action::slot_texture(lua, id);
     let picked = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
         if matches!(
@@ -86,7 +95,7 @@ pub(super) fn pickup_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
             None
         } else {
             // An empty slot returns before any setter (`0x4e61a3`).
-            Some(lift(&model, id, book.as_ref()))
+            Some(lift(&model, id, book.as_ref(), face))
         }
     };
     let Some(picked) = picked else {
@@ -96,7 +105,7 @@ pub(super) fn pickup_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
         return Ok(false);
     };
     if let Some(payload) = payload {
-        set_cursor(lua, true, |_| Some(payload));
+        set_cursor(lua, true, Setter::of(&payload), |_| Some(payload));
     }
     verb(lua, |model| {
         model.actions.remove(&id);
@@ -160,24 +169,26 @@ pub(crate) fn place_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
         _ => None,
     };
     let book = crate::script::live::ask(lua, &crate::script::spellbook::BookNow);
-    let (placed, displaced) = match verb(lua, |model| plan_place(model, id, book.as_ref())) {
-        Place::Refused => return Ok(false),
-        // The passive spell's line, shown inside the verb (`0x4e63ad` → `0x496720`).
-        Place::Shown(key) => {
-            crate::script::calls::display_error(lua, key)?;
-            return Ok(false);
-        }
-        // The held action is already the slot's: `ClearCursor(1,1)` and no write (`0x4e63d4`,
-        // `0x4e65db`, `0x4e673a`).
-        Place::Same => {
-            verb(lua, clear_cursor);
-            return Ok(false);
-        }
-        Place::Write(placed, displaced) => (placed, displaced),
-    };
+    let face = crate::script::action::slot_texture(lua, id);
+    let (placed, displaced) =
+        match verb(lua, |model| plan_place(lua, model, id, book.as_ref(), face)) {
+            Place::Refused => return Ok(false),
+            // The passive spell's line, shown inside the verb (`0x4e63ad` → `0x496720`).
+            Place::Shown(key) => {
+                crate::script::calls::display_error(lua, key)?;
+                return Ok(false);
+            }
+            // The held action is already the slot's: `ClearCursor(1,1)` and no write (`0x4e63d4`,
+            // `0x4e65db`, `0x4e673a`).
+            Place::Same => {
+                verb(lua, clear_cursor);
+                return Ok(false);
+            }
+            Place::Write(placed, displaced) => (placed, displaced),
+        };
     match displaced {
         Some(Some(displaced)) => {
-            set_cursor(lua, true, |_| Some(displaced));
+            set_cursor(lua, true, Setter::of(&displaced), |_| Some(displaced));
         }
         Some(None) | None => verb(lua, clear_cursor),
     }
@@ -185,7 +196,8 @@ pub(crate) fn place_action(lua: &Lua, id: u32) -> mlua::Result<bool> {
         let (kind, action) = (placed.kind, placed.action);
         model.actions.insert(id, placed);
         // The placed action's own state, a bar item's carried from its source slot; any other
-        // waits for the app's re-feed rather than reading the displaced occupant's.
+        // is the host's write's to store, inside the call (`0x4e5903`), never the displaced
+        // occupant's.
         match state {
             Some(state) => {
                 model.action_states.insert(id, state);
@@ -215,7 +227,13 @@ enum Place {
 
 /// `PlaceAction`'s decision: the accept filters, then whether the held action is the slot's own,
 /// then what the slot takes from the held payload and the occupant that hops.
-fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Place {
+fn plan_place(
+    lua: &Lua,
+    model: &mut Model,
+    id: u32,
+    book: Option<&SpellBookState>,
+    face: Option<String>,
+) -> Place {
     // The two accept filters (`0x4e62e0`) refuse with a bare return: nothing stored or sent, and
     // the payload stays held. An item needs an on-use spell or an equip slot (`0x4e6571`), so a
     // bag is placeable; a passive spell (`Attributes & 0x40`) also raises errorId `0x9e` through
@@ -234,7 +252,7 @@ fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Plac
         action,
         count: 0,
         consumable: false,
-        // The item's ON_USE spell waits for the app's re-feed, which reads the template.
+        // The item's ON_USE spell is the host's write's to fill, off the record (`0x4e66e9`).
         use_spell: None,
     };
     let placed = match held {
@@ -247,7 +265,7 @@ fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Plac
         // (`0x4e5250`) is the template's consumable test, which the held item carries from its
         // bag or worn record.
         CursorPayload::Item(i) => ActionSlot {
-            count: carried_count(model, i.item_id),
+            count: carried_count(lua, model, i.item_id),
             consumable: i.consumable,
             ..slot(ACTION_KIND_ITEM, i.item_id, &i.texture)
         },
@@ -263,8 +281,8 @@ fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Plac
             slot(ACTION_KIND_SPELL, s.spell_id, &face)
         }
         // `PlaceAction` accepts modes 1, 3, 7 and 8 (`0x4e62e0`): a macro, mode 8, packs its id
-        // under the macro tag. Pet actions (4), coins (2), stabled pets (10) and vendor rows (5)
-        // are refused and stay held.
+        // under the macro tag. Pet actions (4), coins (2), stabled pets (10), vendor rows (5) and
+        // ammo (9) are refused and stay held.
         CursorPayload::Macro(m) => {
             let (kind, action) = macro_slot_word(m.id);
             slot(kind, action, &m.texture)
@@ -272,7 +290,8 @@ fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Plac
         CursorPayload::PetAction(_)
         | CursorPayload::StablePet(_)
         | CursorPayload::Money(_)
-        | CursorPayload::Merchant(_) => return Place::Refused,
+        | CursorPayload::Merchant(_)
+        | CursorPayload::Ammo(_) => return Place::Refused,
     };
     // Each arm compares the held action with the slot's: the spell arm a spell id with the spell
     // the slot resolves to (`0x4e63d0`, [`resolved_spell`]), so a macro bound to it or an item
@@ -287,7 +306,7 @@ fn plan_place(model: &mut Model, id: u32, book: Option<&SpellBookState>) -> Plac
     if same {
         return Place::Same;
     }
-    Place::Write(placed, lift(model, id, book))
+    Place::Write(placed, lift(model, id, book, face))
 }
 
 /// The spell slot `id` resolves to (`0x4e5a50`): a spell slot's own; a macro slot's bound spell
@@ -310,12 +329,11 @@ fn resolved_spell(model: &Model, id: u32) -> Option<u32> {
 }
 
 /// The stacks of `item_id` in the backpack and the four worn bags, the app's carried count.
-fn carried_count(model: &Model, item_id: u32) -> u32 {
-    (0..=4)
-        .filter_map(|bag| model.containers.get(&bag))
-        .flat_map(|c| c.slots.values())
-        .filter(|s| s.item_id == item_id)
-        .map(|s| s.count)
+fn carried_count(lua: &Lua, model: &Model, item_id: u32) -> u32 {
+    crate::script::held::bag_items(lua, model)
+        .into_iter()
+        .filter(|(bag, _, s)| (0..=4).contains(bag) && s.item_id == item_id)
+        .map(|(_, _, s)| s.count)
         .sum()
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::aa::skin_bounds::SkinBoundsError;
 use crate::aa::{AaEffective, AaMode, AaPolicy, AaReason, TemporalHistory, TemporalTarget};
-use crate::view::CAM_FOVY;
+use crate::view::world_fovy;
 use bevy::ecs::schedule::Schedule;
 use bevy::render::{ExtractSchedule, MainWorld};
 
@@ -14,7 +14,7 @@ fn key() -> DepthKey {
 }
 
 fn clip() -> Mat4 {
-    Mat4::perspective_infinite_reverse_rh(CAM_FOVY, 2.0, 1.0)
+    Mat4::perspective_infinite_reverse_rh(world_fovy(2.0), 2.0, 1.0)
 }
 
 fn bounds() -> Bounds3 {

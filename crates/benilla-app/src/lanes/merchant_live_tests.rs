@@ -247,20 +247,18 @@ fn the_merchant_events_fire_at_their_packets() {
     );
 }
 
-/// The list's `MERCHANT_SHOW` sits on the merchant lane at its handler's stamp, between the
-/// stamps of the handlers before and after it.
+/// The list's `MERCHANT_SHOW` fires inside its packet's dispatch, with no frame after it: the
+/// handler's signal runs every listener before the next packet's handler (`0x537ae5`, `0x703e50`).
 #[test]
-fn the_show_is_stamped_at_its_handler() {
+fn the_show_fires_inside_its_dispatch() {
     let mut c = client();
-    let before = crate::lanes::stamp();
     c.handle(vec![list(vec![row(1, 159)])]);
-    let after = crate::lanes::stamp();
     let lane = c.app.world().resource::<crate::ui_merchant::MerchantLane>();
-    let stamped = lane.stamped();
-    assert_eq!(stamped.len(), 1);
-    let (at, event) = stamped[0];
-    assert_eq!(event, crate::ui_merchant::MerchantEvent::Show);
-    assert!(before < at && at < after, "stamped inside the handler");
+    assert!(lane.stamped().is_empty(), "nothing left on the lane");
+    assert!(
+        c.seen().iter().any(|s| s == "MERCHANT_SHOW:nil"),
+        "the show fired inside the dispatch"
+    );
 }
 
 /// A row's missing record is asked by the getter's call with its callback, one wait per call
@@ -305,6 +303,62 @@ fn a_records_answer_and_the_buyback_watch_signal_at_their_packets() {
         ["CHAT_MSG_MONSTER_SAY:b", "MERCHANT_UPDATE:nil"],
         "the watch signals with no vendor open"
     );
+}
+
+/// A refusal's `MERCHANT_UPDATE` fires inside its walk, while the dying node stands: a listener's
+/// getter that asks the row again links its callback to the node and sends nothing. Raised by the
+/// last callback, the walk ends there and the node's destroy frees it uncalled (`0x55be9c`,
+/// `0x55bed2`); raised by one with a next, the walk reaches it, and its run with status 0 signals
+/// again, whose re-ask is then the last's. A later call asks again.
+#[test]
+fn a_getter_inside_a_refusals_walk_asks_nothing() {
+    refusal_walk(false);
+    refusal_walk(true);
+}
+
+/// [`a_getter_inside_a_refusals_walk_asks_nothing`], with a trade getter's wait after the row's
+/// when `behind`.
+fn refusal_walk(behind: bool) {
+    let mut c = client();
+    c.handle(vec![list(vec![row(1, UNCACHED)])]);
+    c.frame(vec![]);
+    c.seen();
+    c.eval::<()>(
+        true,
+        r#"
+        local f = CreateFrame("Frame")
+        f:RegisterEvent("MERCHANT_UPDATE")
+        f:SetScript("OnEvent", function() ReAsked = (GetMerchantItemInfo(1)) or "none" end)
+        GetMerchantItemInfo(1)
+        "#,
+    );
+    assert_eq!(c.item_queries(), 1);
+    if behind {
+        c.app
+            .world()
+            .resource::<crate::items::Items>()
+            .wait_for_trade_record(UNCACHED);
+    }
+    c.frame(vec![vec![SessionEvent::ItemTemplate {
+        entry: UNCACHED,
+        info: None,
+    }]]);
+    let updates: &[&str] = if behind {
+        &["MERCHANT_UPDATE:nil", "MERCHANT_UPDATE:nil"]
+    } else {
+        &["MERCHANT_UPDATE:nil"]
+    };
+    assert_eq!(c.seen(), updates, "the re-ask's run signals when reached");
+    assert_eq!(c.eval::<String>(false, "return ReAsked"), "none");
+    assert_eq!(c.item_queries(), 0, "nothing sent inside the walk");
+    let waits = c
+        .app
+        .world_mut()
+        .resource_mut::<crate::items::Items>()
+        .take_waiters(UNCACHED, crate::items::RecordCallback::Merchant);
+    assert_eq!(waits, 0, "nothing kept");
+    c.eval::<()>(true, "GetMerchantItemInfo(1)");
+    assert_eq!(c.item_queries(), 1, "a later call asks again");
 }
 
 /// The item queries sent since the last call, as their bodies go out.
@@ -436,4 +490,141 @@ fn a_buyback_rows_name_carries_its_suffix() {
     assert_eq!(c.eval::<String>(true, name), "Bandit Cloak of the Monkey");
     sold(&mut c, UNCACHED, 584, true);
     assert_eq!(c.eval::<String>(true, name), "Bandit Cloak", "wrapped");
+}
+
+/// A trainer's list in the vendor's frame takes the latch, whose release closes the vendor
+/// (`0x4930d0` → `0x4fae10`): the close's `MERCHANT_CLOSED` fires at that packet, after the
+/// vendor list's `MERCHANT_SHOW`, so the stock frame shows and then hides.
+#[test]
+fn a_close_in_the_lists_frame_fires_after_its_show() {
+    const TRAINER: u64 = 0xF130_0000_0000_0044;
+    let mut c = client();
+    c.app
+        .world_mut()
+        .resource_mut::<crate::ui_trainer::TrainerOpen>()
+        .asked = TRAINER;
+    let trainer = SessionEvent::TrainerList {
+        trainer: TRAINER,
+        trainer_type: 0,
+        services: Vec::new(),
+        greeting: String::new(),
+    };
+    c.frame(vec![vec![list(vec![row(1, 25)])], vec![trainer]]);
+    assert_eq!(c.seen(), ["MERCHANT_SHOW:nil", "MERCHANT_CLOSED:nil"]);
+}
+
+/// The verbs that test the purse read the coinage at the call, as `GetMoney` does (`0x518160`,
+/// `+0xf70`): `PickupPlayerMoney`'s gate (`0x494cc0`) passes on a coinage its packet wrote, with no
+/// push between, and refuses once a later packet lowers it.
+#[test]
+fn the_purse_tests_read_the_coinage_at_the_call() {
+    use benilla_protocol::field::FIELD_PLAYER_FIELD_COINAGE;
+    let mut c = client();
+    let pickup = "ClearCursor() PickupPlayerMoney(400) return GetCursorMoney()";
+    c.handle(vec![values(ME, &[(FIELD_PLAYER_FIELD_COINAGE, 500)])]);
+    assert_eq!(c.eval::<i64>(true, pickup), 400);
+    c.handle(vec![values(ME, &[(FIELD_PLAYER_FIELD_COINAGE, 300)])]);
+    assert_eq!(c.eval::<i64>(true, pickup), 0, "the purse falls short");
+}
+
+/// A bag item's repair cost read in a listener of each of two packets in one frame, each packet
+/// moving the open vendor's PvP flag and the purse: `SetBagItem` prices the object at the call
+/// after the vendor's discount (`0x534948` → `0x4faf30`, `0x4faf8a`), as stock
+/// `ContainerFrame.lua:267` reads it in its listeners, so each listener reads the vendor its own
+/// packet left, not the frame's last.
+#[test]
+fn a_repair_cost_reads_as_of_each_packet() {
+    use benilla_protocol::field::{
+        FIELD_PLAYER_FIELD_COINAGE, FIELD_PLAYER_INV_SLOT_HEAD, FIELD_UNIT_FLAGS,
+    };
+    /// `OBJECT_FIELD_ENTRY`, `ITEM_FIELD_STACK_COUNT`, `ITEM_FIELD_DURABILITY` and its maximum.
+    const ENTRY: u16 = 3;
+    const STACK: u16 = 14;
+    const DURABILITY: u16 = 46;
+    const MAX_DURABILITY: u16 = 47;
+    /// `PLAYER_BYTES_3`, absolute: byte 3 is the honor rank the discount steps by.
+    const PLAYER_BYTES_3: u16 = 195;
+    const SWORD: u64 = 0x4000_0000_0000_0707;
+    const SWORD_ENTRY: u32 = 2488;
+    let (full, discounted) = crate::ui_merchant::purse_fixture::sword_prices();
+    let mut c = client();
+    // One level-20 row at 1 copper a point for a sword (weapon subclass 7), quality 1 at 1.
+    let mut costs = vec![0u32; 29];
+    costs[7] = 1;
+    c.app.insert_resource(crate::ui_merchant::RepairTables(
+        benilla_formats::DurabilityTables::from_rows([(20, costs)], [1.0; 4]),
+    ));
+    let mut sword = crate::items::test_template("Sword");
+    (sword.class, sword.subclass, sword.quality, sword.item_level) = (2, 7, 1, 20);
+    c.app
+        .world_mut()
+        .resource_mut::<crate::items::Items>()
+        .insert_template(SWORD_ENTRY, Some(sword));
+    let pack_1 = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
+    c.frame(vec![
+        vec![
+            SessionEvent::ItemCreate {
+                guid: SWORD,
+                container: false,
+                fields: benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x3),
+                    (ENTRY, SWORD_ENTRY),
+                    (STACK, 1),
+                    (DURABILITY, 35),
+                    (MAX_DURABILITY, 75),
+                ])
+                .into_created(benilla_protocol::messages::ObjectType::Item),
+            },
+            values(
+                ME,
+                &[
+                    (pack_1, SWORD as u32),
+                    (pack_1 + 1, (SWORD >> 32) as u32),
+                    (PLAYER_BYTES_3, 8 << 24),
+                ],
+            ),
+        ],
+        vec![list(vec![row(1, 159)])],
+    ]);
+    c.frame(vec![]);
+    {
+        let script = c.app.world().non_send_resource::<UiScript>();
+        crate::ui_script::test_ui::load_tooltip_template(script);
+    }
+    c.eval::<()>(
+        false,
+        "Costs = {} \
+         CreateFrame('GameTooltip', 'TT', nil, 'TestTooltipTemplate'):SetOwner(CreateFrame('Frame'), 'ANCHOR_NONE') \
+         local f = CreateFrame('Frame') f:RegisterEvent('PLAYER_MONEY') \
+         f:SetScript('OnEvent', function() local _, cost = TT:SetBagItem(0, 1) table.insert(Costs, cost) end)",
+    );
+    c.frame(vec![
+        vec![
+            values(VENDOR, &[(FIELD_UNIT_FLAGS, 0x1000)]),
+            values(ME, &[(FIELD_PLAYER_FIELD_COINAGE, 1)]),
+        ],
+        vec![
+            values(VENDOR, &[(FIELD_UNIT_FLAGS, 0)]),
+            values(ME, &[(FIELD_PLAYER_FIELD_COINAGE, 2)]),
+        ],
+    ]);
+    assert_eq!(
+        c.eval::<Vec<i64>>(false, "return Costs"),
+        [i64::from(discounted), i64::from(full)]
+    );
+}
+
+/// A verb's `"npc"` is the interaction latch as the handlers leave it (`0x515c00`), with no frame
+/// between: the list's handler latches the vendor (`0x4930d0`), and `TargetUnit("npc")` selects
+/// it before any feed runs.
+#[test]
+fn a_verbs_npc_token_reads_the_latch_at_the_call() {
+    let mut c = client();
+    c.handle(vec![list(vec![row(1, 159)])]);
+    c.eval::<()>(true, "TargetUnit('npc')");
+    assert_eq!(
+        c.app.world().resource::<crate::target::Selection>().guid,
+        Some(VENDOR),
+        "the latch the list's handler set, read as the verb runs"
+    );
 }

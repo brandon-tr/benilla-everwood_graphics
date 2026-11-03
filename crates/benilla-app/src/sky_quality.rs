@@ -15,8 +15,12 @@ impl Plugin for SkyQualityPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SkyQuality>().add_systems(
             Update,
-            // MONKEY (integration): the tier lands before the sky and cloud readers.
-            bridge.before(benilla_world::lighting::LightingConsumeSet),
+            // MONKEY (integration): the tier lands before the sky and cloud readers, and after
+            // the frame's cvar drain — upstream's call host now runs the video callbacks inside
+            // the call, so the drain writes `VideoConfig` and the bridge must read it afterwards.
+            bridge
+                .after(crate::ui_script::UiDrain)
+                .before(benilla_world::lighting::LightingConsumeSet),
         );
     }
 }

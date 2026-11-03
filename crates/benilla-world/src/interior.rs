@@ -1207,7 +1207,6 @@ mod tests {
                 name_set: 0,
                 visible: vec![true],
                 interior_fog: vec![gate],
-                liquid_visited: vec![false],
                 flooded: vec![None],
             })
             .id()

@@ -22,7 +22,7 @@ pub use bind::macro_lines;
 use mlua::{Lua, MultiValue, Value};
 
 use super::binding_abi;
-use super::cursor::{set_cursor, CursorMacro, CursorPayload};
+use super::cursor::{set_cursor, CursorMacro, CursorPayload, Setter};
 use super::{Model, SpellBookState};
 
 /// Macros per scope (`0x4f1010` refuses the 19th, `cmp edx,0x12`), and so the character tab's base.
@@ -88,14 +88,6 @@ impl MacroBinding {
     }
 }
 
-/// The derivations a load owes: the load derives every record (`0x4f0a55` into `0x4f0ca0`), each
-/// new with its selector clear (`0x4f1ca0`). The app makes them once the VM holds the book.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct MacroDerives {
-    /// The table was loaded since the last take.
-    pub loaded: bool,
-}
-
 /// A record and the scope it belongs to (`rec+0x1c`).
 #[derive(Clone, Debug, PartialEq)]
 struct Record {
@@ -111,6 +103,10 @@ pub struct MacroState {
     list: Vec<Record>,
     /// The last id each scope handed out (`0xbdcbec`), the largest seen when macros load.
     last_id: [u32; 2],
+    /// Each scope's count of non-local macros (`0xbdcd04`): a load and a create add one, a delete
+    /// of a macro whose flag is clear takes one off, an edit moves none. Unsigned and wrapping, as
+    /// the reference's dword is.
+    non_local: [u32; 2],
 }
 
 impl Default for MacroState {
@@ -118,12 +114,13 @@ impl Default for MacroState {
         Self {
             list: Vec::new(),
             last_id: SCOPE_BASE,
+            non_local: [0; 2],
         }
     }
 }
 
 /// `SStrCopy`'s cut of `s` to at most `max` bytes, backed up to a character boundary.
-fn cut_bytes(s: &str, max: usize) -> &str {
+pub(super) fn cut_bytes(s: &str, max: usize) -> &str {
     let mut end = max.min(s.len());
     while !s.is_char_boundary(end) {
         end -= 1;
@@ -132,8 +129,8 @@ fn cut_bytes(s: &str, max: usize) -> &str {
 }
 
 /// A name as `SStrCopy` keeps it (`0x4f11fc`): its first [`MAX_MACRO_NAME`] bytes, not trimmed.
-/// Deviation: the reference's byte copy can end inside a character and keep the stray bytes; a
-/// `String` must stay UTF-8, so the cut stops at the character boundary.
+/// Deviation: the reference's byte copy can end inside a character and keep the stray bytes; here
+/// the cut stops at the character boundary because a `String` must stay UTF-8.
 fn cut_name(name: &str) -> String {
     cut_bytes(name, MAX_MACRO_NAME).to_string()
 }
@@ -158,34 +155,42 @@ impl MacroState {
     /// form, takes the scope's next. The name and body keep their verbs' caps.
     pub fn from_scopes(account: Vec<MacroView>, character: Vec<MacroView>) -> Self {
         let mut state = Self::default();
-        for (per_character, views) in [(false, account), (true, character)] {
-            let scope = usize::from(per_character);
-            for mut view in views {
-                if state.count(per_character) >= MAX_MACROS {
-                    break;
-                }
-                let seed = view.id == 0;
-                if seed {
-                    view.id = state.last_id[scope] + 1;
-                } else if (view.id as i32) < SCOPE_BASE[scope] as i32 {
-                    view.id = view.id.wrapping_add(SCOPE_BASE[scope]);
-                }
-                if view.id as i32 > state.last_id[scope] as i32 {
-                    state.last_id[scope] = view.id;
-                }
-                if state.by_id(view.id).is_some() || (!seed && view.name.is_empty()) {
-                    continue;
-                }
-                view.name = cut_name(&view.name);
-                view.body = cut_body(&view.body);
-                view.local_only = false;
-                state.list.push(Record {
-                    per_character,
-                    view,
-                });
-            }
-        }
+        state.merge_scope(false, account);
+        state.merge_scope(true, character);
         state
+    }
+
+    /// One scope's file read into the table as it stands (`0x4f0600`, per section): nothing is
+    /// emptied first, an id the table holds is skipped (`0x4f0789`), and the scope stops at 18
+    /// (`0x4f06ee`), its macros already there counted.
+    pub fn merge_scope(&mut self, per_character: bool, views: Vec<MacroView>) {
+        let scope = usize::from(per_character);
+        for mut view in views {
+            if self.count(per_character) >= MAX_MACROS {
+                break;
+            }
+            let seed = view.id == 0;
+            if seed {
+                view.id = self.last_id[scope] + 1;
+            } else if (view.id as i32) < SCOPE_BASE[scope] as i32 {
+                view.id = view.id.wrapping_add(SCOPE_BASE[scope]);
+            }
+            if view.id as i32 > self.last_id[scope] as i32 {
+                self.last_id[scope] = view.id;
+            }
+            if self.by_id(view.id).is_some() || (!seed && view.name.is_empty()) {
+                continue;
+            }
+            view.name = cut_name(&view.name);
+            view.body = cut_body(&view.body);
+            view.local_only = false;
+            // A loaded macro is non-local and counts (`0x4f09ae`-`0x4f09c4`).
+            self.non_local[scope] += 1;
+            self.list.push(Record {
+                per_character,
+                view,
+            });
+        }
     }
 
     /// A scope's macros in list order.
@@ -299,13 +304,7 @@ impl super::UiScript {
         model.macros = state;
         model.macros_dirty = false;
         model.macros_generation += 1;
-        model.macro_derives = MacroDerives { loaded: true };
         model.macro_bindings.clear();
-    }
-
-    /// Take the derivations owed since the last take ([`MacroDerives`]).
-    pub fn take_macro_derives(&mut self) -> MacroDerives {
-        std::mem::take(&mut self.model_mut().macro_derives)
     }
 
     /// The live table, for the app's save.
@@ -323,12 +322,23 @@ impl super::UiScript {
         self.model_ref().macro_bindings.clone()
     }
 
+    /// The cached cast of macro `id` (`[rec+0x564]`, `[rec+0x568]`, read by `0x4e5ba0`), `None`
+    /// while no macro holds the id (`0x4e5030`): what an action slot's macro word resolves to.
+    pub fn macro_binding(&self, id: u32) -> Option<MacroBinding> {
+        let model = self.model_ref();
+        model
+            .macros
+            .by_id(id)
+            .map(|_| model.macro_bindings.get(&id).copied().unwrap_or_default())
+    }
+
     /// Derive again (`0x4efe00`) each record `pick` names by its id and its cast now, against the
     /// books and the `/cast` aliases as they stand: the load's and the arrival's every record
     /// (`0x4f0ca0`), the pet message's followers (`0x4f0ce0`).
     pub fn derive_macro_bindings(&mut self, pick: impl Fn(u32, MacroBinding) -> bool) {
         let aliases = bind::cast_aliases(self.lua());
         let book = super::live::ask(self.lua(), &super::spellbook::BookNow);
+        let pet_book = super::live::ask(self.lua(), &super::PetBookNow);
         let mut model = self.model_mut();
         let model = &mut *model;
         for record in &model.macros.list {
@@ -339,7 +349,7 @@ impl super::UiScript {
                     &aliases,
                     &record.view.body,
                     book.as_ref().unwrap_or(&model.spellbook),
-                    &model.pet_book,
+                    pet_book.as_ref().unwrap_or(&model.pet_book),
                     was,
                 );
                 model.macro_bindings.insert(id, next);
@@ -378,13 +388,15 @@ impl super::UiScript {
     pub fn macros_generation(&self) -> u64 {
         self.model_mut().macros_generation
     }
-
-    /// How many `EditMacro` calls have edited a macro: each one's worker `EditMacroRecord 0x4f1280`
-    /// ends in the action bar's usable refresh `0x4e5c00` (`0x4f132e`), which the app runs.
-    pub fn macro_edits(&self) -> u64 {
-        self.model_mut().macro_edits
-    }
 }
+
+/// What a derivation reads: the `/cast` aliases and the two books as they stand through the host,
+/// `None` where the VM's copy answers.
+type Books<'a> = (
+    &'a [String],
+    Option<&'a SpellBookState>,
+    Option<&'a super::PetBookState>,
+);
 
 /// `CreateMacro`'s worker (`0x4f1010`): the new macro's 1-based index in the rebuilt table
 /// (`0x4f16ba`), or the full-scope error (`0x84cbdc`). The verb has refused an empty name already.
@@ -393,8 +405,8 @@ fn create_macro(
     name: &str,
     texture: Option<String>,
     body: &str,
-    (local_only, per_character): (bool, bool),
-    (aliases, book): (&[String], Option<&SpellBookState>),
+    (mut local_only, per_character): (bool, bool),
+    (aliases, book, pet_book): Books<'_>,
 ) -> mlua::Result<usize> {
     let state = &mut model.macros;
     if state.count(per_character) >= MAX_MACROS {
@@ -403,6 +415,14 @@ fn create_macro(
         )));
     }
     let scope = usize::from(per_character);
+    // A scope at 18 non-local macros, an unsigned compare, forces the new one local, and a macro
+    // that is not local adds one (`0x4f1055`-`0x4f106b`, `0x4f124d`-`0x4f1250`).
+    if state.non_local[scope] >= MAX_MACROS as u32 {
+        local_only = true;
+    }
+    if !local_only {
+        state.non_local[scope] += 1;
+    }
     state.last_id[scope] += 1;
     let id = state.last_id[scope];
     state.list.push(Record {
@@ -420,7 +440,7 @@ fn create_macro(
         aliases,
         &cut_body(body),
         book.unwrap_or(&model.spellbook),
-        &model.pet_book,
+        pet_book.unwrap_or(&model.pet_book),
         MacroBinding::default(),
     );
     model.macro_bindings.insert(id, binding);
@@ -443,7 +463,7 @@ fn edit_macro(
     index: usize,
     (name, texture, body): (Option<String>, Option<String>, Option<String>),
     local_only: bool,
-    (aliases, book): (&[String], Option<&SpellBookState>),
+    (aliases, book, pet_book): Books<'_>,
 ) -> usize {
     let id = model.macros.id_at(index);
     if let Some(record) = model
@@ -466,11 +486,11 @@ fn edit_macro(
         // The record's cast derived again in the call (`0x4f1313`), against the book as it is.
         let was = model.macro_bindings.get(&id).copied().unwrap_or_default();
         let player = book.unwrap_or(&model.spellbook);
-        let binding = bind::derive(aliases, &view.body, player, &model.pet_book, was);
+        let pet = pet_book.unwrap_or(&model.pet_book);
+        let binding = bind::derive(aliases, &view.body, player, pet, was);
         model.macro_bindings.insert(id, binding);
         model.macros_dirty = true;
         model.macros_generation += 1;
-        model.macro_edits += 1;
         // The order's rebuild (`0x4f1322` into `0x4f0d30`), then each slot that holds the id,
         // lowest first, signalled and sent nothing (`0x4f1329` into `0x4e5cc0`, `0x4e58e0`).
         model.raise("UPDATE_MACROS", vec![]);
@@ -482,11 +502,18 @@ fn edit_macro(
             .collect();
         held.sort_unstable();
         for slot in held {
+            model.call_in_verb(crate::script::ScriptCall::ActionBar(
+                crate::script::ActionBarCall::Notify { id: slot },
+            ));
             model.raise(
                 "ACTIONBAR_SLOT_CHANGED",
                 vec![crate::script::ScriptValue::Int(i64::from(slot))],
             );
         }
+        // The bar's usable cache refreshed last (`0x4f132e` into `0x4e5c00`), in the call.
+        model.call_in_verb(crate::script::ScriptCall::ActionBar(
+            crate::script::ActionBarCall::RefreshUsable,
+        ));
     }
     model.macros.index_of_id(id).unwrap_or(0)
 }
@@ -504,7 +531,12 @@ fn delete_macro(model: &mut Model, index: usize) -> bool {
     else {
         return false;
     };
-    model.macros.list.remove(at);
+    // A macro whose flag is clear takes one off its scope's count (`0x4f13a5`-`0x4f13af`).
+    let gone = model.macros.list.remove(at);
+    if !gone.view.local_only {
+        let scope = usize::from(gone.per_character);
+        model.macros.non_local[scope] = model.macros.non_local[scope].wrapping_sub(1);
+    }
     model.macro_bindings.remove(&id);
     super::cursor::clear_macro_slots(model, id);
     model.macros_dirty = true;
@@ -530,12 +562,14 @@ fn pickup_macro(lua: &Lua, index: usize) -> bool {
             texture: entry.texture.clone(),
         }
     };
-    set_cursor(lua, true, |_| Some(CursorPayload::Macro(payload)))
+    set_cursor(lua, true, Setter::Free, |_| {
+        Some(CursorPayload::Macro(payload))
+    })
 }
 
 /// Build the icon list if it is empty, as the three verbs do before they read it (`0x4f0090`
 /// behind a zero count). The source runs with no borrow of the model held. Deviation: a listing
-/// that finds no icon stays empty, to be listed again on the next ask, where the reference's
+/// that finds no icon stays empty, to be listed again on the next ask, because the reference's
 /// dedup then reads below its null list (`0x4f0134`-`0x4f0145`) and faults.
 fn ensure_macro_icons(lua: &Lua) {
     let source = {
@@ -679,8 +713,9 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 .unwrap_or_default();
             let flags = (flag(a.get(3)), flag(a.get(4)));
             let aliases = bind::cast_aliases(lua);
-            // The book as it stands, which the derivation reads in the call (`0x4f123c`).
+            // The books as they stand, which the derivation reads in the call (`0x4f123c`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
+            let pet_book = super::live::ask(lua, &super::PetBookNow);
             super::tick::verb(lua, |model| {
                 // `0x4f1632`, `0x4f163c`.
                 let texture = icon_at(model, icon);
@@ -690,7 +725,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     texture,
                     &body,
                     flags,
-                    (&aliases, book.as_ref()),
+                    (&aliases, book.as_ref(), pet_book.as_ref()),
                 )
             })
             .map(|i| Value::Integer(i as i64))
@@ -729,13 +764,14 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             let body = a.get(3).and_then(|v| binding_abi::optional_string(lua, v));
             let local_only = flag(a.get(4));
             let aliases = bind::cast_aliases(lua);
-            // The book as it stands, which the derivation reads in the call (`0x4f1313`).
+            // The books as they stand, which the derivation reads in the call (`0x4f1313`).
             let book = super::live::ask(lua, &super::spellbook::BookNow);
+            let pet_book = super::live::ask(lua, &super::PetBookNow);
             let at = super::tick::verb(lua, |model| {
                 // `0x4f1966`-`0x4f1983`: a miss leaves the pointer null, and the macro its old
                 // icon.
                 let texture = icon.and_then(|n| icon_at(model, n));
-                let reads = (aliases.as_slice(), book.as_ref());
+                let reads = (aliases.as_slice(), book.as_ref(), pet_book.as_ref());
                 edit_macro(model, index, (name, texture, body), local_only, reads)
             });
             Ok(Value::Integer(at as i64))
@@ -807,6 +843,67 @@ mod tests {
             )
             .unwrap(),
             (None, Some("Interface\\Icons\\".into()))
+        );
+    }
+
+    /// A host answering the pet's book with `.0`, as the app's pet family does.
+    struct PetBookHost(crate::script::PetBookState);
+
+    impl crate::script::CallHost for PetBookHost {
+        fn apply(
+            &mut self,
+            _: &mut UiScript,
+            _: crate::script::ScriptCall,
+        ) -> Option<crate::script::CallTail> {
+            None
+        }
+
+        fn read_live(&mut self, ask: &mut crate::script::live::LiveAsk<'_>) -> bool {
+            ask.answer(|_: &crate::script::PetBookNow| Some(self.0.clone()))
+        }
+    }
+
+    fn pet_book_of(spell_id: u32, name: &str) -> crate::script::PetBookState {
+        crate::script::PetBookState {
+            token: Some("PET".into()),
+            slots: vec![crate::script::SpellSlotView {
+                spell_id,
+                name: name.into(),
+                ..Default::default()
+            }],
+        }
+    }
+
+    /// `CreateMacro` and `EditMacro` derive the record's cast in the call against the pet's book
+    /// as it stands (`0x4f123c`, `0x4f1313` → `0x4b3950`), the host's, not the VM's empty copy.
+    #[test]
+    fn create_and_edit_derive_against_the_pets_book_as_it_stands() {
+        let mut s = seeded();
+        // The shipped `/cast` alias the derivation reads (`0x703bf0`).
+        s.run(r#"SLASH_CAST1 = "/cast""#).unwrap();
+        let bound = |s: &UiScript| s.macro_bindings().values().next().copied().unwrap();
+        let mut host = PetBookHost(pet_book_of(16827, "Claw"));
+        s.hosted(&mut host, |s| {
+            s.run(r#"CreateMacro("Claw", 1, "/cast Claw", nil, nil)"#)
+                .unwrap()
+        });
+        assert_eq!(
+            bound(&s),
+            MacroBinding {
+                spell: 16827,
+                pet_book: true
+            }
+        );
+        let mut host = PetBookHost(pet_book_of(2649, "Growl"));
+        s.hosted(&mut host, |s| {
+            s.run(r#"EditMacro(1, nil, nil, "/cast Growl")"#).unwrap()
+        });
+        assert_eq!(
+            bound(&s),
+            MacroBinding {
+                spell: 2649,
+                pet_book: true
+            }
         );
     }
 
@@ -930,6 +1027,48 @@ mod tests {
             0x4100_0008,
             "one past 0x1000007, in the character kind"
         );
+    }
+
+    /// Each scope counts its non-local macros (`0xbdcd04`): a create adds one when the macro is
+    /// not local (`0x4f124d`), a delete takes one off a macro whose flag is clear (`0x4f13a5`), and
+    /// an edit moves none (`0x4f12dc`). A local macro the stock UI edits to non-local and deletes
+    /// takes the count below zero, an unsigned 18 or more (`0x4f105c`), so every later create is
+    /// forced local (`0x4f106b`).
+    #[test]
+    fn the_non_local_count_forces_a_create_local_once_it_wraps() {
+        let s = seeded();
+        s.run(r#"CreateMacro("a", 1, "", 1) EditMacro(1, nil, nil, "x") DeleteMacro(1)"#)
+            .unwrap();
+        let local = s
+            .eval::<Value>(r#"CreateMacro("b", 1, "") local _, _, _, l = GetMacroInfo(1) return l"#)
+            .unwrap();
+        assert_eq!(local, Value::Integer(1));
+        // The other scope has its own count.
+        let other = s
+            .eval::<Value>(
+                r#"CreateMacro("c", 1, "", nil, 1) local _, _, _, l = GetMacroInfo(19) return l"#,
+            )
+            .unwrap();
+        assert_eq!(other, Value::Nil);
+    }
+
+    /// A loaded macro is non-local (`0x4f095c`) and counts (`0x4f09b5`), so deleting it balances.
+    #[test]
+    fn a_loaded_macro_counts_and_its_delete_balances() {
+        let mut s = seeded();
+        s.set_macros(MacroState::from_scopes(
+            vec![MacroView {
+                id: 1,
+                name: "m".into(),
+                ..Default::default()
+            }],
+            vec![],
+        ));
+        s.run(r#"DeleteMacro(1) CreateMacro("b", 1, "")"#).unwrap();
+        let local = s
+            .eval::<Value>(r#"local _, _, _, l = GetMacroInfo(1) return l"#)
+            .unwrap();
+        assert_eq!(local, Value::Nil);
     }
 
     #[test]

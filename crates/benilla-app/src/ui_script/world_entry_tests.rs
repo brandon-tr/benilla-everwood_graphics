@@ -45,6 +45,7 @@ fn roster_named(name: &str, guid: u64) -> Roster {
             y: 0.0,
             z: 0.0,
         },
+        guild_id: 0,
         flags: 0,
         equipment: [benilla_protocol::CharEnumItem::default(); 19],
         pet_display_id: 0,
@@ -229,7 +230,7 @@ fn quitting_from_the_character_screen_does_not_blank_the_session_it_wrote() {
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("the glue VM is live at the character screen");
     // At the character screen there is no active player and no world to sweep.
-    super::shutdown_ui_state(&mut script, identity.as_ref());
+    super::shutdown_ui_state(&mut script, identity.as_ref(), false);
 
     assert_eq!(
         std::fs::read_to_string(&saved).ok().as_deref(),
@@ -376,7 +377,7 @@ fn a_shutdown_with_no_world_fires_logout_without_leaving_world() {
         let mut script = app
             .world_mut()
             .non_send_resource_mut::<benilla_ui::script::UiScript>();
-        super::shutdown_ui_state(&mut script, None);
+        super::shutdown_ui_state(&mut script, None, false);
     };
     let seen = |app: &App, global: &str| {
         app.world()
@@ -552,6 +553,8 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
     }
     let mut loot = crate::ui_loot::LootState::default();
     loot.open(CLAM, 1, 0, Vec::new());
+    // Its `LOOT_OPENED` long fired, so the leg finds no open still queued on the loot lane.
+    loot.signals_fired();
     world.insert_resource(loot);
     // The clam's own object, `OBJECT_FIELD_TYPE` object and item, which the close looks up
     // (`0x48f29e`) before its unlock.
@@ -655,6 +658,60 @@ fn item_locks_cross_a_reload_as_its_sweep_leaves_them() {
         !locked(&world, TRADED),
         "a new world entry inherits no lock"
     );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The interface load builds a new camera, a login's as a `/reload`'s, which reads the views off
+/// their CVars (`0x481b4e` → `0x50c0e0`, `0x50c3db` → `0x50fb80`).
+#[test]
+fn the_interface_load_rereads_the_camera_views() {
+    use crate::cvars::Cvars;
+    use crate::player::camera_view::CameraViews;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("reload-views");
+    let mut world = booted_world();
+    world.init_resource::<Cvars>();
+    world.init_resource::<CameraViews>();
+
+    world.resource_mut::<Cvars>().set("cameraDistanceA", "20");
+    log_in_as(&mut world, "Onehunter", 1);
+    assert!(
+        world.resource::<CameraViews>().current_customised(),
+        "the login's new camera read the row"
+    );
+    world.resource_mut::<Cvars>().set("cameraDistanceA", "5.55");
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert!(
+        !world.resource::<CameraViews>().current_customised(),
+        "and so did the reload's"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `ReloadUI()`'s teardown destroys the camera with the world frame and its load builds a new one
+/// (`0x481e12`, `0x481b4e` → `0x50c0e0`), which counts as moved (`0x50c400`).
+#[test]
+fn a_reload_builds_a_new_camera() {
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("reload-camera");
+    let mut world = booted_world();
+    world.init_resource::<crate::player::CameraControl>();
+
+    log_in_as(&mut world, "Onehunter", 1);
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+
+    let rig = world.resource::<crate::player::CameraControl>();
+    assert!(rig.is_new_for_test());
 
     drop(world);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -862,6 +919,48 @@ fn a_ready_check_outlives_a_reload_and_not_a_login() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// The looking-for-group list is engine state (`0xbc6fd8`-`0xbc7620`) that only its reply's
+/// handler writes, and `ReloadUI()` does not run `InitializeGame`'s party init (`0x4e7c70`), so a
+/// reloaded VM reads the list; a login starts with none ([`crate::ui_social::seed_vm_lfg`]).
+#[test]
+fn the_lfg_list_outlives_a_reload_and_not_a_login() {
+    use benilla_ui::script::{LfgReply, LfgResultRead, UiScript};
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("lfg-list");
+    let mut world = booted_world();
+    let counts = |world: &World| -> (i64, i64) {
+        world
+            .non_send_resource::<UiScript>()
+            .eval("return GetNumLFGResults()")
+            .unwrap()
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    world
+        .non_send_resource_mut::<UiScript>()
+        .lfg_results(LfgReply {
+            count: Some(1),
+            total: Some(3),
+            records: vec![LfgResultRead {
+                name: "Aria".into(),
+                ..Default::default()
+            }],
+        });
+
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert_eq!(counts(&world), (1, 3), "the reloaded VM reads the list");
+
+    super::end_ui_session(&mut world);
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(counts(&world), (0, 0), "a login starts with none");
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `ReloadUI()` runs only the teardown and `UI_Init` (`0x495664`, `0x495669`); the roster's
 /// show-offline flag (`0xb73124`) is zeroed only by `InitGuildRoster` (`0x4d0a25`), from
 /// `InitializeGame` (`0x48f5ea`). So an addon's file scope, which runs before `VARIABLES_LOADED`
@@ -913,6 +1012,79 @@ fn the_roster_flag_outlives_a_reload_and_not_a_login() {
         seen(&world),
         0,
         "the next login's InitGuildRoster zeroed it"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A new interface's copy of the item records is seated at its load, before its first frame's
+/// feed: a read off the copy finds every record the cache holds from the load on, at a login and
+/// at a reload, as the reference's interface reads the one item cache from its first file
+/// (`0x55ba30`). The login's first packets dispatch in that frame, ahead of the feed.
+#[test]
+fn a_new_interfaces_item_records_are_seated_at_its_load() {
+    use benilla_ui::script::UiScript;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("item-records");
+    let mut world = booted_world();
+    world.init_resource::<crate::items::Items>();
+    world
+        .resource_mut::<crate::items::Items>()
+        .insert_template(25, Some(crate::items::test_template("Linen Cloth")));
+    // Off the VM's copy, with no host lent to read the cache through.
+    let copy = |world: &World| -> Option<String> {
+        world
+            .non_send_resource::<UiScript>()
+            .eval("return (GetItemInfo(25))")
+            .unwrap()
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        copy(&world).as_deref(),
+        Some("Linen Cloth"),
+        "a login's load"
+    );
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert_eq!(copy(&world).as_deref(), Some("Linen Cloth"), "a reload's");
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `GetDefaultLanguage` reads the held player (`0x49fce9`, zero values without one at `0x49fcf0`),
+/// and a login's load runs before the player's create can arrive (`0x401789`): its file scope gets
+/// nothing, whatever the roster row's race.
+#[test]
+fn a_logins_load_has_no_default_language() {
+    use benilla_ui::script::UiScript;
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "default-language",
+        "LanguageProbe",
+        "## Interface: 11200\nLanguageProbe.lua\n",
+        "LanguageProbeCount = table.getn({ GetDefaultLanguage() })\n",
+    );
+    let mut world = booted_world();
+    world.insert_resource(crate::ui_unit::DefaultLanguagesRes(
+        benilla_formats::DefaultLanguages::from_rows(&[(1, "Common")]),
+    ));
+
+    log_in_as(&mut world, "Onehunter", 1);
+    assert_eq!(
+        world
+            .non_send_resource::<UiScript>()
+            .eval::<i64>("return LanguageProbeCount")
+            .unwrap(),
+        0,
+        "no player yet, so no language"
     );
 
     drop(world);
@@ -1205,17 +1377,15 @@ fn an_addon_error_while_entering_world_reports_on_screen_and_the_sibling_loads()
         "the addon AFTER the broken one still loads — a neighbour's error drops only itself"
     );
 
-    // The app's per-frame drain runs the dispatch; the test runs the same call.
-    let mut script = world
+    let script = world
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("VM");
-    script.dispatch_script_errors_to_handler();
     assert!(
         script
             .eval::<bool>("return ScriptErrors:IsVisible()")
             .expect("ScriptErrors exists — BasicControls loaded"),
         "the ScriptErrors dialog is on screen — `seterrorhandler(_ERRORMESSAGE)` is installed \
-         and the engine dispatched the caught error to it"
+         and heard the file's error as it ran"
     );
     let shown: String = script
         .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
@@ -1251,11 +1421,11 @@ fn a_looping_addon_cannot_freeze_world_entry() {
         Some("Onehunter"),
         "the addon after the spinner still loads — the budget failed one addon, not the entry"
     );
-    // The budget raise reaches the handler queue, so the dialog names the loop.
-    let mut script = world
+    // The budget's abort runs no handler; disarming the budget hands it to the error function,
+    // so the dialog names the loop.
+    let script = world
         .remove_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("VM");
-    script.dispatch_script_errors_to_handler();
     let shown: String = script
         .eval::<Option<String>>("return ScriptErrors_Message:GetText()")
         .expect("eval")
@@ -1382,8 +1552,8 @@ fn leaving_inside_the_deferral_window_drops_the_load_and_writes_nothing() {
 
 // ───────────── The login one-shots wait for the in-game UI ─────────────
 
-/// An app running the unit feed after `Startup`, with what the feed reads; the receiver is the
-/// wire, kept alive beside it.
+/// An app running the unit-feed pass and the arrival lane after `Startup`, with what they read;
+/// the receiver is the wire, kept alive beside it.
 fn unit_feed_app() -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
     let mut app = App::new();
     app.add_plugins(crate::ui_unit::UiUnitPlugin);
@@ -1399,14 +1569,14 @@ fn unit_feed_app() -> (App, crossbeam_channel::Receiver<crate::net::ClientComman
     app.init_resource::<crate::ui_chat::ChatLog>();
     app.init_resource::<crate::ui_guild::GuildState>();
     app.add_message::<crate::creature_anim::SwingImpact>();
-    app.add_message::<crate::net::WorldEnterCascadeMessage>();
+    app.add_plugins(crate::ui_world_enter::WorldEnterPlugin);
     // The glue VM, which stands until the entry load and must hear none of the in-game events.
     super::setup_script(app.world_mut());
     (app, rx)
 }
 
-/// The unit feed's login one-shots (`PLAYER_ENTERING_WORLD`, the first `PLAYER_XP_UPDATE` and
-/// `UPDATE_EXHAUSTION`) wait for the in-game UI instead of reaching a VM with no frames.
+/// The arrival's `PLAYER_ENTERING_WORLD` waits for the in-game UI instead of reaching a VM with no
+/// frames.
 #[test]
 fn the_login_one_shots_wait_for_the_in_game_ui() {
     let _l = ENV_LOCK
@@ -1433,7 +1603,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
             .non_send_resource::<benilla_ui::script::UiScript>(),
     );
 
-    // Our own descriptor has landed, the feed's condition for the one-shots.
+    // Our own create has landed, and its arrival is on the lane.
     app.world_mut().spawn((
         crate::net::SelfPlayer,
         crate::net::Guid(1),
@@ -1442,6 +1612,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
                 .into_created(benilla_protocol::messages::ObjectType::Player),
         ),
     ));
+    crate::ui_world_enter::push_arrival(app.world_mut());
 
     let seen = |app: &App| -> i64 {
         app.world()
@@ -1468,11 +1639,11 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
         assert_eq!(
             seen(&app),
             0,
-            "frame {frame}: the feed must not spend PLAYER_ENTERING_WORLD on a UI-less VM"
+            "frame {frame}: the arrival must not spend PLAYER_ENTERING_WORLD on a UI-less VM"
         );
     }
 
-    // The entry load has run, its VM in place of the glue's: the next feed delivers the one-shots.
+    // The entry load has run, its VM in place of the glue's: the next frame fires the arrival.
     let ingame = benilla_ui::script::UiScript::new().expect("the entry's VM");
     probe(&ingame);
     app.world_mut().insert_non_send_resource(ingame);
@@ -1482,7 +1653,7 @@ fn the_login_one_shots_wait_for_the_in_game_ui() {
     assert_eq!(
         seen(&app),
         1,
-        "with the UI up the one-shot fires — once, on the first feed after the load"
+        "with the UI up the one-shot fires — once, on the first frame after the load"
     );
     app.update();
     assert_eq!(seen(&app), 1, "and exactly once per world entry");
@@ -1746,8 +1917,6 @@ fn each_character_gets_its_own_layout_cache() {
 /// writes it back in the reference's rect form, so a player's windows survive the change.
 #[test]
 fn an_anchor_form_file_is_restored_and_rewritten_as_the_rect() {
-    use bevy::ecs::system::RunSystemOnce;
-
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1765,9 +1934,7 @@ fn an_anchor_form_file_is_restored_and_rewritten_as_the_rect() {
     )
     .unwrap();
     author_a_window(&mut world);
-    world
-        .run_system_once(crate::ui_layout::load_layout)
-        .expect("the layout loader ran");
+    register_the_layout_reader(&mut world);
     let (w, h, left, _) = window_geometry(&world);
     assert_eq!(
         (w, h, left),
@@ -1787,13 +1954,12 @@ fn an_anchor_form_file_is_restored_and_rewritten_as_the_rect() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// A layout section the server's file replaced is seated again into the live tree, as the
-/// reference's reader (`0x490380`) runs once the section lands (`0x5afd19`); without the arrival
-/// the loader reads once per VM.
+/// The layout reader (`0x490380`) registers through `0x5afe50` (`0x4900c2`) as the interface
+/// loads: held while its section is pending, it seats the file once the section settles
+/// (`0x5afaca`), and again into the live tree when the server's file lands (`0x5afd19`); otherwise
+/// it reads once per VM.
 #[test]
-fn a_layout_section_from_the_server_is_seated_again() {
-    use bevy::ecs::system::RunSystemOnce;
-
+fn the_layout_reader_waits_for_its_section_and_seats_each_settling() {
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1808,13 +1974,20 @@ fn a_layout_section_from_the_server_is_seated_again() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "Frame: LayoutProbe\nW: 413\nH: 147\n").unwrap();
     author_a_window(&mut world);
-    let load = |world: &mut World| {
-        world
-            .run_system_once(crate::ui_layout::load_layout)
-            .expect("the layout loader ran")
-    };
+    let load = crate::ui_layout::reread_arrived_layout;
     load(&mut world);
-    assert_eq!(window_geometry(&world).0, 413.0);
+    assert_eq!(
+        window_geometry(&world).0,
+        100.0,
+        "pending: the reader is held"
+    );
+    load(&mut world);
+    assert_eq!(window_geometry(&world).0, 100.0, "still pending");
+    world
+        .resource::<crate::account_data::AccountData>()
+        .settle_section_for_test(crate::account_data::LAYOUT);
+    load(&mut world);
+    assert_eq!(window_geometry(&world).0, 413.0, "settled: the file seated");
 
     std::fs::write(&path, "Frame: LayoutProbe\nW: 222\nH: 111\n").unwrap();
     load(&mut world);
@@ -1858,6 +2031,67 @@ fn a_reload_arms_the_sections_its_shutdown_writes() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A spy on the interface load's signals, by name, in the order heard.
+const ORDER_PROBE_LUA: &str = "\
+OrderProbe = {}
+local f = CreateFrame(\"Frame\")
+f:RegisterEvent(\"VARIABLES_LOADED\")
+f:RegisterEvent(\"UPDATE_BINDINGS\")
+f:RegisterEvent(\"UPDATE_MACROS\")
+f:SetScript(\"OnEvent\", function() table.insert(OrderProbe, event) end)
+";
+
+/// A `/reload` meets every section settled, so the readers run inside the interface load
+/// (`0x495669` → `0x48fbf0`) where they register: `VARIABLES_LOADED` (`0x4900b2` → `0x4913b0`),
+/// then the bindings reader, whose set choice signals `UPDATE_BINDINGS` (`0x4900c7` → `0x4b62b0`
+/// → `0x5afe50` → `0x4b6240`; `0x4b629a` → `0x4b64b0` → `0x4b6310(2, 3)` → `0x4b649d`), then the
+/// macro reader, once per scope, each rebuilding the order and signalling `UPDATE_MACROS`
+/// (`0x4900d1` → `0x4f0a70` → `0x4f0600` → `0x4f0a50` → `0x4f0d30`).
+#[test]
+fn a_reload_signals_the_settled_readers_inside_its_load_in_order() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "reload-reader-order",
+        "OrderProbe",
+        "## Interface: 11200\nOrderProbe.lua\n",
+        ORDER_PROBE_LUA,
+    );
+    let mut world = booted_world();
+    world.init_resource::<crate::account_data::AccountData>();
+    world.init_resource::<crate::ui_macro::MacroFiles>();
+    log_in_as(&mut world, "Onehunter", 1);
+    world
+        .resource::<crate::account_data::AccountData>()
+        .settle_for_test(Some(("Realm".into(), "Onehunter".into())));
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    let heard: Vec<String> = crate::script_calls::eval_in_vm(&world, "return OrderProbe");
+    assert_eq!(
+        heard,
+        [
+            "VARIABLES_LOADED",
+            "UPDATE_BINDINGS",
+            "UPDATE_MACROS",
+            "UPDATE_MACROS"
+        ]
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The layout reader's registration as the interface load makes it
+/// ([`crate::ui_layout::register_layout_reader`]), run again on the live VM once a test has
+/// authored its window, which this harness's load has no file to author.
+fn register_the_layout_reader(world: &mut World) {
+    let mut script = world
+        .remove_non_send_resource::<benilla_ui::script::UiScript>()
+        .expect("a VM");
+    crate::ui_layout::register_layout_reader(world, &mut script);
+    world.insert_non_send_resource(script);
+}
+
 /// The probe window as FrameXML authors it, the fresh tree a relog meets: not user-placed, with the
 /// authored `movable`/`resizable` pair the cache's apply reads off the live frame.
 fn author_a_window(world: &mut World) {
@@ -1886,11 +2120,10 @@ fn window_geometry(world: &World) -> (f32, f32, f32, f32) {
 }
 
 /// Place a window, `/reload`, meet the authored tree, and the loader seats the saved geometry back.
-/// [`crate::ui_layout::load_layout`] runs directly: this harness drives edges, not schedules.
+/// The reader's registration runs again directly, once the window is authored
+/// ([`register_the_layout_reader`]): this harness drives edges, not schedules.
 #[test]
 fn a_placed_window_comes_back_after_a_reload() {
-    use bevy::ecs::system::RunSystemOnce;
-
     let _l = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1910,9 +2143,7 @@ fn a_placed_window_comes_back_after_a_reload() {
         "the rebuilt tree starts on its authored anchors — otherwise this proves nothing"
     );
 
-    world
-        .run_system_once(crate::ui_layout::load_layout)
-        .expect("the layout loader ran");
+    register_the_layout_reader(&mut world);
     benilla_ui::assert_near!(
         window_geometry(&world),
         placed,
@@ -2058,8 +2289,10 @@ MapProbeZones = table.getn({ GetMapZones(1) })
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Stock `ActionButton_OnLoad` paints its hotkey from `GetBindingKey` at load, so the key table,
-/// the install's defaults, is seeded before any file runs; an addon's rebind takes at file scope.
+/// An addon's file scope reads an empty key table: the load builds the binding object anew
+/// (`0x48feb0` → `0x4b6050`) and fills the live set only at the readers' registration, after the
+/// addons (`0x4900c7` → `0x4b62b0`, `0x4b64b0`). A rebind still takes there, since `SetBinding`
+/// checks the key alone (`0x4b7890`), and the set choice then replaces it.
 #[test]
 fn an_addon_reads_the_keybinding_table_at_file_scope() {
     const TOC: &str = "\
@@ -2082,20 +2315,25 @@ BindProbeSet = SetBinding(\"J\", \"TOGGLEWORLDMAP\")
     let script = world
         .get_non_send_resource::<benilla_ui::script::UiScript>()
         .expect("VM");
-    // The defaults are the install's `WTF\DefaultBindings.wtf`: none without one.
     assert_eq!(
-        script
-            .eval::<Option<String>>("BindProbeKey")
-            .ok()
-            .flatten()
-            .as_deref(),
-        benilla_formats::wow_data().map(|_| "M"),
-        "an addon's file scope must read the stock binding — `M` is TOGGLEWORLDMAP's own default"
+        script.eval::<Option<String>>("BindProbeKey").ok().flatten(),
+        None,
+        "an addon's file scope reads the empty live set: the readers have not run"
     );
     assert_eq!(
         script.eval::<Option<u32>>("BindProbeSet").ok().flatten(),
         Some(1),
-        "…and a rebind of a stock command must take, not answer the empty table's silent nil"
+        "…and a rebind there takes, the key alone checked"
+    );
+    // The defaults are the install's `WTF\DefaultBindings.wtf`: none without one.
+    assert_eq!(
+        script
+            .eval::<Option<String>>("return GetBindingKey(\"TOGGLEWORLDMAP\")")
+            .ok()
+            .flatten()
+            .as_deref(),
+        benilla_formats::wow_data().map(|_| "M"),
+        "the load's set choice fills the live set from the defaults, over the file-scope rebind"
     );
 
     drop(world);
@@ -2390,6 +2628,23 @@ fn a_login_and_a_reload_load_without_the_lost_target_sound() {
 
 // ───────────── PLAYER_LOGIN fires from the world-enter cascade ─────────────
 
+/// The whole client's world in game for `name`, driven by hand as the app's frame drives it: the
+/// load, then each create's arrival fired on its lane ([`fire_lanes`]) with the host lent, so every
+/// getter reads the objects through it. The receiver is the wire, kept alive beside it.
+fn hosted_entry_app(name: &str) -> (App, crossbeam_channel::Receiver<crate::net::ClientCommand>) {
+    let mut app = crate::game_plugins::schedule_tests::headless_client_unrun();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    app.insert_resource(crate::net::NetCommands(tx));
+    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
+    app.insert_resource(roster_named(name, 1));
+    (app, rx)
+}
+
+/// The frame's lanes, the arrival's among them, as the drain fires them.
+fn fire_lanes(app: &mut App) {
+    crate::lanes::fire_in_order(app.world_mut());
+}
+
 /// Records what file scope and the two cascade events see of `"player"`, in order.
 const LOGIN_PROBE_LUA: &str = "\
 LoginProbe = { order = \"\", fileExists = tostring(UnitExists(\"player\")),
@@ -2412,20 +2667,31 @@ const LOGIN_PROBE_TOC: &str = "## Interface: 11200\nLoginProbe.lua\n";
 /// Our own player as its create lands: level 17, 1234 of 5000 XP.
 fn spawn_self_player(world: &mut World) -> Entity {
     use benilla_protocol::messages::{ObjectFields, ObjectType};
-    // `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, 716 and 717 in the 1.12 descriptor.
+    // `OBJECT_FIELD_TYPE`, then `PLAYER_XP` and `PLAYER_NEXT_LEVEL_XP`, 716 and 717 in the 1.12
+    // descriptor.
     let fields = ObjectFields::from_pairs(&[
+        (2, 0x19),
         (benilla_protocol::field::FIELD_UNIT_LEVEL, 17),
         (716, 1234),
         (717, 5000),
     ])
     .into_created(ObjectType::Player);
-    world
+    let me = world
         .spawn((
             crate::net::SelfPlayer,
             crate::net::Guid(1),
             crate::net::ObjectStore(fields),
         ))
-        .id()
+        .id();
+    if let Some(mut index) = world.get_resource_mut::<crate::net::GuidIndex>() {
+        index.0.insert(1, me);
+    }
+    if let Some(mut own) = world.get_resource_mut::<crate::net::SelfGuid>() {
+        own.0 = Some(1);
+    }
+    // The create's arrival (`0x5dec7b`), as our own create's handler pushes it.
+    crate::ui_world_enter::push_arrival(world);
+    me
 }
 
 /// A probe global off the live VM, as a string.
@@ -2449,9 +2715,7 @@ fn player_login_fires_from_the_world_entry_with_the_player_seated() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("login", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probelogin", 1));
+    let (mut app, _rx) = hosted_entry_app("Probelogin");
     super::load_ingame_ui_on_world_entry(app.world_mut());
 
     assert_eq!(
@@ -2466,20 +2730,20 @@ fn player_login_fires_from_the_world_entry_with_the_player_seated() {
     );
 
     let me = spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW ",
         "PLAYER_LOGIN sees the player's own unit, then PLAYER_ENTERING_WORLD fires at once"
     );
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     // A cross-map worldport: the player object is destroyed and created again.
     app.world_mut().despawn(me);
-    app.update();
+    fire_lanes(&mut app);
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW PEW ",
@@ -2561,12 +2825,10 @@ fn the_world_enter_cascade_resolves_the_player_for_its_handlers() {
         "## Interface: 11200\nPaneProbe.lua\n",
         PANE_PROBE_LUA,
     );
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probepane", 1));
+    let (mut app, _rx) = hosted_entry_app("Probepane");
     super::load_ingame_ui_on_world_entry(app.world_mut());
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
 
     let s = app
         .world()
@@ -2590,12 +2852,10 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (tmp, _c, _h) = hermetic_addon("relogin", "LoginProbe", LOGIN_PROBE_TOC, LOGIN_PROBE_LUA);
-    let (mut app, _rx) = unit_feed_app();
-    app.insert_resource(State::new(crate::client_state::ClientState::InWorld));
-    app.insert_resource(roster_named("Probelogin", 1));
+    let (mut app, _rx) = hosted_entry_app("Probelogin");
     super::load_ingame_ui_on_world_entry(app.world_mut());
     spawn_self_player(app.world_mut());
-    app.update();
+    fire_lanes(&mut app);
     assert_eq!(login_probe(&app, "order"), "LOGIN:1:17:1234 PEW ");
 
     reload(app.world_mut(), crate::client_state::ClientState::InWorld);
@@ -2607,13 +2867,58 @@ fn a_reload_fires_player_login_once_against_the_live_player() {
         ("1".to_string(), "17".to_string()),
         "the reloaded file scope runs against the live player"
     );
-    app.update();
-    app.update();
+    fire_lanes(&mut app);
+    fire_lanes(&mut app);
     assert_eq!(
         login_probe(&app, "order"),
         "LOGIN:1:17:1234 PEW ",
         "the new VM gets PLAYER_LOGIN then PLAYER_ENTERING_WORLD, once each"
     );
+
+    drop(app);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The lockouts are the engine's, which a `/reload` keeps: the handler stores the list and its
+/// count (`[0xb6e5e8]`, `0x49e1a2`) before it signals (`0x49e1a7`), and `GetNumSavedInstances`
+/// reads the count at the call (`0x4a18f6`). So the reloaded files read them at file scope, where
+/// the world entry's ran before the list landed.
+#[test]
+fn a_reloads_files_read_the_lockouts_the_engine_holds() {
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_addon(
+        "lockouts",
+        "LockoutProbe",
+        "## Interface: 11200\nLockoutProbe.lua\n",
+        "local _, id = GetSavedInstanceInfo(1)\nLockoutProbe = GetNumSavedInstances() .. \":\" .. id\n",
+    );
+    let probe = |app: &App| {
+        app.world()
+            .non_send_resource::<benilla_ui::script::UiScript>()
+            .eval::<Option<String>>("return LockoutProbe")
+            .unwrap()
+    };
+    let (mut app, _rx) = hosted_entry_app("Probelock");
+    super::load_ingame_ui_on_world_entry(app.world_mut());
+    spawn_self_player(app.world_mut());
+    fire_lanes(&mut app);
+    crate::net::handlers::dispatch(
+        app.world_mut(),
+        vec![benilla_protocol::SessionEvent::RaidInstanceInfo {
+            entries: vec![benilla_protocol::messages::RaidInstanceEntry {
+                map: 409,
+                reset: 3600,
+                instance: 77,
+            }],
+        }],
+    );
+    fire_lanes(&mut app);
+    assert_eq!(probe(&app).as_deref(), Some("0:0"), "the entry's files");
+
+    reload(app.world_mut(), crate::client_state::ClientState::InWorld);
+    assert_eq!(probe(&app).as_deref(), Some("1:77"), "the reload's");
 
     drop(app);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -2935,6 +3240,58 @@ fn a_reload_keeps_the_damage_text_font_the_login_read() {
         face(&world).as_deref(),
         Some("Fonts\\SECOND.TTF"),
         "the next world entry does"
+    );
+
+    drop(world);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A `/reload` releases every command: its shutdown's leave clears the once-per-world latch
+/// (`0x490c20`, `0x490a8d`), so the re-init's world-enter cascade runs its release of every
+/// command (`0x490168` → `0x4908c0` → `0x49093c` → `0x5144c0`). A right held and a mouselook
+/// through a reload are gone after it: a left press arms its click, and no look channel stands.
+#[test]
+fn a_reload_releases_the_mouse_commands_and_the_mouselook() {
+    use benilla_ui::script::{ClickCall, ClickMode, UiScript};
+    benilla_formats::wow_data_or_skip!();
+    let _l = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (tmp, _c, _h) = hermetic_probe("mouse-commands");
+    let mut world = booted_world();
+    world.init_resource::<crate::player::CameraControl>();
+    world.init_resource::<crate::bindings::BindingsState>();
+    // Whether a left press's `CameraOrSelectOrMoveStart` arms a click (`0x51481a`).
+    let left_arms = |world: &mut World| {
+        let mut script = world.non_send_resource_mut::<UiScript>();
+        script.take_click_calls();
+        script
+            .run_binding("CameraOrSelectOrMoveStart() CameraOrSelectOrMoveStop()")
+            .unwrap();
+        script.take_click_calls().first() == Some(&ClickCall::Arm(ClickMode::Select))
+    };
+
+    log_in_as(&mut world, "Onehunter", 1);
+    world.spawn(crate::net::SelfPlayer);
+    world
+        .non_send_resource::<UiScript>()
+        .run_binding("TurnOrActionStart()")
+        .unwrap();
+    world.resource_scope(|world, mut binds: Mut<crate::bindings::BindingsState>| {
+        world
+            .resource_mut::<crate::player::CameraControl>()
+            .world_mouse
+            .mouselook_for_test(&mut binds);
+    });
+    assert!(!left_arms(&mut world), "the right command holds its bit");
+
+    reload(&mut world, crate::client_state::ClientState::InWorld);
+    assert!(left_arms(&mut world), "the reloaded VM holds no bit");
+    assert!(
+        !world
+            .resource::<crate::bindings::BindingsState>()
+            .pressed(crate::bindings::Input::TurnOrAction),
+        "the reload ended the mouselook"
     );
 
     drop(world);

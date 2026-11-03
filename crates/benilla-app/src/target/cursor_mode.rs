@@ -157,7 +157,7 @@ const ATTACK_RANGE_SQ: f32 = 109.2025;
 pub(super) const MELEE_OFFSET: f32 = 1.333_33;
 pub(super) const MELEE_FLOOR: f32 = 5.0;
 
-pub(super) fn melee_reach(target: &ObjectStore, me: &ObjectStore) -> f32 {
+pub(crate) fn melee_reach(target: &ObjectStore, me: &ObjectStore) -> f32 {
     (target.0.unit_combat_reach() + me.0.unit_combat_reach() + MELEE_OFFSET).max(MELEE_FLOOR)
 }
 
@@ -724,7 +724,7 @@ pub(super) fn classify_cursor(
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct CursorInputs<'w, 's> {
     relations: super::RelationWorld<'w, 's>,
-    player: Res<'w, crate::player::Player>,
+    lock: Res<'w, crate::player::MoverLock>,
     // The attack leg's `[0xb4b3e4]` clear.
     own_control: Res<'w, crate::player::OwnControlLost>,
     approach: Res<'w, crate::player::Approach>,
@@ -762,7 +762,7 @@ pub(super) fn classify(
 ) -> (WorldCursor, AttackFork) {
     let CursorInputs {
         relations,
-        player,
+        lock,
         own_control,
         approach,
         units,
@@ -780,7 +780,7 @@ pub(super) fn classify(
     let can_auto_interact = crate::player::can_auto_interact(
         approach.enabled,
         self_q.single().ok().map(|(_, s)| s),
-        player,
+        lock,
     );
     // A GameObject that is not highlightable clears the cursor, as the reference's handler does.
     let resolve_go = || {

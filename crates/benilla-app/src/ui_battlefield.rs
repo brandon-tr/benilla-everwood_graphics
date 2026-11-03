@@ -19,7 +19,7 @@ use benilla_ui::script::{
     BattlefieldCall, BattlefieldListView, BattlefieldMapInfo, BattlefieldQueueSlot, UiScript,
 };
 
-use crate::net::{ClientCommand, NetCommands, WorldEnterCascadeMessage};
+use crate::net::{ClientCommand, NetCommands};
 use crate::player::Player;
 use crate::ui_dialog_verbs::BattlefieldQueue;
 use crate::ui_party::GroupState;
@@ -50,6 +50,11 @@ pub(crate) struct Battlefield {
 }
 
 impl Battlefield {
+    /// The teardown's free of the notices' name callbacks, running none (`0x55f990`).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.players.clear();
+    }
+
     pub(crate) fn apply_list(&mut self, list: BattlefieldList) {
         self.list = Some(list);
     }
@@ -330,37 +335,41 @@ impl BattlefieldSteps<'_> {
     }
 }
 
-/// The world-enter cascade's battlefield init (`0x4909fb` → `0x4a9db0`), after the mail query: the
-/// list, the notices waiting on names and the anchor clear, the queue slots stay, and the bodyless
-/// `CMSG_BATTLEFIELD_STATUS` goes out, answered slot by slot. The VM's selection clears with them
-/// ([`reset_selection_on_world_enter`]).
+/// The world-enter cascade's battlefield init (`0x4909fb` → `0x4a9db0`), after the mail query, in
+/// the cascade's place ([`crate::ui_world_enter`]): the list, the notices waiting on names and the
+/// anchor clear, the queue slots stay; the selected instance id the VM holds clears with them
+/// (`[0xb6eba0]`, `0x4a9dc1`), and so do the score board's scalars and the teammate positions with
+/// their request stamp (`0x4a9e55`-`0x4a9e93`, [`crate::ui_battlefield_score`],
+/// [`crate::ui_battlefield_positions`]); then the bodyless `CMSG_BATTLEFIELD_STATUS` goes out
+/// (`0x4a9eba`), answered slot by slot. It fires no event.
+#[allow(clippy::type_complexity)]
 pub(crate) fn reset_on_world_enter(
-    mut cascades: MessageReader<WorldEnterCascadeMessage>,
-    mut state: ResMut<Battlefield>,
-    mut leash: ResMut<BattlefieldLeash>,
+    mut vm: crate::script_calls::VmWith<(
+        Option<ResMut<'static, Battlefield>>,
+        Option<ResMut<'static, BattlefieldLeash>>,
+        Option<ResMut<'static, crate::ui_battlefield_positions::BattlefieldPositions>>,
+        Option<ResMut<'static, crate::ui_battlefield_score::BattlefieldScoreboard>>,
+    )>,
     commands: Res<NetCommands>,
 ) {
-    if cascades.read().next().is_none() {
-        return;
-    }
-    state.clear_session();
-    leash.0 = None;
-    let _ = commands.0.send(ClientCommand::BattlefieldStatusRequest);
-}
-
-/// The cascade's clear of the selected instance id (`[0xb6eba0]`, `0x4a9db0`), which the VM holds.
-fn reset_selection_on_world_enter(
-    mut cascades: MessageReader<WorldEnterCascadeMessage>,
-    mut vm: crate::script_calls::HostedVm,
-) {
-    if cascades.read().next().is_none() {
-        return;
-    }
-    vm.run(|script| {
+    vm.turn(|script, (state, leash, positions, board)| {
         if let Some(script) = script {
             script.reset_battlefield_selection();
         }
+        if let Some(mut state) = state {
+            state.clear_session();
+        }
+        if let Some(mut leash) = leash {
+            leash.0 = None;
+        }
+        if let Some(mut board) = board {
+            *board = Default::default();
+        }
+        if let Some(mut positions) = positions {
+            positions.world_enter();
+        }
     });
+    let _ = commands.0.send(ClientCommand::BattlefieldStatusRequest);
 }
 
 /// The battlemaster window's and the queue's packet handlers.
@@ -436,7 +445,7 @@ mod net {
         mut positions: ResMut<crate::ui_battlefield_positions::BattlefieldPositions>,
         reads: crate::ui_battlefield_score::BoardReads,
         catalog: Option<Res<crate::world_state_ui::WorldStateUiRes>>,
-        tutorials: Option<MessageWriter<crate::tutorial::TutorialEvent>>,
+        tutorials: Option<Res<crate::tutorial::Tutorials>>,
     ) {
         let SessionEvent::BattlefieldStatus(status) = ev else {
             return;
@@ -444,8 +453,8 @@ mod net {
         let Some(applied) = queue.apply(status) else {
             return;
         };
-        if let (Some(id), Some(mut tutorials)) = (applied.tutorial, tutorials) {
-            tutorials.write(crate::tutorial::TutorialEvent::trigger(id));
+        if let (Some(id), Some(tutorials)) = (applied.tutorial, tutorials) {
+            tutorials.trigger_now(id);
         }
         match applied.active_map {
             Some(map) => {
@@ -474,16 +483,10 @@ impl Plugin for BattlefieldPlugin {
             .init_resource::<BattlefieldLeash>()
             .add_systems(
                 Update,
-                (
-                    reset_on_world_enter
-                        .in_set(UiFeed)
-                        .after(crate::ui_mail::send_query_next_mail_time_on_enter),
-                    reset_selection_on_world_enter.in_set(UiFeed),
-                    // The anchor is the lane's, which fires only into the in-game interface.
-                    drive_battlefield_leash
-                        .in_set(UiFeed)
-                        .run_if(crate::ui_script::ingame_ui_up),
-                ),
+                // The anchor is the lane's, which fires only into the in-game interface.
+                drive_battlefield_leash
+                    .in_set(UiFeed)
+                    .run_if(crate::ui_script::ingame_ui_up),
             );
     }
 }

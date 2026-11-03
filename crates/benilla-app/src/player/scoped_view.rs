@@ -4,17 +4,25 @@
 //! and `0x612320` (remove), which match each effect's `EffectApplyAuraName` (`SpellRec+0x16c`)
 //! against 76 and call `0x50d320(camera, EffectMiscValue[i])`: first person, locked (camera flag
 //! `0x8` makes `SetCameraView` return early), with `[camera+0x40] = n × π/180`; removal restores
-//! `π/2` and unlocks. The Ornate Spyglass (item 5507, spell 12883) passes 15, a 6× zoom.
+//! `π/2`, unlocks and selects view 1. The Ornate Spyglass (item 5507, spell 12883) passes 15, a 6×
+//! zoom.
 //!
-//! The ratio is applied, not the degrees: `[camera+0x40]` defaults to 90°, while our [`CAM_FOVY`]
-//! is the effective vertical field of view, 45° against the reference's measured 44.1°.
+//! [`ScopedView`] follows a change of the aura. A create's `PostInit` shows every standing aura
+//! (`0x5fbb3c` → `0x5ff130`), which starts the scope, and our own arrival ends it at once and
+//! selects view 1 (`0x5deb44`, `0x50d320(0)`); a fresh create runs no field watcher (`0x465d79`),
+//! so a scope held across a worldport comes back off, under the same aura. A `/reload`'s new camera
+//! holds no scope either, and the reload itself shows no aura. In the reference the display watcher
+//! shows it again (`0x604990` → `0x60abe0` → `0x60ada6` → `0x5ff130` → `0x5ff350` → `0x5ff462`), so
+//! a shapeshift or morph under a standing aura restarts the scope; that path is not built here.
+//!
+//! The ratio is applied to `[camera+0x40]`, which defaults to 90°; the world projection then turns
+//! it into the vertical field of view by the frame's aspect (`0x5c3cc0`, [`benilla_world::view`]).
 
-use bevy::camera::{PerspectiveProjection, Projection};
 use bevy::prelude::*;
 
 use crate::net::{ObjectStore, SelfPlayer};
 use crate::ui_action::Spells;
-use benilla_world::view::{WorldCamera, CAM_FOVY};
+use benilla_world::view::FovZoom;
 
 /// `0x4c`, the aura name the reference's effect walk matches.
 const SPELL_AURA_FAR_SIGHT: u32 = 76;
@@ -28,6 +36,13 @@ const REFERENCE_DEFAULT_DEGREES: f32 = 90.0;
 #[derive(Resource, Default)]
 pub(crate) struct ScopedView {
     pub(crate) zoom: Option<f32>,
+    /// This frame's arrival found the aura on our create: its `PostInit` started the scope and the
+    /// arrival ends it (`0x5fbb3c`, `0x5deb44`), which selects view 1 from any view.
+    pub(crate) arrival_end: bool,
+    /// The aura the last look found (`0x604d00` compares the slots with their old values).
+    aura: Option<u32>,
+    /// A new camera was built since the last look.
+    camera_rebuilt: bool,
 }
 
 impl ScopedView {
@@ -35,18 +50,38 @@ impl ScopedView {
     pub(crate) fn active(&self) -> bool {
         self.zoom.is_some()
     }
+
+    /// A new camera (`0x50c0e0`) holds no scope, and building it shows no aura.
+    pub(super) fn new_camera(&mut self) {
+        self.zoom = None;
+        self.camera_rebuilt = true;
+    }
+
+    /// One look at the aura, `(spell, degrees)`, and whether our create arrived since the last.
+    fn observe(&mut self, aura: Option<(u32, f32)>, arrived: bool) {
+        let spell = aura.map(|(spell, _)| spell);
+        let rebuilt = std::mem::take(&mut self.camera_rebuilt);
+        self.arrival_end = arrived && aura.is_some();
+        if arrived || rebuilt {
+            self.zoom = None;
+        } else if spell != self.aura {
+            self.zoom = aura.map(|(_, degrees)| degrees / REFERENCE_DEFAULT_DEGREES);
+        }
+        self.aura = spell;
+    }
 }
 
 /// Drives the projection from aura 76 in our own aura slots only, as the reference gates it: the
 /// aura field is public, so another player's spyglass must not zoom ours.
 pub(super) fn apply_scoped_view(
     self_q: Query<&ObjectStore, With<SelfPlayer>>,
+    arrived: Query<(), Added<SelfPlayer>>,
     spells: Option<Res<Spells>>,
     mut scoped: ResMut<ScopedView>,
-    mut projections: Query<&mut Projection, With<WorldCamera>>,
+    mut fov_zoom: ResMut<FovZoom>,
 ) {
     let catalog = spells.as_ref().map(|s| &s.catalog);
-    scoped.zoom = self_q
+    let aura = self_q
         .single()
         .ok()
         .zip(catalog)
@@ -56,22 +91,18 @@ pub(super) fn apply_scoped_view(
                 (0..3).find_map(|i| {
                     // The reference reads the misc value from the aura name's own effect index.
                     (rec.effect_apply_aura[i] == SPELL_AURA_FAR_SIGHT)
-                        .then(|| rec.effect_misc_value[i] as f32)
+                        .then(|| (slot.spell_id, rec.effect_misc_value[i] as f32))
                 })
             })
         })
         // A zero misc value is the reference's own "restore" argument, not a zero-width view.
-        .filter(|&deg| deg > 0.0)
-        .map(|deg| deg / REFERENCE_DEFAULT_DEGREES);
+        .filter(|&(_, deg)| deg > 0.0);
+    scoped.observe(aura, !arrived.is_empty());
 
-    let Ok(mut projection) = projections.single_mut() else {
-        return;
-    };
-    let want = CAM_FOVY * scoped.zoom.unwrap_or(1.0);
-    if let Projection::Perspective(PerspectiveProjection { fov, .. }) = &mut *projection {
-        if (*fov - want).abs() > f32::EPSILON {
-            *fov = want;
-        }
+    // `stamp_world_fov` turns it into the field of view at the frame's aspect.
+    let want = scoped.zoom.unwrap_or(1.0);
+    if fov_zoom.0 != want {
+        fov_zoom.0 = want;
     }
 }
 

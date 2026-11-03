@@ -15,10 +15,10 @@
 //! caster and sends durations for the player alone, so the stock target frame shows no timers.
 //!
 //! The unit walks read the unit's slots as the call runs, through the lent host ([`read`]); the
-//! pushed lists answer only with no host to ask. The `GetPlayerBuff` family reads no object: the
-//! cache it reads is the client's own, rebuilt at each packet that moves the aura fields
-//! (`0x4e4140` → `0x4e4170`), and its timers the expiry array the duration packet writes
-//! (`0x4e4390` into `0xbc5f68`).
+//! app pushes no unit's list, and a harness's lists answer only with no host to ask. The
+//! `GetPlayerBuff` family reads no object: the cache it reads is the client's own, rebuilt at each
+//! packet that moves the aura fields (`0x4e4140` → `0x4e4170`), and its timers the expiry array
+//! the duration packet writes (`0x4e4390` into `0xbc5f68`).
 
 use mlua::{Lua, MultiValue, Value};
 
@@ -32,8 +32,9 @@ pub(crate) use player_buff::{expiry_of, until_cancelled_of};
 pub(crate) use read::{aura_unit, nth_kept, read_auras_of};
 pub use read::{AuraListRead, AuraRead};
 
-/// One aura on one unit, as the app's feed pushes it ([`crate::script::UiScript::set_unit_auras`],
-/// [`crate::script::UiScript::set_player_auras`]).
+/// One aura on one unit: a record of the player's buff cache as the app pushes it
+/// ([`crate::script::UiScript::set_player_auras`]), or of a harness's unit list
+/// ([`crate::script::UiScript::set_unit_auras`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AuraState {
     /// `Spell.dbc` id, what `CMSG_CANCEL_AURA` names and the app's icon lookup keys on.
@@ -83,8 +84,9 @@ pub struct AuraState {
     pub vision_hidden: bool,
 }
 
-/// One unit's auras as the app pushes them ([`crate::script::UiScript::set_unit_auras`]): every
-/// live aura in ascending slot, and `UnitBuff`'s unit gate over the helpful half.
+/// One unit's auras as a harness sets them with no host to ask
+/// ([`crate::script::UiScript::set_unit_auras`]): every live aura in ascending slot, and
+/// `UnitBuff`'s unit gate over the helpful half.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UnitAuraList {
     pub auras: Vec<AuraState>,
@@ -144,9 +146,9 @@ fn returns(lua: &Lua, a: &AuraState, with_dispel_type: bool) -> mlua::Result<Mul
     Ok(MultiValue::from_vec(out))
 }
 
-/// The list of the unit `token` names off the snapshots, for a reader outside any call: the pushed
-/// resolver inputs (`0x515970`, which `UnitBuff` calls at `0x519542`), the player's by slot as any
-/// unit's; `None` for nobody, a unit with no list, and a token the resolver does not recognise.
+/// The list of the unit `token` names off the snapshots, for a reader outside any call: the
+/// resolver's stand-in (`0x515970`, which `UnitBuff` calls at `0x519542`), the player's by slot as
+/// any unit's; `None` for nobody, a unit with no list, and a token the resolver does not recognise.
 pub(crate) fn auras_of<'m>(model: &'m Model, token: &str) -> Option<&'m UnitAuraList> {
     model
         .unit_guids
@@ -239,7 +241,8 @@ impl super::UiScript {
         model.unit_auras.clear();
     }
 
-    /// Push the unit-token resolver's inputs, copied only when they moved.
+    /// Set the unit-token resolver's no-host stand-in ([`super::UnitGuids`]) whole, copied only
+    /// when it moved: a harness's units, or the session end's clear.
     pub fn set_unit_guids(&mut self, guids: &super::UnitGuids) {
         let mut model = self.model_mut();
         if model.unit_guids != *guids {
@@ -247,8 +250,8 @@ impl super::UiScript {
         }
     }
 
-    /// Seat the player's own guid in the unit-token resolver ahead of a full
-    /// [`Self::set_unit_guids`] push, so `"player"` names us from the world-enter cascade on.
+    /// Seat the player's own guid in the unit-token resolver's stand-in at the world entry, so
+    /// `"player"` names us from the world-enter cascade on with no host to ask too.
     pub fn seat_player_guid(&mut self, guid: u64) {
         let mut model = self.model_mut();
         if model.unit_guids.player != guid {

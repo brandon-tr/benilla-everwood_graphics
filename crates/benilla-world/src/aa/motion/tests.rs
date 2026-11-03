@@ -63,11 +63,11 @@ fn reproject_rigid(uv: Vec2, depth: f32, params: &MotionUniform) -> Option<Vec3>
     ))
 }
 
-use crate::view::CAM_FOVY;
+use crate::view::world_fovy;
 
 fn camera(eye: Vec3, target: Vec3, aspect: f32) -> CameraMatrices {
     let world_from_view = Mat4::look_at_rh(eye, target, Vec3::Y).inverse();
-    let clip_from_view = Mat4::perspective_infinite_reverse_rh(CAM_FOVY, aspect, 0.1);
+    let clip_from_view = Mat4::perspective_infinite_reverse_rh(world_fovy(aspect), aspect, 0.1);
     CameraMatrices {
         clip_from_view,
         world_from_view,
@@ -732,7 +732,7 @@ fn extracted_test_view(
             None,
             0,
         ),
-        clip_from_view: Mat4::perspective_infinite_reverse_rh(CAM_FOVY, aspect, 0.1),
+        clip_from_view: Mat4::perspective_infinite_reverse_rh(world_fovy(aspect), aspect, 0.1),
         world_from_view: GlobalTransform::from(world_from_view),
         clip_from_world: None,
         hdr: true,

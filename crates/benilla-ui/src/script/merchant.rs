@@ -72,7 +72,8 @@ pub struct ItemStatsHead {
     pub sell_price: u32,
 }
 
-/// Each damaged item's repair cost in copper after the vendor's discount (`0x4faf30`).
+/// Each damaged item's repair cost in copper after the vendor's discount (`0x4faf30`): the VM's
+/// copy the tooltips read with no host to ask ([`RepairCostQuery`]), which only a test sets.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RepairCosts {
     /// Equipped items by live inventory id.
@@ -138,6 +139,45 @@ impl LiveQuery for RepairAllCostQuery {
     type Answer = Option<(u32, bool)>;
 }
 
+/// The repair cost the item tooltips return for the item a slot holds, read at the call
+/// (`0x534948`, `0x5332e1`): `0x4faf30`, the object's own cost after the open vendor's discount,
+/// 0 for no object. `bag` is the Lua container id, or [`super::EQUIPMENT_BAG`] with a doll live id.
+pub struct RepairCostQuery {
+    pub bag: i64,
+    pub slot: u32,
+}
+
+impl LiveQuery for RepairCostQuery {
+    type Answer = u32;
+}
+
+/// An item object's own repair cost before any discount (`0x5da330`), which the merchant price
+/// takes off (`0x52e44a`); 0 for no such object.
+pub struct ItemRepairCostQuery(pub u64);
+
+impl LiveQuery for ItemRepairCostQuery {
+    type Answer = u32;
+}
+
+/// The repair cost of the item at `bag`'s 1-based `slot` now, as [`RepairCostQuery`] reads it:
+/// the host's, else the VM's copy, which only a test sets.
+pub(crate) fn repair_cost_at(lua: &Lua, model: &Model, bag: i64, slot: u32) -> u32 {
+    ask(lua, &RepairCostQuery { bag, slot }).unwrap_or_else(|| {
+        let costs = &model.repair_costs;
+        let cost = match bag {
+            super::EQUIPMENT_BAG => costs.equipped.get(&slot),
+            _ => costs.bags.get(&(bag, slot)),
+        };
+        cost.copied().unwrap_or(0)
+    })
+}
+
+/// The item object `guid`'s own repair cost now, as [`ItemRepairCostQuery`] reads it.
+pub(crate) fn item_repair_cost(lua: &Lua, model: &Model, guid: u64) -> u32 {
+    ask(lua, &ItemRepairCostQuery(guid))
+        .unwrap_or_else(|| model.repair_costs.own.get(&guid).copied().unwrap_or(0))
+}
+
 /// The window's head now: the host's, else the VM's copy, which only a test sets (every
 /// production entry that runs Lua lends the host).
 pub(crate) fn head(lua: &Lua, model: &Model) -> MerchantHead {
@@ -198,7 +238,7 @@ impl super::UiScript {
         self.model_mut().merchant = state;
     }
 
-    /// Push the repair costs the item tooltip bindings return.
+    /// Set the repair costs the item tooltip bindings return with no host to ask, for a test.
     pub fn set_repair_costs(&mut self, costs: RepairCosts) {
         self.model_mut().repair_costs = costs;
     }
@@ -299,21 +339,6 @@ fn submit(lua: &Lua, call: MerchantCall) -> mlua::Result<()> {
     super::calls::submit(lua, super::ScriptCall::Merchant(call))
 }
 
-/// Hand the host the buys the drop verb just made (`Model::merchant_drops`), before the verb
-/// returns, as the reference sends from the drop itself.
-pub(super) fn submit_slot_buys(lua: &Lua) -> mlua::Result<()> {
-    let buys = std::mem::take(
-        &mut lua
-            .app_data_mut::<Model>()
-            .expect("model app_data")
-            .merchant_drops,
-    );
-    for call in buys {
-        submit(lua, call)?;
-    }
-    Ok(())
-}
-
 /// 1 or nil, as the client pushes a usable flag (`pushnumber(1.0)` / `pushnil`).
 fn usable_value(usable: bool) -> Value {
     if usable {
@@ -350,17 +375,19 @@ fn grab_index(index: Option<f64>) -> Option<u32> {
 
 /// The row `PickupMerchantItem` grabs, its 0-based index and row read at the call before its
 /// clear ([`grab_index`]): `None` for each silent refusal, no index, `index > count`
-/// (`0x4fb7e9`), no merchant (`0x4fb7f7`), a dead row (`0x4fb80b`), or the held row again
-/// (`0x4fb818`, the toggle-off). Neither stock nor the item cache is tested: a sold-out row grabs,
-/// and the server refuses the buy.
+/// (`0x4fb7e9`), no merchant (`0x4fb7f7`), a dead row (`0x4fb80b`), or the toggle-off: a held
+/// preview whose entry is the row's (`0x4fb811`-`0x4fb818`). Neither stock nor the item cache is
+/// tested: a sold-out row grabs, and the server refuses the buy.
 fn merchant_grab(model: &Model, grab_row: Option<(u32, MerchantItem)>) -> Option<CursorPayload> {
+    // The preview entry `[0xb4b41c]` (`0x495170`), set for modes 5, 7 and 9 alike.
     let held = match &model.cursor {
-        Some(CursorPayload::Merchant(m)) => Some(m.row),
+        Some(CursorPayload::Merchant(m)) => Some(m.item_id),
+        Some(CursorPayload::Action(a)) => Some(a.action),
+        Some(CursorPayload::Ammo(a)) => Some(a.item_id),
         _ => None,
     };
     let (row0, item) = grab_row?;
-    // The toggle-off: naming the held row puts nothing back.
-    if held == Some(row0) {
+    if held == Some(item.item_id) {
         return None;
     }
     Some(CursorPayload::Merchant(super::cursor::CursorMerchantItem {
@@ -392,7 +419,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let item = index.checked_sub(1).and_then(|n| row(lua, &model, n));
                 let usable = item
                     .as_ref()
-                    .is_none_or(|it| super::item_stats::item_usable_by_id(&model, it.item_id));
+                    .is_none_or(|it| super::item_stats::item_usable_by_id(lua, &model, it.item_id));
                 (item, usable)
             };
             let Some(it) = item else {
@@ -520,30 +547,49 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
                 row(lua, &model, row0 as usize).map(|it| (row0, it))
             });
-            // The sell fork comes first, before the argument is read. Its clear is the sale's, not
-            // `ClearCursor`: `CURSOR_UPDATE` fires and the source slot stays greyed until the
-            // server's inventory update (`0x494b60`). Every other leg reads the row, then clears.
+            // The sell fork comes first, before the argument is read: the sale goes out
+            // (`0x4fb7a7`), handed over in place, then its clear, `ClearCursor(0,1)` (`0x4fb7b3`),
+            // whose `CURSOR_UPDATE` follows the packet; the source slot stays greyed until the
+            // server's inventory update. Every other leg reads the row, then clears.
             let grab = super::tick::verb(lua, |model| {
-                match crate::script::cursor::take_cursor_item_for_sale(model) {
-                    Some(item) => Err(MerchantCall::Sell {
-                        item_guid: item.guid,
-                        count: item.count.unwrap_or(0) as u8,
-                    }),
-                    None => Ok(merchant_grab(model, grab_row)),
+                let held = match &model.cursor {
+                    Some(crate::script::cursor::CursorPayload::Item(item)) => Some(item.clone()),
+                    _ => None,
+                };
+                match held {
+                    Some(item) => {
+                        model.merchant_call_in_verb(MerchantCall::Sell {
+                            item_guid: item.guid,
+                            count: item.count.unwrap_or(0) as u8,
+                        });
+                        crate::script::cursor::take_cursor_item_for_sale(model);
+                        None
+                    }
+                    None => Some(merchant_grab(model, grab_row)),
                 }
             });
-            let grab = match grab {
-                Ok(grab) => grab,
-                Err(sale) => return submit(lua, sale),
+            let Some(grab) = grab else {
+                return Ok(());
             };
 
             // Every other leg clears with the real `ClearCursor(1,1)` (`0x4fb82d`/`0x4fb83f` on a
             // refusal, `0x495112` in the grab), not a bare drop: a held spell fires `CURSOR_UPDATE`
             // and hides the bar grid, and an armed gift wrap is cancelled (`0x5edf10`). Its events
             // run before the grab sets the row, so that `CURSOR_UPDATE` reads an empty cursor.
-            // The grab is the setter (`0x4950f0`): its clear, then the row and its
-            // `CURSOR_UPDATE` (`0x49515e`); mode 5 skips the mode-7 `ACTIONBAR_SHOWGRID` branch.
-            crate::script::cursor::set_cursor(lua, true, |_| grab);
+            // The grab is the setter (`0x4950f0`): its control test (`0x4950f3`), its clear, then
+            // the row and its `CURSOR_UPDATE` (`0x49515e`); mode 5 skips the mode-7
+            // `ACTIONBAR_SHOWGRID` branch. A refusal's clear is the binding's own, untested.
+            match grab {
+                Some(grab) => {
+                    crate::script::cursor::set_cursor(
+                        lua,
+                        true,
+                        crate::script::cursor::Setter::Controlled,
+                        |_| Some(grab),
+                    );
+                }
+                None => super::tick::verb(lua, crate::script::cursor::clear_cursor),
+            }
             Ok(())
         })?,
     )?;
@@ -576,7 +622,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
                     .and_then(|n| buyback_row(lua, &model, n));
                 let usable = item
                     .as_ref()
-                    .is_none_or(|it| super::item_stats::item_usable_by_id(&model, it.item_id));
+                    .is_none_or(|it| super::item_stats::item_usable_by_id(lua, &model, it.item_id));
                 (item, usable)
             };
             let Some(it) = item else {
@@ -684,7 +730,7 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
             // its events running first.
             {
                 let model = lua.app_data_ref::<Model>().expect("model app_data");
-                if model.spell_targeting || !head(lua, &model).can_repair {
+                if super::action::spell_targeting(lua) || !head(lua, &model).can_repair {
                     return Ok(());
                 }
             }
@@ -719,10 +765,15 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     // ShowMerchantSellCursor(index) (`0x4fbab0`) and ShowBuybackSellCursor(index) (`0x4fbbb0`):
     // despite the names, the buy cursor, re-armed each frame an item is hovered
     // (`MerchantFrame.xml:726-733`). Every fail path returns without `CursorSetMode`; the
-    // in-flight item lock and base-mode Point gates live app-side.
+    // targeting and base-mode gates open each verb ([`sell_cursor_shut`]), and the in-flight item
+    // lock lives app-side.
     g.set(
         "ShowMerchantSellCursor",
         lua.create_function(|lua, index: Value| {
+            // The targeting and base-mode gates come first (`0x4fbab7`-`0x4fbacc`).
+            if sell_cursor_shut(lua) {
+                return Ok(());
+            }
             // `is-number` else `Usage: ShowMerchantSellCursor(index)` (`0x84dd14`, `0x4fbadf`).
             let index = binding_abi::index_arg(lua, index, "Usage: ShowMerchantSellCursor(index)")?;
             arm_vendor_cursor(lua, |model| {
@@ -734,6 +785,10 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     g.set(
         "ShowBuybackSellCursor",
         lua.create_function(|lua, index: Value| {
+            // The targeting and base-mode gates come first (`0x4fbbb9`-`0x4fbbce`).
+            if sell_cursor_shut(lua) {
+                return Ok(());
+            }
             // `is-number` else `Usage: ShowBuybackSellCursor(index)` (`0x84dd3c`, `0x4fbbe1`).
             let index = binding_abi::index_arg(lua, index, "Usage: ShowBuybackSellCursor(index)")?;
             arm_vendor_cursor(lua, |model| {
@@ -746,15 +801,23 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// The gates every sell-cursor verb opens with, ahead of its argument reads: `IsSpellTargeting`
+/// (`0x6e48a0`), then the base cursor mode (`0x523d10`) must be 1, which the repair cursor moves
+/// (`0x4fbce3`). Either failing returns quietly; each is sticky, so a Buy would stamp it out.
+pub(super) fn sell_cursor_shut(lua: &Lua) -> bool {
+    super::action::spell_targeting(lua)
+        || lua
+            .app_data_ref::<Model>()
+            .expect("model app_data")
+            .repair_mode
+}
+
 /// Arm the vendor hover cursor from a row's price, read at the call: Buy(3) if the player's coinage
-/// covers it, else the greyed UnableBuy(23); no price leaves the cursor untouched.
+/// covers it, else the greyed UnableBuy(23); no price leaves the cursor untouched. The caller has
+/// passed [`sell_cursor_shut`].
 fn arm_vendor_cursor(lua: &Lua, price_of: impl FnOnce(&Model) -> Option<u32>) {
     let price = {
         let model = lua.app_data_ref::<Model>().expect("model app_data");
-        // The family bails on `IsTargeting` first (`0x6e48a0`): an armed spell keeps its cursor.
-        if model.spell_targeting {
-            return;
-        }
         price_of(&model)
     };
     let Some(price) = price else {
@@ -1290,6 +1353,71 @@ mod tests {
         s.run("ShowMerchantSellCursor(99)").unwrap();
         assert_eq!(s.ui_cursor(), Some(UiCursorMode::Buy));
     }
+
+    /// The sell-cursor verbs test `IsSpellTargeting` and the base mode before any argument
+    /// (`0x4fa469`-`0x4fa47a`, `0x4fbab7`-`0x4fbacc`, `0x4fbbb9`-`0x4fbbce`): under a targeting
+    /// spell or the repair cursor a bad argument is quiet and a good one arms nothing.
+    #[test]
+    fn sell_cursor_verbs_gate_on_targeting_and_repair_before_their_arguments() {
+        use crate::script::UiCursorMode;
+        let mut s = UiScript::new().unwrap();
+        let mut vendor = stock();
+        vendor.can_repair = true;
+        vendor.buyback = vec![MerchantItem {
+            price: 1,
+            ..Default::default()
+        }];
+        s.set_merchant(Some(vendor));
+        s.set_money(100);
+        let mut bag = ContainerState {
+            num_slots: 1,
+            ..Default::default()
+        };
+        bag.slots.insert(
+            1,
+            ContainerSlot {
+                item_id: 117,
+                count: 1,
+                ..Default::default()
+            },
+        );
+        s.set_container(0, Some(bag));
+        let bad = [
+            "ShowContainerSellCursor(nil, 1)",
+            "ShowContainerSellCursor(0, {})",
+            "ShowMerchantSellCursor(nil)",
+            "ShowBuybackSellCursor('x')",
+        ];
+        let good = [
+            "ShowContainerSellCursor(0, 1)",
+            "ShowMerchantSellCursor(1)",
+            "ShowBuybackSellCursor(1)",
+        ];
+        for arm in ["targeting", "repair"] {
+            if arm == "targeting" {
+                s.set_spell_targeting(true);
+            } else {
+                s.set_spell_targeting(false);
+                s.run("ShowRepairCursor()").unwrap();
+                assert!(s.repair_mode());
+            }
+            for call in bad.iter().chain(&good) {
+                s.run(call)
+                    .unwrap_or_else(|e| panic!("{call} under {arm}: {e}"));
+                assert_eq!(s.ui_cursor(), None, "{call} under {arm}");
+            }
+        }
+        s.run("HideRepairCursor()").unwrap();
+        for call in good {
+            s.run("ResetCursor()").unwrap();
+            s.run(call).unwrap();
+            assert_eq!(s.ui_cursor(), Some(UiCursorMode::Buy), "{call}");
+        }
+        for call in bad {
+            assert!(s.run(call).is_err(), "{call} raises past the gates");
+        }
+    }
+
     #[test]
     fn pickup_merchant_item_grabs_a_row_as_mode_5() {
         let mut s = UiScript::new().unwrap();
@@ -1341,6 +1469,79 @@ mod tests {
         s.run(r#"PickupMerchantItem("1")"#).unwrap();
         s.run("PickupMerchantItem(1.9)").unwrap();
         assert!(s.cursor_payload().is_none());
+    }
+
+    /// The grab is the preview setter, which needs control for mode 5 (`0x4950f3`): refused, it
+    /// clears nothing, a held spell staying. A refusal's clear is the binding's own
+    /// (`0x4fb83f`), which runs without control.
+    #[test]
+    fn pickup_merchant_item_grabs_only_with_control() {
+        use crate::script::cursor::{CursorPayload, CursorSpell};
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_merchant(Some(stock()));
+        let spell = CursorPayload::Spell(CursorSpell {
+            spell_id: 1,
+            texture: None,
+            passive: false,
+        });
+        s.set_cursor_for_test(spell.clone());
+        s.set_player_control(false);
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert_eq!(
+            s.cursor_payload(),
+            Some(spell),
+            "the setter refused before its clear"
+        );
+        s.run("PickupMerchantItem(99)").unwrap();
+        assert!(
+            s.cursor_payload().is_none(),
+            "the refusal clears all the same"
+        );
+
+        s.set_player_control(true);
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert!(matches!(
+            s.cursor_payload(),
+            Some(CursorPayload::Merchant(_))
+        ));
+    }
+
+    /// The toggle-off compares the held preview's entry, any of modes 5, 7 and 9, with the row's
+    /// (`0x4fb811`-`0x4fb818`): held ammo or a bar item of row 1's entry drops, and grabs
+    /// nothing; another row's grab replaces a held one.
+    #[test]
+    fn the_toggle_off_matches_any_held_preview_by_entry() {
+        use crate::script::cursor::{CursorAction, CursorAmmo, CursorPayload};
+        let mut s = UiScript::new().unwrap();
+        s.keep_calls();
+        s.set_merchant(Some(stock()));
+        let row = |s: &UiScript| match s.cursor_payload() {
+            Some(CursorPayload::Merchant(m)) => Some(m.row),
+            _ => None,
+        };
+        s.run("PickupMerchantItem(2) PickupMerchantItem(1)")
+            .unwrap();
+        assert_eq!(row(&s), Some(0), "row 1 replaces row 2");
+
+        s.set_cursor_for_test(CursorPayload::Ammo(CursorAmmo {
+            item_id: 159,
+            texture: None,
+        }));
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert!(s.cursor_payload().is_none(), "the same entry toggles off");
+
+        s.set_cursor_for_test(CursorPayload::Action(CursorAction {
+            src_slot: 1,
+            kind: 0x80,
+            action: 159,
+            texture: None,
+            count: 0,
+            consumable: false,
+            state: None,
+        }));
+        s.run("PickupMerchantItem(1)").unwrap();
+        assert!(s.cursor_payload().is_none(), "a bar item of the entry too");
     }
 
     #[test]

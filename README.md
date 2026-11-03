@@ -108,11 +108,12 @@ generated from the code.
 
 ## Status
 
-Complete and fully playable. What is left:
+Fully playable on a 1.12.1 server that doesn't enforce Warden or need client changes beyond its
+MPQ archives. What is left:
 
-- The long tail of small features that separates a working client from a finished one, tracked
-  as [issues](https://github.com/samwhosung/benilla/issues).
-- Addons, options and performance, ongoing.
+- The long tail of small differences from 1.12.1, tracked as
+  [issues](https://github.com/samwhosung/benilla/issues).
+- Addon compatibility, the remaining options and performance, ongoing.
 
 benilla is a faithful 1.12.1 client and the foundation people build on. There are no prebuilt
 downloads: a packaged build, a particular server's changes or anything 1.12.1 never had belongs
@@ -182,6 +183,6 @@ adapters over stock files, and the settings windows and script error log benilla
 
 World of Warcraft is a trademark of Blizzard Entertainment, Inc. Our own code is licensed under
 [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your option. The vendored components
-under `third_party/`, including kira and the patched graphics backend, keep their own upstream
-licenses alongside each. Code and techniques ported from other projects
-(WarcraftXL, by iThorgrim) are credited file by file in [`THIRD-PARTY.md`](THIRD-PARTY.md).
+under `third_party/`, including kira and the wgpu-hal graphics layer, keep their own upstream
+licenses and their authors' copyright notices alongside each. Code and techniques ported from other
+projects (WarcraftXL, by iThorgrim) are credited file by file in [`THIRD-PARTY.md`](THIRD-PARTY.md).

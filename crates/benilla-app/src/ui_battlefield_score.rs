@@ -18,9 +18,8 @@ use benilla_protocol::messages::PvpLogData;
 use benilla_ui::script::{BattlefieldScoreRead, BattlefieldScoreRow, BattlefieldStatColumn};
 
 use crate::names::NameCache;
-use crate::net::{NetCommands, WorldEnterCascadeMessage};
+use crate::net::NetCommands;
 use crate::query_cache::Ask;
-use crate::ui_script::UiFeed;
 use crate::world_state_ui::WorldStateUiRes;
 
 /// `RequestBattlefieldScoreData`'s throttle (`0x4aa170`).
@@ -39,7 +38,9 @@ struct ScoreBlock {
     stats: [u32; 8],
 }
 
-/// The board, its filter and the request stamp, all zeroed when the session ends.
+/// The board, its filter and the request stamp, all zeroed when the session ends, and at each
+/// world-enter cascade by its battlefield init (`0x4909fb` → `0x4a9db0`,
+/// [`crate::ui_battlefield::reset_on_world_enter`]), which fires no event.
 #[derive(Resource)]
 pub(crate) struct BattlefieldScoreboard {
     /// The blocks in board order (`0xb6e880`): the last message's in wire order, sorted in place
@@ -57,6 +58,10 @@ pub(crate) struct BattlefieldScoreboard {
     /// The guids whose name answer a callback `0x4a9ef0` waits on, one per miss: their count is
     /// the pending-name count (`0xb6ebd4`).
     name_waits: Vec<u64>,
+    /// A teardown freed those waits with names pending: the count stands, holding the rebuild,
+    /// until the next packet (`0x4aabb5`), the world-enter cascade (`0x4909fb` → `0x4a9db0`,
+    /// `0x4a9e61`) or a login's init (`0x4a9c40`, `0x4a9cd9`) zeroes it.
+    freed_pending: bool,
     last_request: Option<Instant>,
 }
 
@@ -71,6 +76,7 @@ impl Default for BattlefieldScoreboard {
             filter: -1,
             columns: Vec::new(),
             name_waits: Vec::new(),
+            freed_pending: false,
             last_request: None,
         }
     }
@@ -100,15 +106,25 @@ pub(crate) struct BoardView<'a> {
 }
 
 impl BattlefieldScoreboard {
-    /// `MSG_PVP_LOG_DATA` (`0x4aab30`): the flags and the blocks stored, each row's name asked
-    /// with a callback (`0x4aac79`), a miss pending (`0x4aac82`); then the rebuild unless a name
-    /// is pending (`0x4aaca1`). Whether it rebuilt, when the caller signals.
+    /// The teardown's free of the callbacks `0x4a9ef0`, running none (`0x55f990`). The pending count
+    /// stands ([`Self::freed_pending`]).
+    pub(crate) fn free_store_callbacks(&mut self) {
+        self.freed_pending |= !self.name_waits.is_empty();
+        self.name_waits.clear();
+    }
+
+    /// `MSG_PVP_LOG_DATA` (`0x4aab30`): the old rows' pending callbacks cancelled
+    /// (`0x4aab43`-`0x4aab69`) and the count zeroed (`0x4aabb5`), the flags and the blocks stored,
+    /// each row's name asked with a callback (`0x4aac79`), a miss pending (`0x4aac82`); then the
+    /// rebuild unless a name is pending (`0x4aaca1`). Whether it rebuilt, when the caller signals.
     pub(crate) fn apply(
         &mut self,
         data: PvpLogData,
         commands: &NetCommands,
         at: BoardView,
     ) -> bool {
+        self.name_waits.clear();
+        self.freed_pending = false;
         self.ended = data.ended;
         self.winner = data.winner.unwrap_or(0);
         self.rows = data
@@ -179,7 +195,7 @@ impl BattlefieldScoreboard {
     /// record's race (`0x5efe00`'s walk inlined), 0 for a row with no record (`0x4aa26d` →
     /// `0x4aa2b5`), the filter's count, and the CRT `qsort` under `0x4aa350` (`0x4aa2ee`-`0x4aa2fb`).
     fn rebuild(&mut self, at: BoardView) -> bool {
-        if !self.name_waits.is_empty() {
+        if self.freed_pending || !self.name_waits.is_empty() {
             return false;
         }
         // A record's side by its race; the cache holds a record's race beside its name.
@@ -282,20 +298,6 @@ impl BattlefieldScoreboard {
     }
 }
 
-/// The world-enter cascade's score reset (`0x4909fb` → `0x4a9db0`): the pending names released,
-/// the ended flag `0xb6ebcc`, the winner `0xb6ebd0`, the wire and filtered counts
-/// `0xb6ebc0`/`0xb6ebc4`, the pending-name count `0xb6ebd4` and the score request stamp `0xb6ebc8`
-/// and the stat count `0xb6ebd8` (`0x4a9e67`) all zero, and the filter back to -1. The cascade
-/// fires no event, and `SMSG_BATTLEFIELD_STATUS` is no part of it.
-pub(crate) fn reset_on_world_enter(
-    mut cascades: MessageReader<WorldEnterCascadeMessage>,
-    mut board: ResMut<BattlefieldScoreboard>,
-) {
-    if cascades.read().next().is_some() {
-        *board = BattlefieldScoreboard::default();
-    }
-}
-
 /// The column headers for `map`: the first contiguous run of matching `WorldStateUI.dbc` rows in
 /// table order, as the status-3 arm builds them (`0x4aa9c3`–`0x4aaa17`; the run ends at
 /// `0x4aa9fe`).
@@ -360,8 +362,7 @@ pub(crate) struct BattlefieldScorePlugin;
 impl Plugin for BattlefieldScorePlugin {
     fn build(&self, app: &mut App) {
         net::register(app);
-        app.init_resource::<BattlefieldScoreboard>()
-            .add_systems(Update, reset_on_world_enter.in_set(UiFeed));
+        app.init_resource::<BattlefieldScoreboard>();
     }
 }
 
@@ -382,9 +383,7 @@ mod tests {
         app.insert_resource(NetCommands(tx))
             .init_resource::<BattlefieldScoreboard>()
             .init_resource::<BattlefieldLane>()
-            .init_resource::<NameCache>()
-            .add_message::<WorldEnterCascadeMessage>()
-            .add_systems(Update, reset_on_world_enter);
+            .init_resource::<NameCache>();
         crate::ui_unit::TestNames::english().insert(&mut app);
         net::register(&mut app);
         crate::names::net::register(&mut app);
@@ -438,6 +437,56 @@ mod tests {
             .map(|i| board.row(i, at).map_or_else(String::new, |r| r.row.name))
             .collect();
         (rows, board.filtered)
+    }
+
+    /// A teardown frees the waits and the pending count stands (`0x4aa216`): no answer or filter
+    /// rebuilds the board until the next packet zeroes it (`0x4aabb5`), as the world-enter cascade
+    /// also does (`0x4a9e61`, the reset's `Default`).
+    #[test]
+    fn a_freed_wait_holds_the_rebuild_until_the_next_packet() {
+        let (mut app, _rx) = board();
+        packet(&mut app, named(0x1, "bob", 2));
+        let rows = vec![score(0x1, 3, 1, 50), score(0x2, 5, 2, 10)];
+        assert_eq!(
+            packet(&mut app, log(false, rows.clone())),
+            [],
+            "one pending"
+        );
+        app.world_mut()
+            .resource_mut::<BattlefieldScoreboard>()
+            .free_store_callbacks();
+        assert_eq!(packet(&mut app, named(0x2, "Alice", 1)), [], "no callback");
+        let mut reads = bevy::ecs::system::SystemState::<BoardReads>::new(app.world_mut());
+        let world = app.world_mut();
+        let rebuilt = world.resource_scope(|world, mut board: Mut<BattlefieldScoreboard>| {
+            board.set_filter(1, &reads.get(world))
+        });
+        assert!(!rebuilt, "the count stands");
+        assert_eq!(
+            packet(&mut app, log(false, rows)),
+            [BattlefieldEvent::Score],
+            "the packet zeroes it"
+        );
+    }
+
+    /// A packet cancels the old rows' callbacks and zeroes the count (`0x4aab43`-`0x4aab69`,
+    /// `0x4aabb5`): a row that left the board holds no rebuild, and its name's answer counts nothing.
+    #[test]
+    fn a_packet_cancels_a_departed_rows_name_wait() {
+        let (mut app, _rx) = board();
+        packet(&mut app, named(0x1, "bob", 2));
+        let both = vec![score(0x1, 3, 1, 50), score(0x2, 5, 2, 10)];
+        assert_eq!(packet(&mut app, log(false, both)), [], "0x2 pending");
+        assert_eq!(
+            packet(&mut app, log(false, vec![score(0x1, 3, 1, 50)])),
+            [BattlefieldEvent::Score],
+            "0x2 left the board"
+        );
+        assert_eq!(
+            packet(&mut app, named(0x2, "Alice", 1)),
+            [],
+            "its callback was cancelled"
+        );
     }
 
     /// The log asks each row's name with the callback `0x4a9ef0` (`0x4aac79`), a miss pending;
@@ -585,8 +634,7 @@ mod tests {
             let s = board.summary();
             assert_eq!((s.filtered, s.ended, s.winner), (1, true, 1));
         }
-        app.world_mut().write_message(WorldEnterCascadeMessage);
-        app.update();
+        world_enter(&mut app);
         let mut board = app.world_mut().resource_mut::<BattlefieldScoreboard>();
         let s = board.summary();
         assert_eq!((s.filtered, s.ended), (0, false));
@@ -595,6 +643,13 @@ mod tests {
             board.request_due(now),
             "the stamp is zeroed, so the next request is not throttled"
         );
+    }
+
+    /// The world-enter cascade's battlefield init (`0x4a9db0`).
+    fn world_enter(app: &mut App) {
+        app.world_mut()
+            .run_system_cached(crate::ui_battlefield::reset_on_world_enter)
+            .expect("the battlefield init runs");
     }
 
     /// The board's guids in board order.
@@ -701,8 +756,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<BattlefieldScoreboard>()
             .columns = vec![BattlefieldStatColumn::default()];
-        app.world_mut().write_message(WorldEnterCascadeMessage);
-        app.update();
+        world_enter(&mut app);
         let board = app.world().resource::<BattlefieldScoreboard>();
         assert_eq!(board.summary().columns, 0);
     }

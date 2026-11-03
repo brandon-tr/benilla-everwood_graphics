@@ -214,9 +214,8 @@ pub(super) fn foam_gain(enhanced: bool) -> f32 {
     }
 }
 
-/// A live record's size at `now`: `size0 + growth · age`. (The reference render integrates one
-/// `dt·growth` step *before* a record's first draw — visible at a capture's ~20 fps, negligible
-/// at ours; we draw `size0` on the first frame.)
+/// A record's size at `now`. Deviation: the first draw is `size0`, where the reference first ages
+/// the record one `dt·growth` step, because the difference is too small to see at our frame rates.
 pub(super) fn record_size(size0: f32, growth: f32, born: f32, now: f32) -> f32 {
     size0 + growth * (now - born)
 }

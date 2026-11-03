@@ -75,6 +75,8 @@ fn load_skill_lines(mut commands: Commands, assets: Option<Res<WorldAssets>>) {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct BookSignals<'w, 's> {
     lane: ResMut<'w, NoticeLane>,
+    // The learn's line, shown between the form list's edge and the book's signals.
+    errors: Res<'w, crate::ui_action::UiErrorKeys>,
     skill_lines: Option<Res<'w, SkillLines>>,
     me: Query<'w, 's, &'static crate::net::ObjectStore, With<crate::net::SelfPlayer>>,
 }
@@ -82,53 +84,85 @@ pub(crate) struct BookSignals<'w, 's> {
 /// What a learn's spell replaces, for the registrar's form-list leg (`0x4b2849`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Learned {
-    /// `SMSG_LEARNED_SPELL`, `was_known` whether the known spells already held it.
-    Fresh { was_known: bool },
-    /// `SMSG_SUPERCEDED_SPELL`'s new rank, over `old`, which the known spells held if `old_known`.
-    Rank { old: u32, old_known: bool },
+    /// `SMSG_LEARNED_SPELL`.
+    Fresh,
+    /// `SMSG_SUPERCEDED_SPELL`'s new rank, over `old`.
+    Rank { old: u32 },
 }
 
 impl BookSignals<'_, '_> {
-    /// `0x4b25b0`'s tail for `spell_id`, now among `known`. First the form list's edge,
-    /// `UPDATE_SHAPESHIFT_FORMS` (`0x4b2904`), for a stance-bar spell it appends unless listed
-    /// (`0x4b2893`), or for a rank that replaces a listed old one in place (`0x4b2878`); an
-    /// unlisted old rank adds nothing (`0x4b2870`). Then the book's: the sort's `SPELLS_CHANGED`
-    /// (`0x4b2b5a`), `LEARNED_SPELL_IN_TAB` with its tab's 1-based place in the order it left
-    /// (`0x4b2b92`), then The Spellbook's tutorial (`0x4b2ba1`), none of them for a spell the
-    /// gates keep out of the book (`0x4b2911`, `0x4b2944`, `0x4b29c4`). Nothing with no player
-    /// held, whose learn waits in the initial list (`0x5e61c0`).
+    /// The lane the book's signals go on, which the bar's legs of the same packet share
+    /// ([`crate::ui_action::SpellSlots`]), so the two keep the handler's order.
+    pub(crate) fn lane(&mut self) -> &mut NoticeLane {
+        &mut self.lane
+    }
+
+    /// `0x4b25b0`'s tail for `spell_id`, now among `actions`' known spells. First its language
+    /// leg's `LANGUAGE_LIST_CHANGED` for a spell whose first effect is `SPELL_EFFECT_LANGUAGE`
+    /// (`0x4b2641`-`0x4b2659`, live or not), then the form list's leg on the stored list
+    /// ([`crate::ui_shapeshift::form_learned`]) and its edge, `UPDATE_SHAPESHIFT_FORMS`
+    /// (`0x4b2904`), when it moved. Then the book's: the sort's `SPELLS_CHANGED` (`0x4b2b5a`),
+    /// `LEARNED_SPELL_IN_TAB` with its tab's 1-based place in the order it left (`0x4b2b92`), then
+    /// The Spellbook's tutorial (`0x4b2ba1`), none of them for a spell the gates keep out of the
+    /// book (`0x4b2911`, `0x4b2944`, `0x4b29c4`). The learn's `line` shows between the form edge
+    /// and the book's (`0x4b2936`, `0x4b29b7`). With no player held a fresh learn joins the
+    /// initial list, which the arrival learns (`0x5e61fb` → `0x5e621e`), and signals nothing; a
+    /// rank-up still shows its line.
     pub(crate) fn entered(
         &mut self,
         spell_id: u32,
         how: Learned,
-        known: &BTreeSet<u32>,
+        actions: &mut crate::ui_action::PlayerActions,
         spells: Option<&Spells>,
+        line: Option<crate::ui_action::UiError>,
     ) {
-        let (Some(spells), Ok(store)) = (spells, self.me.single()) else {
+        let Ok(store) = self.me.single() else {
+            match how {
+                Learned::Fresh => actions.initial.push(spell_id),
+                // A rank-up reaches the registrar ahead of its player test (`0x5e6363` →
+                // `0x4b2f68`, then `0x5e6385`), whose line reads no player (`0x4b29b7`).
+                Learned::Rank { .. } => {
+                    if let Some(line) = line {
+                        self.errors.push(line);
+                    }
+                }
+            }
             return;
         };
-        let listed = |id: u32| {
-            spells
-                .catalog
-                .get(id)
-                .is_some_and(crate::ui_shapeshift::on_stance_bar)
+        let Some(spells) = spells else {
+            return;
         };
-        let forms_edge = listed(spell_id)
-            && match how {
-                Learned::Fresh { was_known } => !was_known,
-                Learned::Rank { old, old_known } => old_known && listed(old),
-            };
-        if forms_edge {
+        if spells.catalog.get(spell_id).is_some_and(teaches_language) {
+            self.lane.write(FieldNotice::Global {
+                id: crate::field_watch::id::LANGUAGE_LIST_CHANGED,
+            });
+        }
+        let replaces = match how {
+            Learned::Fresh => None,
+            Learned::Rank { old } => Some(old),
+        };
+        if let Some(edits) = actions.form_edits.as_mut() {
+            edits.push(crate::ui_shapeshift::FormEdit::Learned { spell_id, replaces });
+        }
+        if crate::ui_shapeshift::form_learned(
+            &mut actions.forms,
+            spell_id,
+            replaces,
+            &spells.catalog,
+        ) {
             self.lane.write(FieldNotice::Global {
                 id: crate::field_watch::id::UPDATE_SHAPESHIFT_FORMS,
             });
+        }
+        if let Some(line) = line {
+            self.errors.push(line);
         }
         let (race, class) = (
             store.0.unit_race().unwrap_or(0),
             store.0.unit_class().unwrap_or(0),
         );
         let lines = self.skill_lines.as_deref().map(|l| &l.catalog);
-        let order = book_order(known, &spells.catalog, lines, race, class);
+        let order = book_order(&actions.spells, &spells.catalog, lines, race, class);
         let Some(tab) = tab_flash_index(spell_id, &order.tab_lines, spells, lines, race, class)
         else {
             return;
@@ -147,21 +181,27 @@ impl BookSignals<'_, '_> {
 
     /// `0x4b2c50`'s tail for `spell_id`, which `was_known` says the known spells held, with a
     /// player held. An unlearn (`unlists` true; a rank-up's removal passes 1, `0x4b2db7`) first
-    /// takes a listed stance-bar spell off the form list and signals `UPDATE_SHAPESHIFT_FORMS`
-    /// (`0x4b2e4e`); then the sort's `SPELLS_CHANGED` (`0x4b2f3f`) when it was in the book
-    /// (`0x4b2f2f`).
+    /// takes the spell off the stored form list where it holds it and signals
+    /// `UPDATE_SHAPESHIFT_FORMS` ([`crate::ui_shapeshift::form_unlearned`]); then the sort's
+    /// `SPELLS_CHANGED` (`0x4b2f3f`) when it was in the book (`0x4b2f2f`).
     pub(crate) fn left(
         &mut self,
         spell_id: u32,
         was_known: bool,
         unlists: bool,
+        actions: &mut crate::ui_action::PlayerActions,
         spells: Option<&Spells>,
     ) {
         let d = spells.and_then(|s| s.catalog.get(spell_id));
         if !was_known || self.me.is_empty() {
             return;
         }
-        if unlists && d.is_some_and(crate::ui_shapeshift::on_stance_bar) {
+        if unlists {
+            if let Some(edits) = actions.form_edits.as_mut() {
+                edits.push(crate::ui_shapeshift::FormEdit::Unlearned { spell_id });
+            }
+        }
+        if unlists && crate::ui_shapeshift::form_unlearned(&mut actions.forms, spell_id) {
             self.lane.write(FieldNotice::Global {
                 id: crate::field_watch::id::UPDATE_SHAPESHIFT_FORMS,
             });
@@ -172,6 +212,12 @@ impl BookSignals<'_, '_> {
             });
         }
     }
+}
+
+/// Whether a spell's first effect is `SPELL_EFFECT_LANGUAGE`, the registrar's test for its
+/// language leg (`0x4b2641`, `[rec+0xf4]`).
+pub(crate) fn teaches_language(d: &benilla_formats::SpellDisplay) -> bool {
+    d.effects[0] == benilla_formats::SPELL_EFFECT_LANGUAGE
 }
 
 /// The 1-based index of `spell_id`'s tab in `tab_lines` (`0x4b2b86 inc edi`), which
@@ -258,7 +304,7 @@ pub(crate) fn book_order(
     let mut order = BookOrder::default();
     for (line_id, name, texture, mut spell_ids) in lines {
         order.tab_lines.push(line_id);
-        spell_ids.sort_by_cached_key(|&a| spell_sort_key(catalog, a));
+        sort_book(&mut spell_ids, |&a| spell_sort_key(catalog, a));
         order.tabs.push(SpellTabView {
             name,
             texture,
@@ -332,32 +378,76 @@ fn build_book(
     )
 }
 
-/// `0x4b30c0`'s tail: name, then the parsed rank number, then the rank string. The rank is the
-/// first digit run of `NameSubtext` (`0x4b3c30`), so any localized prefix parses.
-fn spell_sort_key(catalog: &SpellCatalog, spell_id: u32) -> (String, u32, String) {
+/// One booked spell's place in the comparator `0x4b30c0` sorts a book with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BookKey {
+    name: String,
+    /// `ParseSpellRank`'s answer ([`parse_spell_rank`]).
+    number: u32,
+    rank: String,
+}
+
+/// The key of the spell `spell_id`: [`spell_sort_key_of`] over its record.
+fn spell_sort_key(catalog: &SpellCatalog, spell_id: u32) -> BookKey {
     let d = catalog.get(spell_id);
     spell_sort_key_of(
         d.map(|d| d.name.as_str()).unwrap_or_default(),
         d.and_then(|d| d.rank.as_deref()),
+        d.map_or(0, |d| d.spell_level),
     )
 }
 
-/// [`spell_sort_key`] over a resolved `(name, rank)`, shared with the pet book: `0x4b2fd0` sorts
-/// both books with `0x4b30c0`.
-pub(crate) fn spell_sort_key_of(name: &str, rank: Option<&str>) -> (String, u32, String) {
-    let rank_str = rank.unwrap_or_default().to_string();
-    (name.to_string(), leading_number(&rank_str), rank_str)
+/// [`spell_sort_key`] over a resolved `(name, rank, spell level)`, shared with the pet book:
+/// `0x4b2fd0` sorts both books with `0x4b30c0`.
+pub(crate) fn spell_sort_key_of(name: &str, rank: Option<&str>, spell_level: u32) -> BookKey {
+    let rank = rank.unwrap_or_default();
+    BookKey {
+        name: name.to_string(),
+        number: parse_spell_rank(rank, spell_level),
+        rank: rank.to_string(),
+    }
 }
 
-/// The first ASCII digit run as a number, else 0: the reference's rank parse (`0x4b3c30`).
-fn leading_number(s: &str) -> u32 {
-    s.chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .fold(None::<u32>, |acc, c| {
-            Some(acc.unwrap_or(0) * 10 + c.to_digit(10).unwrap())
-        })
-        .unwrap_or(0)
+/// `ParseSpellRank` (`0x4b3c30`): the rank string's digits accumulate (`0x4b3c60`-`0x4b3c78`),
+/// zeros and non-digits before the first nonzero one are skipped, and the number is returned at the
+/// first non-digit after it (`0x4b3c7e`-`0x4b3c80`) or the string's end; 0 returns the spell's
+/// level (`record+0x74`, `0x4b3c94`).
+fn parse_spell_rank(rank: &str, spell_level: u32) -> u32 {
+    let mut number = 0u32;
+    for byte in rank.bytes() {
+        if byte.is_ascii_digit() {
+            number = number.wrapping_mul(10).wrapping_add(u32::from(byte - b'0'));
+        } else if number != 0 {
+            return number;
+        }
+    }
+    if number != 0 {
+        number
+    } else {
+        spell_level
+    }
+}
+
+/// `0x4b30c0` past its skill-line test: the names (`0x4b3143`), then the two parsed numbers where
+/// both are nonzero (`0x4b315c`-`0x4b3164`), which equal compare equal, else the rank strings
+/// (`0x4b3193`).
+pub(crate) fn book_cmp(a: &BookKey, b: &BookKey) -> std::cmp::Ordering {
+    a.name.cmp(&b.name).then_with(|| {
+        if a.number != 0 && b.number != 0 {
+            a.number.cmp(&b.number)
+        } else {
+            a.rank.cmp(&b.rank)
+        }
+    })
+}
+
+/// `items` in [`book_cmp`] order, by the CRT `qsort` the book sort runs (`0x4b2fd0` →
+/// `0x73f727`): the comparator is no total order where one spell parses to 0 (a rank and a level
+/// both 0), so where such spells land is the quicksort's.
+pub(crate) fn sort_book<T>(items: &mut Vec<T>, key: impl Fn(&T) -> BookKey) {
+    let mut keyed: Vec<(BookKey, T)> = items.drain(..).map(|t| (key(&t), t)).collect();
+    benilla_ui::crt::qsort(&mut keyed, |a, b| book_cmp(&a.0, &b.0) as i32);
+    items.extend(keyed.into_iter().map(|(_, t)| t));
 }
 
 /// `CastSpell(id, "spell", onSelf)` and `CastSpellByName(name, onSelf)` (`0x4b3300`'s player leg),
@@ -425,14 +515,52 @@ mod tests {
     use benilla_ui::script::SpellBookState;
     use std::collections::HashMap;
 
+    /// `ParseSpellRank` (`0x4b3c30`): zeros are digits that add nothing and a non-digit ends the
+    /// number only once it is nonzero; a rank that parses to 0 takes the spell's level.
     #[test]
-    fn leading_number_scans_the_first_digit_run() {
-        assert_eq!(leading_number("Rank 1"), 1);
-        assert_eq!(leading_number("Rank 10"), 10);
-        assert_eq!(leading_number("Rank 2"), 2);
-        assert_eq!(leading_number(""), 0);
-        assert_eq!(leading_number("Racial"), 0); // digit-less: the reference uses SpellLevel
-        assert_eq!(leading_number("Apprentice"), 0);
+    fn parse_spell_rank_skips_zeros_and_falls_back_to_the_level() {
+        assert_eq!(parse_spell_rank("Rank 1", 9), 1);
+        assert_eq!(parse_spell_rank("Rank 10", 9), 10);
+        assert_eq!(parse_spell_rank("Rank 05", 9), 5);
+        assert_eq!(parse_spell_rank("Rank 0, 3", 9), 3, "past a zero run");
+        assert_eq!(
+            parse_spell_rank("1a2", 9),
+            1,
+            "the first nonzero run ends at a non-digit"
+        );
+        assert_eq!(parse_spell_rank("", 9), 9);
+        assert_eq!(parse_spell_rank("Apprentice", 9), 9);
+        assert_eq!(parse_spell_rank("Rank 0", 9), 9);
+    }
+
+    /// `0x4b30c0` compares the numbers only where both are nonzero, else the rank strings.
+    #[test]
+    fn same_name_spells_sort_by_level_where_the_rank_has_no_number() {
+        let key = |rank: &str, level| spell_sort_key_of("Summon", Some(rank), level);
+        let (apprentice, journeyman) = (key("Apprentice", 5), key("Journeyman", 3));
+        assert!(
+            book_cmp(&journeyman, &apprentice).is_lt(),
+            "by level, not by string"
+        );
+        // Equal numbers are equal, whatever the strings.
+        assert!(book_cmp(&key("Rank 2", 0), &key("Rang 2", 0)).is_eq());
+        // A zero on either side compares the strings.
+        assert!(book_cmp(&key("Apprentice", 0), &key("Journeyman", 9)).is_lt());
+        assert!(book_cmp(&key("Rank 2", 0), &key("Rank 10", 0)).is_lt());
+
+        let mut map = HashMap::new();
+        for (id, rank, level) in [(1, "Apprentice", 5), (2, "Journeyman", 3), (3, "Expert", 8)] {
+            let mut d = spell("Summon", Some(rank), 0);
+            d.spell_level = level;
+            map.insert(id, d);
+        }
+        let catalog = SpellCatalog::from_displays(map);
+        let known: BTreeSet<u32> = [1, 2, 3].into_iter().collect();
+        let book = build_book(&known, &catalog, None, 1, 1, None, None).0;
+        assert_eq!(
+            book.slots.iter().map(|s| s.spell_id).collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
     }
 
     /// A minimal `SpellDisplay`: `attributes` drives the gate, `rank` the sort.

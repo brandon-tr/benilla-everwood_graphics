@@ -92,11 +92,11 @@ pub enum TalentReq {
 impl TalentReq {
     /// The line as `0x52b390` writes it now, `None` for a missing or empty template.
     fn line(&self, lua: &Lua) -> Option<String> {
-        use crate::strings::{fill, global, plural, Arg};
+        use crate::strings::{fill, global, plural, Arg, Strings};
         let get = |key: &str| global(lua, key);
         Some(match self {
             Self::Prereq { rank, name } => fill(
-                &plural("TOOLTIP_TALENT_PREREQ", Some(*rank), &get)?,
+                &plural("TOOLTIP_TALENT_PREREQ", Some(*rank), Strings::Vm(lua))?,
                 &[Arg::D(i64::from(*rank)), Arg::S(name)],
             ),
             Self::Tier { points, tab } => fill(
@@ -189,7 +189,8 @@ impl LiveQuery for CharacterPoints {
     type Answer = (u32, u32);
 }
 
-/// Whether a trainer's respec question is latched and in range (`0x5df980` with a zero guid).
+/// Whether a trainer's respec question is latched and its trainer in range at the call
+/// (`0x48d194` → `0x5dfb10`).
 #[derive(Clone, Copy, Debug)]
 pub struct TalentMasterPending;
 
@@ -365,8 +366,8 @@ pub(super) fn install(lua: &Lua) -> mlua::Result<()> {
     )?;
 
     // CheckTalentMasterDist(): polled by that dialog's OnUpdate, nil hides it. The reference
-    // re-runs its interact-range test on the latched trainer (`0x5df980`, `d² <= [0xc4c28c]`);
-    // no packet either way.
+    // runs its interact-range test on the latched trainer at the call (`0x48d170` → `0x5dfb10`,
+    // `d² <= [0xc4c28c]`); no packet either way.
     g.set(
         "CheckTalentMasterDist",
         lua.create_function(|lua, ()| {
@@ -414,15 +415,6 @@ pub(super) fn install_tooltip_method(lua: &Lua, m: &Table) -> mlua::Result<()> {
                 let Some(t) = talent_at(lua, &model, tab, i) else {
                     return Ok(());
                 };
-                // From the ask-once spell store; a miss shows on the next hover.
-                let next_desc = (t.next_spell != 0)
-                    .then(|| {
-                        model
-                            .spell_tooltips
-                            .get(&t.next_spell)
-                            .map(|v| v.description.clone())
-                    })
-                    .flatten();
                 (
                     t.display_spell,
                     (t.rank, t.max_rank),
@@ -432,11 +424,15 @@ pub(super) fn install_tooltip_method(lua: &Lua, m: &Table) -> mlua::Result<()> {
                         rank_line: None,
                         reqs: Vec::new(),
                         next_spell: t.next_spell,
-                        next_desc,
+                        next_desc: None,
                         learn: t.learnable,
                     },
                 )
             };
+            // The next rank's description, built at the call through the lent host, else off the
+            // store, where a miss shows on the next hover.
+            lines.next_desc = super::tooltip_spell::spell_view_peek(lua, lines.next_spell, false)
+                .map(|v| v.description);
             // `TOOLTIP_TALENT_RANK`, "Rank %d/%d" (`0x854a2c`, pushed at `0x52b213`); an
             // install without it shows no rank line. A GlobalStrings read runs an `_G` `__index`
             // (`0x703bf0`), which may call any verb, so it is made once the Model is released.

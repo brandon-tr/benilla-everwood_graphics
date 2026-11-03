@@ -37,7 +37,9 @@ pub(crate) struct DynamicInteriorPlugin;
 
 impl Plugin for DynamicInteriorPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, bridge);
+        // After the frame's cvar drain: it runs the video callbacks inside the call now, so it
+        // writes `VideoConfig` and the bridge must read the settled knobs.
+        app.add_systems(Update, bridge.after(crate::ui_script::UiDrain));
     }
 }
 

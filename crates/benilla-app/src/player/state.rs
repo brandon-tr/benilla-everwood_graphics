@@ -118,8 +118,9 @@ pub(super) const SKIN_WIDTH: f32 = 0.02;
 /// deadline on while the world is stale or any load counter moves, so only a dead stream hits it.
 /// Terrain that never arrives still holds the body, by the world query gate ([`super::edge`]),
 /// so what the release can hand over early is a placement that never spawned. Deviation: the
-/// reference's blocking load (`0x694920`) waits out its reads before the frame goes on and has
-/// no such release; without one, a model that never loads would freeze our body for good.
+/// reference's blocking load (`0x694920`) waits out its reads before the frame goes on and has no
+/// such release; the timeout exists because without one a model that never loads would freeze our
+/// body for good.
 pub(crate) const SETTLE_TIMEOUT: f32 = 6.0;
 
 /// The player body's collision capsule, swept by avian's `MoveAndSlide`: origin at its centre, the
@@ -224,8 +225,8 @@ pub(crate) struct MoverInput {
     pub(crate) dead: bool,
     /// The far-sight term, held true while our view is out on a far-sight object and we drive our
     /// own body: `[mover+0x1c70] & 1`, read only when the mover is the active player (`0x514537`).
-    /// The latch sets only once the subject resolves (`0x5ee3f6`), so this follows the resolved
-    /// [`super::view_subject::ViewSubject`], not the raw `PLAYER_FARSIGHT` field.
+    /// It is the latch ([`super::view_subject::FarSight::on`]), not the raw `PLAYER_FARSIGHT`
+    /// field: it sets only once the subject resolves (`0x5ee3f6`).
     pub(crate) view_is_out: bool,
 }
 
@@ -309,6 +310,26 @@ impl StandPending {
     }
 }
 
+/// Who we drive and whether we may: the mover's lock, apart from [`Player`]'s frame-time movement
+/// state, as the packets write it inside their handlers (our own create's arrival) and the
+/// controller (a control update), where the frame's movement is the controller's alone.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct MoverLock {
+    /// `SMSG_CLIENT_CONTROL_UPDATE` with `allowMove = 0` named the unit we drive: us, while someone
+    /// mind-controls us, or our possessed creature when feared or confused, the possession
+    /// standing. The reference zeroes its mover; vmangos neither roots a charmed player nor refuses
+    /// its movement, so nothing else holds the body. Unlike a root, it stops turning too.
+    pub(crate) control_lost: bool,
+    /// The unit we drive in place of our body (a mind-controlled creature, Eye of Kilrogg), `None`
+    /// for our own. Our body must then send nothing: outbound `MSG_MOVE_*` carry no guid, so the
+    /// server applies them to whatever we last claimed.
+    pub(crate) foreign_mover: Option<u64>,
+    /// The driven body changed, and we drive nothing until its streamed pose is adopted, since
+    /// `pos` and the facing still describe the last one. Set when the mover guid changes, cleared
+    /// at the take-control edge.
+    pub(crate) reseat: bool,
+}
+
 /// Our avatar: until `active` the camera free-flies, then we drive the body the server placed.
 /// `PartialEq` serves the test that the session end resets the whole of it to `Player::default()`.
 #[derive(Resource, Default, PartialEq)]
@@ -331,19 +352,6 @@ pub(crate) struct Player {
     pub(super) auto_forward: bool,
     /// Free-fly (`F`): the camera moves on its own and the avatar/server position is frozen.
     pub(crate) detached: bool,
-    /// `SMSG_CLIENT_CONTROL_UPDATE` with `allowMove = 0` named the unit we drive: us, while someone
-    /// mind-controls us, or our possessed creature when feared or confused, the possession
-    /// standing. The reference zeroes its mover; vmangos neither roots a charmed player nor refuses
-    /// its movement, so nothing else holds the body. Unlike a root, it stops turning too.
-    pub(crate) control_lost: bool,
-    /// The unit we drive in place of our body (a mind-controlled creature, Eye of Kilrogg), `None`
-    /// for our own. Our body must then send nothing: outbound `MSG_MOVE_*` carry no guid, so the
-    /// server applies them to whatever we last claimed.
-    pub(crate) foreign_mover: Option<u64>,
-    /// The driven body changed, and we drive nothing until its streamed pose is adopted, since
-    /// `pos` and the facing still describe the last one. Set when the mover guid changes, cleared
-    /// at the take-control edge.
-    pub(crate) reseat: bool,
     /// Feet position in Bevy coords, converted to WoW coords only for the wire.
     pub(crate) pos: Vec3,
     /// Vertical velocity (yd/s, Bevy +Y up), zeroed while grounded.
@@ -453,6 +461,10 @@ pub(crate) struct Player {
     /// Airborne at the end of the last mover step: the mover's own record, since
     /// [`Self::airborne_since`] is written by [`super::flags`], which runs after the mover.
     pub(super) airborne_prev: bool,
+    /// Where the last resolved step left the body standing, with its walkable floor: an idle mover,
+    /// no bit of `0x200f`, runs no resolver (`0x634100`), so until something moves the body it
+    /// stands there without a collide, a classify or a fall.
+    pub(super) rest: Option<(Vec3, Option<Entity>)>,
     /// The direction bits the current arc launched with: mid-air they are the actual motion, so the
     /// live flags read them instead of the keys; re-seeded by the air nudge, stale while grounded.
     pub(super) airborne_dirs: u32,
@@ -636,15 +648,15 @@ impl Player {
 
     /// The states on this resource that stop WASD, comma-joined, or `"none"`: an instrument for the
     /// log after a session boundary, not a gate. A stun lives on the descriptor and does not show.
-    pub(crate) fn movement_suppressors(&self) -> String {
+    pub(crate) fn movement_suppressors(&self, lock: &MoverLock) -> String {
         let named = [
             (!self.active, "inactive"),
             (self.detached, "free-fly"),
             (self.modes.rooted, "root"),
-            (self.control_lost, "control-lost"),
+            (lock.control_lost, "control-lost"),
             (self.server_riding, "server-ride"),
-            (self.foreign_mover.is_some(), "possession"),
-            (self.reseat, "reseat-pending"),
+            (lock.foreign_mover.is_some(), "possession"),
+            (lock.reseat, "reseat-pending"),
         ];
         let list: Vec<&str> = named
             .into_iter()
@@ -682,6 +694,26 @@ impl Player {
     /// `UnitOnTaxi`, which reads [`crate::player::UNIT_FLAG_TAXI_FLIGHT`] (`0x517a86`).
     pub(crate) fn server_riding(&self) -> bool {
         self.server_riding
+    }
+
+    /// The root mode as the frame's acks left it (`MOVEMENTFLAGS & 0x1200`).
+    pub(crate) fn rooted(&self) -> bool {
+        self.modes.rooted
+    }
+
+    /// Rooted, as a root's ack leaves the mover, for a test.
+    #[cfg(test)]
+    pub(crate) fn root_for_test(&mut self) {
+        self.modes.rooted = true;
+    }
+
+    /// Autorun, for a test to hold and read.
+    #[cfg(test)]
+    pub(crate) fn autorun_for_test(&mut self, held: Option<bool>) -> bool {
+        if let Some(held) = held {
+            self.autorun = held;
+        }
+        self.autorun
     }
 }
 

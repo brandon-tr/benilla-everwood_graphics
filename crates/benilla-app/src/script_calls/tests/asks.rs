@@ -2,7 +2,8 @@
 //! misses asks the cache inside its call, so the query goes out ahead of the chunk's next verb
 //! (`RandomRoll`, `0x48c832`), as the reference's lookup sends it on the miss (`0x556aa0`).
 
-use benilla_ui::script::{TradeSideState, TradeSlotItem, TradeState, UiScript, UnitState};
+use benilla_protocol::messages::{TradeItem, TradeStatusExtended, TRADE_SLOT_COUNT};
+use benilla_ui::script::{UiScript, UnitState};
 use bevy::prelude::*;
 use crossbeam_channel::Receiver;
 
@@ -34,8 +35,70 @@ fn vm(app: &mut App) -> Mut<'_, UiScript> {
 /// The active player's guid, which the ammo and cooldown lookups pass as their owner id.
 const ME: u64 = 0x2a;
 
-/// The VM's active player, as the unit feeds seat it.
+/// `PLAYER_AMMO_ID`.
+const AMMO_ID: u16 = 1223;
+
+/// [`seat_player`] with arrows as its ammo, `PLAYER_AMMO_ID`, and 200 of them carried in the
+/// backpack's first seat: the slot the ammo getters read at the call, and the count their asks
+/// wait on (`0x4c83a0`).
+fn seat_ammo(app: &mut App) {
+    use benilla_protocol::field::{
+        FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
+    };
+    const ARROWS: u64 = 0x4000_0000_0000_0061;
+    let seat = FIELD_PLAYER_INV_SLOT_HEAD + 2 * 23;
+    seat_player_with(
+        app,
+        &[
+            (AMMO_ID, 2512),
+            (seat, ARROWS as u32),
+            (seat + 1, (ARROWS >> 32) as u32),
+        ],
+    );
+    let world = app.world_mut();
+    let arrows = world
+        .spawn((
+            crate::net::Guid(ARROWS),
+            crate::net::ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(&[
+                    (2, 0x3),
+                    (FIELD_OBJECT_ENTRY, 2512),
+                    (FIELD_ITEM_STACK_COUNT, 200),
+                ])
+                .into_created(benilla_protocol::messages::ObjectType::Item),
+            ),
+        ))
+        .id();
+    world
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(ARROWS, arrows);
+}
+
+/// The active player: its object, which the inventory getters find held (`0x4944af`), and the
+/// VM's guid, as the unit feeds seat it.
 fn seat_player(app: &mut App) {
+    seat_player_with(app, &[]);
+}
+
+/// [`seat_player`], its object holding `pairs`.
+fn seat_player_with(app: &mut App, pairs: &[(u16, u32)]) {
+    let world = app.world_mut();
+    let me = world
+        .spawn((
+            crate::net::Guid(ME),
+            crate::net::SelfPlayer,
+            crate::net::ObjectStore(
+                benilla_protocol::ObjectFields::from_pairs(pairs)
+                    .into_created(benilla_protocol::messages::ObjectType::Player),
+            ),
+        ))
+        .id();
+    world
+        .resource_mut::<crate::net::GuidIndex>()
+        .0
+        .insert(ME, me);
+    world.resource_mut::<crate::net::SelfGuid>().0 = Some(ME);
     vm(app).set_unit_guids(&benilla_ui::script::UnitGuids {
         player: ME,
         ..Default::default()
@@ -73,27 +136,56 @@ fn unit_name_asks_a_missed_name_inside_its_call() {
     assert_eq!(sent(&rx), ["name 0x77", "roll 1"]);
 }
 
+/// A trade with the partner `0x88` open, `theirs` in his slot 1 and `ours` in our slot 2, as the
+/// session holds them: the getters read it at the call.
+fn open_trade(app: &mut App, theirs: TradeItem, ours: TradeItem) {
+    let world = app.world_mut();
+    world
+        .resource_mut::<crate::ui_trade::TradeSession>()
+        .begin(0x88);
+    crate::ui_trade::open_window(world, None);
+    let mut slots = [None; TRADE_SLOT_COUNT];
+    slots[0] = Some(theirs);
+    let status = TradeStatusExtended {
+        their_window: true,
+        sequence: 0,
+        flag: 0,
+        gold: 0,
+        enchant_spell_id: 0,
+        slots,
+    };
+    let mut trade = world.resource_mut::<crate::ui_trade::TradeSession>();
+    trade.set_offer(&status, &mut crate::ui_trade::TradeLane::default());
+    trade.place_own_item(2, ours);
+}
+
+/// A trade slot's block holding `count` of `entry`.
+fn trade_item(entry: u32, count: u32) -> TradeItem {
+    TradeItem {
+        entry,
+        display_id: 0,
+        count,
+        wrapped: false,
+        gift_creator: 0,
+        perm_enchant: 0,
+        creator: 0,
+        charges: 0,
+        suffix_factor: 0,
+        random_prop_id: 0,
+        lock_id: 0,
+        max_durability: 0,
+        durability: 0,
+    }
+}
+
 /// A trade getter that finds a filled slot whose template the cache lacks asks the item cache
 /// with the callback `0x4c0340` inside its call (`0x4c017f`, `0x4c0582`), so the query goes out
 /// ahead of the chunk's next verb, and the callback waits for the record.
 #[test]
 fn a_trade_getter_asks_a_missed_template_inside_its_call() {
     let (mut app, rx) = client();
-    let mut target = TradeSideState::default();
-    target.slots[0] = Some(TradeSlotItem {
-        item_id: 4306,
-        count: 1,
-        ..Default::default()
-    });
-    let mut player = TradeSideState::default();
-    player.slots[1] = Some(TradeSlotItem {
-        item_id: 2592,
-        count: 1,
-        ..Default::default()
-    });
     // The open sets the partner cell `[0xb71728]` (`0x4bf549`), then the statuses fill the offers.
-    vm(&mut app).open_trade_window(0x88);
-    vm(&mut app).set_trade(Some(TradeState { player, target }));
+    open_trade(&mut app, trade_item(4306, 1), trade_item(2592, 1));
     seat_player(&mut app);
     eval::<()>(
         &mut app,
@@ -105,22 +197,12 @@ fn a_trade_getter_asks_a_missed_template_inside_its_call() {
 }
 
 /// A trade slot whose record the cache already holds answers in the getter's call, though the
-/// frame's push had it uncached: the getter reads the cache as it runs (`0x4c017f`, `0x4c0582`),
+/// window's open had it uncached: the getter reads the cache as it runs (`0x4c017f`, `0x4c0582`),
 /// so it asks nothing and waits on no callback, and the slot never reads empty.
 #[test]
 fn a_trade_getter_answers_a_cached_record_inside_its_call() {
     let (mut app, rx) = client();
-    let mut target = TradeSideState::default();
-    target.slots[0] = Some(TradeSlotItem {
-        item_id: 4306,
-        count: 3,
-        ..Default::default()
-    });
-    vm(&mut app).open_trade_window(0x88);
-    vm(&mut app).set_trade(Some(TradeState {
-        player: TradeSideState::default(),
-        target,
-    }));
+    open_trade(&mut app, trade_item(4306, 3), trade_item(2592, 1));
     seat_player(&mut app);
     app.world_mut()
         .resource_mut::<crate::items::Items>()
@@ -322,14 +404,7 @@ fn a_battlefield_position_asks_a_missed_name_inside_its_call() {
 #[test]
 fn the_ammo_getters_ask_a_missed_record_inside_their_calls() {
     let (mut app, rx) = client();
-    let mut slots: benilla_ui::script::InventorySlots = Default::default();
-    slots[0] = Some(benilla_ui::script::InvSlotView {
-        item_id: 2512,
-        count: 200,
-        ..Default::default()
-    });
-    vm(&mut app).set_inventory_slots(slots);
-    seat_player(&mut app);
+    seat_ammo(&mut app);
     eval::<()>(
         &mut app,
         r#"GetInventoryItemTexture("player", 0) RandomRoll(1, 2)
@@ -351,14 +426,7 @@ fn the_ammo_getters_ask_a_missed_record_inside_their_calls() {
 #[test]
 fn the_ammo_getters_query_body_is_byte_exact() {
     let (mut app, rx) = client();
-    let mut slots: benilla_ui::script::InventorySlots = Default::default();
-    slots[0] = Some(benilla_ui::script::InvSlotView {
-        item_id: 2512,
-        count: 200,
-        ..Default::default()
-    });
-    vm(&mut app).set_inventory_slots(slots);
-    seat_player(&mut app);
+    seat_ammo(&mut app);
     eval::<()>(&mut app, r#"GetInventoryItemTexture("player", 0)"#);
     let bodies: Vec<Vec<u8>> = rx
         .try_iter()
@@ -378,28 +446,47 @@ fn the_ammo_getters_query_body_is_byte_exact() {
 /// call, and the cooldowns await the record.
 #[test]
 fn the_cooldown_queries_ask_a_missed_record_inside_their_calls() {
-    use benilla_ui::script::{ContainerSlot, ContainerState, InvSlotView, InventorySlots};
-    let (mut app, rx) = client();
-    let pending = |item_id: u32| ContainerSlot {
-        item_id,
-        count: 1,
-        ..Default::default()
+    use benilla_protocol::field::{
+        FIELD_ITEM_STACK_COUNT, FIELD_OBJECT_ENTRY, FIELD_PLAYER_INV_SLOT_HEAD,
     };
-    vm(&mut app).set_container(
-        0,
-        Some(ContainerState {
-            name: None,
-            num_slots: 16,
-            slots: std::collections::HashMap::from([(1, pending(6948)), (2, pending(5976))]),
-        }),
-    );
-    let mut worn: InventorySlots = Default::default();
-    worn[14] = Some(InvSlotView {
-        item_id: 2589,
-        ..Default::default()
-    });
-    vm(&mut app).set_inventory_slots(worn);
-    seat_player(&mut app);
+    let (mut app, rx) = client();
+    // The backpack's first two seats, 23 and 24, and the hands, 13 (live id 14), hold the three
+    // items whose records are missing.
+    let held = [
+        (23, 0x4000_0000_0000_0051_u64, 6948),
+        (24, 0x4000_0000_0000_0052, 5976),
+        (13, 0x4000_0000_0000_0053, 2589),
+    ];
+    let half = |lo: u16, guid: u64| [(lo, guid as u32), (lo + 1, (guid >> 32) as u32)];
+    let seats: Vec<(u16, u32)> = held
+        .iter()
+        .flat_map(|&(n, guid, _)| half(FIELD_PLAYER_INV_SLOT_HEAD + 2 * n, guid))
+        .collect();
+    seat_player_with(&mut app, &seats);
+    // Held as objects, the record still unasked: spawned past the create handler, which asks it.
+    for &(_, guid, entry) in &held {
+        let mut pairs = vec![
+            (2, 0x3),
+            (FIELD_OBJECT_ENTRY, entry),
+            (FIELD_ITEM_STACK_COUNT, 1),
+        ];
+        pairs.extend(half(6, ME));
+        pairs.extend(half(8, ME));
+        let world = app.world_mut();
+        let item = world
+            .spawn((
+                crate::net::Guid(guid),
+                crate::net::ObjectStore(
+                    benilla_protocol::ObjectFields::from_pairs(&pairs)
+                        .into_created(benilla_protocol::messages::ObjectType::Item),
+                ),
+            ))
+            .id();
+        world
+            .resource_mut::<crate::net::GuidIndex>()
+            .0
+            .insert(guid, item);
+    }
     eval::<()>(
         &mut app,
         r#"local tip = CreateFrame("GameTooltip", "AskTip")
@@ -420,16 +507,20 @@ fn the_cooldown_queries_ask_a_missed_record_inside_their_calls() {
             "roll 5"
         ]
     );
-    let cooldowns = app.world().resource::<crate::spell::Cooldowns>();
+    let mut items = app.world_mut().resource_mut::<crate::items::Items>();
     for entry in [6948, 5976, 2589] {
-        assert!(cooldowns.awaits_item_record(entry), "{entry} awaited");
+        assert_eq!(
+            items.take_waiters(entry, crate::items::RecordCallback::CooldownQuery),
+            1,
+            "{entry} awaited"
+        );
     }
 }
 
 /// The trainer's icon and description getters look the product's record up with the callbacks
 /// `0x4d9140` and `0x4d9db0` and no dedupe (`0x4d9079`-`0x4d9096`, `0x4d9cea`-`0x4d9d07`): a miss
 /// sends the item query inside the call, once while it is in flight, and each call leaves its
-/// callback on the window.
+/// callback on the item cache.
 #[test]
 fn the_trainer_getters_ask_a_missed_record_inside_their_calls() {
     use benilla_ui::script::{ProductWait, TrainerService, TrainerServiceCategory, TrainerState};
@@ -470,36 +561,45 @@ fn the_trainer_getters_ask_a_missed_record_inside_their_calls() {
             format!("item 2590 {owner:#x}")
         ]
     );
+    let mut items = app.world_mut().resource_mut::<crate::items::Items>();
+    let trainer = [crate::items::RecordCallback::Trainer];
     assert_eq!(
-        app.world()
-            .resource::<crate::ui_trainer::TrainerOpen>()
-            .item_waits,
-        [2589, 2590, 2589],
+        items.take_callbacks(2589),
+        [trainer; 2].concat(),
         "a callback per call"
     );
+    assert_eq!(items.take_callbacks(2590), trainer);
 }
 
 /// `GetQuestItemInfo` looks a template in flight up with the callback `0x5018c0` and no dedupe
 /// (`0x5017ca`-`0x5017de`): the item query goes out inside the call, once while it is in flight.
 #[test]
 fn get_quest_item_info_asks_a_missed_record_inside_its_call() {
-    use benilla_ui::script::{QuestItemView, QuestPanel, QuestState};
+    use benilla_protocol::messages::{QuestOfferReward, QuestRewardItem};
     let (mut app, rx) = client();
-    let pending = |item_id: u32| QuestItemView {
+    let pending = |item_id: u32| QuestRewardItem {
         item_id,
         count: 1,
-        ..Default::default()
+        display_id: 0,
     };
-    vm(&mut app).set_quest(Some(QuestState {
-        panel: QuestPanel::Reward,
-        rewards: vec![pending(2589)],
-        choices: vec![pending(2590)],
-        ..Default::default()
-    }));
     // The panel's source, `[0xbe0810]`, which the panel setter writes (`0x500d86`).
     app.world_mut()
         .resource_mut::<crate::ui_quest::QuestGiver>()
-        .npc = Some(NPC);
+        .open(
+            NPC,
+            crate::ui_quest::QuestView::Reward(QuestOfferReward {
+                npc: NPC,
+                quest_id: 1,
+                title: String::new(),
+                offer_text: String::new(),
+                auto_finish: 0,
+                choices: vec![pending(2590)],
+                rewards: vec![pending(2589)],
+                money: 0,
+                quest_flags: 0,
+                reward_spell: 0,
+            }),
+        );
     eval::<()>(
         &mut app,
         r#"GetQuestItemInfo("reward", 1) RandomRoll(1, 2) GetQuestItemInfo("choice", 1)

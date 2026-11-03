@@ -553,7 +553,9 @@ fn build_skybox(
             // The authored batch order after the layer's base (0 is unordered): every batch shares
             // one sort distance.
             let order = skybox_batch_order(layer.celestial, celestial_batches, i);
-            let Some(mut pair) = mats.skybox(sub, texture, order, uv.as_ref(), tint.as_ref())
+            // The sky lane binds its own second stage through `sky_stage1` below (it carries the
+            // MOD2X mode and its own UV set), so the generic stage-1 slot stays empty here.
+            let Some(mut pair) = mats.skybox(sub, texture, None, order, uv.as_ref(), tint.as_ref())
             else {
                 return; // light buffer vanished mid-build; `built` is unlatched, so we retry
             };
