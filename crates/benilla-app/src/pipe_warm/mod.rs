@@ -373,6 +373,9 @@ fn run_warm_pass(
         let Some(torch) = torch.binds() else {
             return;
         };
+        let Some(rig_taa) = lanes.rig_taa.as_deref().cloned() else {
+            return;
+        };
         if !cover.presented() {
             return;
         }
@@ -407,6 +410,7 @@ fn run_warm_pass(
             &mut cache,
             &light.0,
             &torch,
+            &rig_taa,
         );
         info!("pipeline warm: menagerie up ({count} variants, {WARM_REVEAL_PER_FRAME}/frame)");
         return;

@@ -677,6 +677,7 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own: faint screen dither against sky and fog banding, 0 Off / 1 On",
     ),
     // MONKEY (post): tier 0 leaves every emissive site and the frame byte-identical.
+    ours("gxAntiAliasing", "1", "benilla's own: 0 Off (native, no AA) / 1 existing MSAA / 2 native Everwood TAA (temporal resolve, not 1.12.1); applied at client restart"),
     ours("bloom", "2", "benilla's own: HDR emissive bloom, 0 Off / 1 Low / 2 High"),
     ours("sunShafts", "1", "benilla's own: depth-occluded screen-space sun shafts"),
     ours("colorGrading", "1", "benilla's own: zone and day/night 32-cube colour grade"),

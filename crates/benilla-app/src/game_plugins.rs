@@ -159,6 +159,9 @@ impl PluginGroup for GamePlugins {
             .add(TextInputPlugin)
             .add(UiScriptPlugin)
             // Before CvarPlugin, so the resource exists when `load_config` applies the saved value.
+            // Native-TAA saved option; its boot snapshot is read after `CvarLoad`.
+            .add(crate::aa_options::AaOptionsPlugin)
+            // Before CvarPlugin, so the resource exists when `load_config` applies the saved value.
             .add(crate::video::VideoPlugin)
             // MONKEY (shadows): the shared rig (loads first) + the independent lane plugins. Here,
             // between `VideoPlugin` and `RealmlistPlugin`, because every one of them registers cvars

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 /// The engine's module set when the world lives inside `benilla-app`: an engine module missing
 /// here hides its leaks. Unused once `crates/benilla-world` exists, which the scan checks.
 const ENGINE_ROOTS: &[&str] = &[
+    "aa",
     "art_scope",
     "assets",
     "billboard",
@@ -81,6 +82,15 @@ fn is_instrument_consumer(rel: &str) -> bool {
 /// The designed API: every engine item game code may name, with the record that published it
 /// (`wall`: published without one). Adding a row is a claim made in review, with its record.
 const PUBLISHED: &[(&str, &str)] = &[
+    ("aa::AaEffective", "wall"),
+    ("aa::AaInvalidation", "wall"),
+    ("aa::AaMode", "wall"),
+    ("aa::AaPolicy", "wall"),
+    ("aa::AaPolicyResolved", "wall"),
+    ("aa::AaReadiness", "wall"),
+    ("aa::TemporalHistory", "wall"),
+    ("aa::TemporalOpaqueSnapshotLabel", "wall"),
+    ("aa::TemporalTarget", "wall"),
     ("bgwin::BgWinPlugin", "wall"),
     ("bgwin::background_run", "record"),
     ("bgwin::no_pixel_run", "record"),

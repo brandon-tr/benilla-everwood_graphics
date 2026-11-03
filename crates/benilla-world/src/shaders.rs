@@ -21,47 +21,17 @@ pub(crate) fn plugin(app: &mut App) {
     bevy::asset::embedded_asset!(app, "shaders/static_gx.wgsl");
     // MONKEY (torch shadows Phase 1): the vertex-only depth-map shader for the interior-fixture pass.
     bevy::asset::embedded_asset!(app, "shaders/torch_depth.wgsl");
+    // Temporal depth: the single-sample opaque-depth copy for the future native TAA lane.
+    bevy::asset::embedded_asset!(app, "shaders/temporal_depth.wgsl");
+    // Temporal motion: camera-only reprojection candidates on that depth.
+    bevy::asset::embedded_asset!(app, "shaders/temporal_motion.wgsl");
+    // Temporal reactive: opaque-color snapshot and transparent-delta mask.
+    bevy::asset::embedded_asset!(app, "shaders/temporal_reactive.wgsl");
+    // Temporal rejection: conservative per-view model rejection mask.
+    bevy::asset::embedded_asset!(app, "shaders/temporal_rejection.wgsl");
+    // Private reconstructed-color resolve and its first-frame seed pass.
+    bevy::asset::embedded_asset!(app, "shaders/temporal_resolve.wgsl");
 }
 
 #[cfg(test)]
-mod tests {
-    use bevy::asset::io::AssetSourceId;
-    use bevy::prelude::*;
-
-    /// Reads each file on disk back through the embedded source a `ShaderRef` uses, so a shader
-    /// that is unregistered, or registered from a submodule, fails here instead of drawing nothing.
-    #[test]
-    fn every_engine_shader_answers_at_its_embedded_path() {
-        let mut app = App::new();
-        app.add_plugins(bevy::asset::AssetPlugin::default());
-        app.add_plugins(super::plugin);
-        let server = app.world().resource::<AssetServer>();
-        let source = server.get_source(AssetSourceId::from("embedded")).unwrap();
-
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders");
-        let mut found = 0;
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if !name.ends_with(".wgsl") {
-                continue;
-            }
-            found += 1;
-            let path = format!("benilla_world/shaders/{name}");
-            let read = bevy::tasks::block_on(async {
-                source.reader().read(std::path::Path::new(&path)).await
-            });
-            assert!(
-                read.is_ok(),
-                "embedded://{path} does not resolve — {name} is on disk but not registered in \
-                 `shaders::plugin`, or was registered from a file that is not directly under src/"
-            );
-        }
-        // 6 since decision 1264 retired `skybox.wgsl` (a WMO skybox draws on the shared
-        // model lane, whose forced-far-depth branch lives in `benilla_assets`'
-        // `wow_model.wgsl`); 7 since 1429 added `static_gx.wgsl` (the B1 retained pass);
-        // 8 since 2016 added `sky_vertex.wgsl` (the sky's shared far-depth vertex stage);
-        // 9 since the torch-shadow Phase 1 added `torch_depth.wgsl` (the interior depth map).
-        // MONKEY (sky): 10 with `sky_fx.wgsl`, the sky's Enhanced/High library.
-        assert_eq!(found, 10, "the engine's shader set changed size");
-    }
-}
+mod tests;

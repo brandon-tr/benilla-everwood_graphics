@@ -8,7 +8,9 @@ use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Buffer, Face};
 
-use benilla_assets::materials::{TorchBinds, WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
+use benilla_assets::materials::{
+    RigTaaBinds, TorchBinds, WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF,
+};
 
 mod batch;
 pub mod lazy;
@@ -43,6 +45,7 @@ fn wmo_bias_off() -> bool {
 pub struct MatKey {
     /// The bound light buffer: the world, a portrait booth and char select each bind their own.
     light: bevy::render::render_resource::BufferId,
+    rig_taa: bevy::render::render_resource::BufferId,
     texture: Option<AssetId<Image>>,
     blend: ModelBlend,
     two_sided: bool,
@@ -163,6 +166,7 @@ pub fn model_material(
     // MONKEY (torch shadows Phase 3A): the shared torch depth image + table buffer, cloned into the
     // material beside `light` (not a key axis — one pair for the whole scene, like the light).
     torch: &TorchBinds,
+    rig_taa: &RigTaaBinds,
     // The ONE placement this material belongs to, or `None` for the shared batch material every
     // instance of the model reuses. `Some` only for a batch whose animated UV/tint loop depends on
     // the sequence its instance is playing (decision 1408): the animated-material registries are
@@ -196,6 +200,7 @@ pub fn model_material(
         sky_depth,
         light,
         torch,
+        rig_taa,
         instance,
         false,
     )
@@ -233,6 +238,7 @@ pub fn foliage_model_material(
     // MONKEY (torch shadows Phase 3A): the shared torch depth image + table buffer, cloned into the
     // material beside `light` (not a key axis — one pair for the whole scene, like the light).
     torch: &TorchBinds,
+    rig_taa: &RigTaaBinds,
     // The ONE placement this material belongs to, or `None` for the shared batch material every
     // instance of the model reuses. `Some` only for a batch whose animated UV/tint loop depends on
     // the sequence its instance is playing (decision 1408): the animated-material registries are
@@ -266,6 +272,7 @@ pub fn foliage_model_material(
         sky_depth,
         light,
         torch,
+        rig_taa,
         instance,
         true,
     )
@@ -301,6 +308,7 @@ fn model_material_impl(
     // MONKEY (torch shadows Phase 3A): the shared torch depth image + table buffer, cloned into the
     // material beside `light` (not a key axis — one pair for the whole scene, like the light).
     torch: &TorchBinds,
+    rig_taa: &RigTaaBinds,
     // The ONE placement this material belongs to, or `None` for the shared batch material every
     // instance of the model reuses. `Some` only for a batch whose animated UV/tint loop depends on
     // the sequence its instance is playing (decision 1408): the animated-material registries are
@@ -310,6 +318,7 @@ fn model_material_impl(
 ) -> Handle<WowModelMaterial> {
     let key = MatKey {
         light: light.id(),
+        rig_taa: rig_taa.previous.id(),
         texture: texture.as_ref().map(Handle::id),
         blend,
         two_sided,
@@ -488,6 +497,7 @@ fn model_material_impl(
                 // MONKEY (torch shadows Phase 3A): the shared torch receiver bindings.
                 torch_depth: torch.depth.clone(),
                 torch_buf: torch.table.clone(),
+                rig_taa: rig_taa.previous.clone(),
             },
         },
     );
@@ -555,6 +565,7 @@ pub fn zfill_material(
     cutout: bool,
     light: &Buffer,
     torch: &TorchBinds,
+    rig_taa: &RigTaaBinds,
 ) -> Handle<WowModelMaterial> {
     // Only a cutout reads the coordinates and stage 1, which shape the alpha it tests; the
     // reference's depth-only element binds the same coordinates as the colour pass (`0x70b833`).
@@ -562,6 +573,7 @@ pub fn zfill_material(
     let stage1 = stage1.filter(|_| cutout);
     let key = MatKey {
         light: light.id(),
+        rig_taa: rig_taa.previous.id(),
         texture: texture.as_ref().map(Handle::id),
         blend: if cutout {
             ModelBlend::AlphaTest
@@ -635,6 +647,7 @@ pub fn zfill_material(
                 // MONKEY (torch shadows Phase 3A): the shared torch receiver bindings.
                 torch_depth: torch.depth.clone(),
                 torch_buf: torch.table.clone(),
+                rig_taa: rig_taa.previous.clone(),
             },
         },
     );
@@ -1305,3 +1318,6 @@ mod tests {
         assert_eq!(f32::from(all) as u16, all);
     }
 }
+
+#[cfg(test)]
+mod binding_tests;

@@ -4,6 +4,15 @@
 // env map and no depth flags. The light prefix, helpers and lighting lanes copy `wow_model.wgsl`'s
 // and must stay in sync: naga_oil cannot import functions that use another module's bindings.
 
+// MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
+#import benilla::monkey_frame
+// MONKEY (wind): shared foliage vertex displacement; tree shadows intentionally stay static.
+#import benilla::wind_hook
+
+#ifdef GX_PREPASS
+#import bevy_pbr::mesh_view_bindings::view
+#import bevy_pbr::prepass_bindings::previous_view_uniforms
+#else
 #import bevy_pbr::{
     mesh_view_bindings::{lights, view},
     shadows,
@@ -12,16 +21,13 @@
 #import benilla::shadow_hook
 // GFX (moonlight): the additive moon term.
 #import benilla::moonlight_hook
-// MONKEY (p0 MonkeyFrame): the programme block's struct, mirrored after the point table.
-#import benilla::monkey_frame
 // MONKEY (p0 fog hook): the one distance-fog law every receiver calls.
 #import benilla::fog_hook
 // MONKEY (post): shared tier-gated HDR emission; Off is an exact identity.
 #import benilla::emissive_hook
-// MONKEY (wind): shared foliage vertex displacement; tree shadows intentionally stay static.
-#import benilla::wind_hook
 // MONKEY (wet): rain on surfaces (wet_hook.wgsl).
 #import benilla::wet_hook
+#endif
 
 // Group 0 is Bevy's standard mesh-view bind group (view matrices, directional-light records and
 // the shadow textures the retained pass reads).
@@ -265,6 +271,12 @@ fn enclosed_day_floor(record_w: u32) -> vec3<f32> {
 // Vanilla cutout ref (224/255) — wow_model.wgsl's VANILLA_ALPHA_KEY.
 const VANILLA_ALPHA_KEY: f32 = 0.8784314;
 
+// MONKEY (surface normal offset): shared by the torch shadow helpers and by interior lighting,
+// including the GX_PREPASS variant where TORCH_SHADOWS is intentionally not defined. Keep the
+// declaration outside the torch resource guard so both shader variants resolve it.
+const TORCH_NORMAL_OFFSET: f32 = 0.15;
+
+#ifndef GX_PREPASS
 // MONKEY (torch shadows Phase 1): group 3 — the interior torch depth map + the ≤16-entry fixture
 // table. Declared (and sampled) ONLY under TORCH_SHADOWS, which the static_gx pipeline always sets;
 // the wow_model.wgsl copy of interior_room_light has no group 3 and must not see this block.
@@ -331,7 +343,6 @@ const TORCH_BIAS: f32 = 0.001;
 // offset moves the ray's own floor hit by `0.15*(t/h)`. Re-measured exactly, the offset holds a
 // h = 1 yd fixture clean to r = 10.1 yd, not 2.1. `shadow_hook::TORCH_SLOPE_MAX` carries the
 // corrected table and the receiver-plane bias that closes the rest.
-const TORCH_NORMAL_OFFSET: f32 = 0.15;
 // MONKEY (torch caster selection): the live PCF tap-radius scale, unpacked from the table's
 // `count.y`'s LOW 16 bits (stored x100 because the row is `vec4<u32>`; the high half is the
 // MONKEY (shadow floor) strength). Floored so a zero table cannot collapse
@@ -1338,6 +1349,8 @@ fn shell_candle_add(
     return clamp(sky_rgb + texture_rgb * candle * far, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+#endif
+
 // ---- the pass ----
 
 struct GxVertex {
@@ -1350,6 +1363,7 @@ struct GxVertex {
     @location(5) color: vec4<f32>,
 }
 
+#ifndef GX_PREPASS
 struct GxVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -1369,12 +1383,187 @@ struct GxVsOut {
     @location(6) @interpolate(flat) ext_sel: vec4<u32>,
 }
 
+#endif
+
+// ---- shared coverage helpers: the color and native-prepass paths must reject the same pixels ----
+
+fn gx_kill(word: u32) -> bool {
+    return (recs[word & 0xffffu].w & 1u) != 0u;
+}
+
+fn gx_relative_position(v: GxVertex) -> vec3<f32> {
+    // Camera-relative on purpose: this subtraction is the precision guard at world scale.
+    return v.position + (cell.origin.xyz - view.world_position);
+}
+
+fn gx_world_position(v: GxVertex) -> vec3<f32> {
+    return v.position + cell.origin.xyz;
+}
+
+fn gx_clip_position(relative: vec3<f32>, word: u32) -> vec4<f32> {
+    let view_rot = mat3x3<f32>(
+        view.view_from_world[0].xyz,
+        view.view_from_world[1].xyz,
+        view.view_from_world[2].xyz,
+    );
+    var clip = view.clip_from_view * vec4<f32>(view_rot * relative, 1.0);
+    // Authored MOBA batch order, kept identical to the color pass.
+    clip.z *= 1.0 + f32(recs[word & 0xffffu].y) * 1.1920929e-7;
+    return clip;
+}
+
+fn gx_sample_base(uv: vec2<f32>, word: u32) -> vec4<f32> {
+    var base = vec4<f32>(1.0);
+    let wrap_x = (word & WORD_WRAP_X) != 0u;
+    let wrap_y = (word & WORD_WRAP_Y) != 0u;
+    if ((word & WORD_TEXTURED) != 0u) {
+        let layer = i32(recs[word & 0xffffu].x);
+        let dims = vec2<f32>(textureDimensions(tex_array).xy);
+        let inset = 0.5 / dims;
+        var uv_mixed = uv;
+        if (!wrap_x) {
+            uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
+        }
+        if (!wrap_y) {
+            uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
+        }
+        let c_repeat = textureSampleBias(tex_array, samp_repeat, uv, layer, view.mip_bias);
+        let c_clamp = textureSampleBias(tex_array, samp_clamp, uv, layer, view.mip_bias);
+        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
+        if (wrap_x && wrap_y) {
+            base = c_repeat;
+        } else if (!wrap_x && !wrap_y) {
+            base = c_clamp;
+        } else {
+            base = c_mixed;
+        }
+    }
+    return base;
+}
+
+fn gx_farclip(world: vec4<f32>) -> bool {
+    let eye_z = -(view.view_from_world * world).z;
+    return wow_light.fog_params.w > 0.0 && eye_z > wow_light.fog_params.w;
+}
+
+fn gx_reject_cutout(base_alpha: f32) -> bool {
+#ifdef GX_CUTOUT
+    return base_alpha < VANILLA_ALPHA_KEY;
+#else
+    return false;
+#endif
+}
+
+#ifdef GX_PREPASS
+struct GxPreviousWindData {
+    wind_a: vec4<f32>,
+    wind_b: vec4<f32>,
+    flags: vec4<f32>,
+};
+@group(3) @binding(0) var<uniform> previous_wind: GxPreviousWindData;
+
+struct GxPrepassOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) previous_world_position: vec4<f32>,
+#ifdef GX_NORMAL_PREPASS
+    @location(2) world_normal: vec3<f32>,
+#endif
+    @location(3) uv: vec2<f32>,
+    @location(4) @interpolate(flat) word: u32,
+};
+
+struct GxPrepassFragmentOut {
+#ifdef GX_NORMAL_PREPASS
+    @location(0) normal: vec4<f32>,
+#endif
+    @location(1) motion: vec2<f32>,
+};
+
+@vertex
+fn prepass_vertex(v: GxVertex) -> GxPrepassOut {
+    var out: GxPrepassOut;
+    if (gx_kill(v.word)) {
+        out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        out.world_position = vec4<f32>(0.0);
+        out.previous_world_position = vec4<f32>(0.0);
+#ifdef GX_NORMAL_PREPASS
+        out.world_normal = vec3<f32>(0.0);
+#endif
+        out.uv = vec2<f32>(0.0);
+        out.word = v.word;
+        return out;
+    }
+    let base_world = gx_world_position(v);
+    var relative = gx_relative_position(v);
+    var world = base_world;
+    var current_offset = vec3<f32>(0.0);
+    if ((v.word & WORD_FOLIAGE_WIND) != 0u) {
+        current_offset = wind_hook::tree_offset(
+            base_world, v.anchor, view.world_position, wow_light.monkey,
+        );
+        world += current_offset;
+        relative += current_offset;
+    }
+    var previous_offset = current_offset;
+    if ((v.word & WORD_FOLIAGE_WIND) != 0u
+        && previous_wind.flags.x > 0.5
+        && previous_wind.flags.y > 0.5)
+    {
+        var previous_frame = wow_light.monkey;
+        previous_frame.wind_a = previous_wind.wind_a;
+        previous_frame.wind_b = previous_wind.wind_b;
+        let previous_camera =
+            (previous_view_uniforms.world_from_clip * previous_view_uniforms.clip_from_view)[3].xyz;
+        previous_offset = wind_hook::tree_offset(
+            base_world, v.anchor, previous_camera, previous_frame,
+        );
+    }
+    out.position = gx_clip_position(relative, v.word);
+    out.world_position = vec4<f32>(world, 1.0);
+    out.previous_world_position = vec4<f32>(base_world + previous_offset, 1.0);
+#ifdef GX_NORMAL_PREPASS
+    out.world_normal = v.normal;
+#endif
+    out.uv = v.uv;
+    out.word = v.word;
+    return out;
+}
+
+@fragment
+fn prepass_fragment(in: GxPrepassOut) -> GxPrepassFragmentOut {
+    if (gx_farclip(in.world_position)) {
+        discard;
+    }
+    let base = gx_sample_base(in.uv, in.word);
+    if (gx_reject_cutout(base.a)) {
+        discard;
+    }
+    let current_t = view.unjittered_clip_from_world * in.world_position;
+    let previous_t = previous_view_uniforms.clip_from_world * in.previous_world_position;
+    let current = current_t.xy / current_t.w;
+    let previous = previous_t.xy / previous_t.w;
+    var out: GxPrepassFragmentOut;
+    out.motion = (current - previous) * vec2<f32>(0.5, -0.5);
+#ifdef GX_NORMAL_PREPASS
+    let len_sq = dot(in.world_normal, in.world_normal);
+    var normal = vec3<f32>(0.0);
+    if (len_sq > 1e-12) {
+        normal = in.world_normal * inverseSqrt(len_sq);
+    }
+    out.normal = vec4<f32>(normal * 0.5 + 0.5, 1.0);
+#endif
+    return out;
+}
+#endif
+
+#ifndef GX_PREPASS
 @vertex
 fn vertex(v: GxVertex) -> GxVsOut {
     var out: GxVsOut;
     // Exile kill bit (record w bit 0): every vertex of the item collapses to one point, so its
     // triangles are zero-area and rasterize nothing; triangles never span items.
-    if ((recs[v.word & 0xffffu].w & 1u) != 0u) {
+    if (gx_kill(v.word)) {
         out.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         out.world_position = vec4<f32>(0.0);
         out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
@@ -1385,8 +1574,8 @@ fn vertex(v: GxVertex) -> GxVsOut {
         return out;
     }
     // Camera-relative for f32 precision: the recentred vertex plus (cell origin - camera).
-    var p_cam = v.position + (cell.origin.xyz - view.world_position);
-    var world = v.position + cell.origin.xyz;
+    var p_cam = gx_relative_position(v);
+    var world = gx_world_position(v);
     // MONKEY (wind): placement anchor is already baked per vertex. Only classified leaf-card
     // batches carry the bit; animated doodads were rejected before this retained path.
     if ((v.word & WORD_FOLIAGE_WIND) != 0u) {
@@ -1395,15 +1584,7 @@ fn vertex(v: GxVertex) -> GxVsOut {
         p_cam += offset;
     }
     out.world_position = vec4<f32>(world, 1.0);
-    let view_rot = mat3x3<f32>(
-        view.view_from_world[0].xyz,
-        view.view_from_world[1].xyz,
-        view.view_from_world[2].xyz,
-    );
-    out.position = view.clip_from_view * vec4<f32>(view_rot * p_cam, 1.0);
-    // Authored MOBA batch order (record y, 0 on cells): a later coplanar batch wins reverse-Z
-    // GreaterEqual in any draw order, because the draw sort does not keep authored order.
-    out.position.z *= 1.0 + f32(recs[v.word & 0xffffu].y) * 1.1920929e-7;
+    out.position = gx_clip_position(p_cam, v.word);
     out.world_normal = v.normal;
     out.uv = v.uv;
     out.word = v.word;
@@ -1442,44 +1623,18 @@ fn vertex(v: GxVertex) -> GxVsOut {
 
 @fragment
 fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
-    // The hard farclip wall: per-pixel planar eye-Z, the same plane as the entity path.
+    // Planar eye-Z, shared by the farclip wall and the fog law below.
     let eye_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
-    if (wow_light.fog_params.w > 0.0 && eye_z > wow_light.fog_params.w) {
+    // The hard farclip wall: per-pixel planar eye-Z, the same plane as the entity path.
+    if (gx_farclip(in.world_position)) {
         discard;
     }
     // The sampler follows the wrap flags; a mixed batch clamps its clamped axis a half texel in.
     // Every sample runs unconditionally: implicit derivatives need uniform control flow.
-    var base = vec4<f32>(1.0);
-    let wrap_x = (in.word & WORD_WRAP_X) != 0u;
-    let wrap_y = (in.word & WORD_WRAP_Y) != 0u;
-    if ((in.word & WORD_TEXTURED) != 0u) {
-        let layer = i32(recs[in.word & 0xffffu].x);
-        let dims = vec2<f32>(textureDimensions(tex_array).xy);
-        let inset = 0.5 / dims;
-        var uv_mixed = in.uv;
-        if (!wrap_x) {
-            uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
-        }
-        if (!wrap_y) {
-            uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
-        }
-        // The render-scale LOD bias: bevy's material path applies it for free, this lane by hand.
-        let c_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias);
-        let c_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias);
-        let c_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias);
-        if (wrap_x && wrap_y) {
-            base = c_repeat;
-        } else if (!wrap_x && !wrap_y) {
-            base = c_clamp;
-        } else {
-            base = c_mixed;
-        }
-    }
-#ifdef GX_CUTOUT
-    if (base.a < VANILLA_ALPHA_KEY) {
+    let base = gx_sample_base(in.uv, in.word);
+    if (gx_reject_cutout(base.a)) {
         discard;
     }
-#endif
     // Both faces light from the submitted normal (no GL_LIGHT_MODEL_TWO_SIDE in the reference);
     // this pipeline never negates back faces, so it has no front-face select like wow_model.wgsl.
     let n_lit = wow_normalize(in.world_normal);
@@ -2137,3 +2292,4 @@ fn fragment(in: GxVsOut) -> @location(0) vec4<f32> {
     // Gamma-space output; alpha pinned 1.0, every draw here is opaque.
     return vec4<f32>(rgb, 1.0);
 }
+#endif

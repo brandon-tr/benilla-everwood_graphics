@@ -3,18 +3,29 @@
 //! opaque pass. Texture dims and formats exist only here (BLP images are `RENDER_WORLD`-only), so
 //! a region draws once every member's `GpuImage` is resident.
 
+use bevy::anti_alias::taa::TemporalAntiAliasing;
 use bevy::camera::primitives::Aabb;
-use bevy::core_pipeline::oit::OrderIndependentTransparencySettingsOffset;
+use bevy::camera::MainPassResolutionOverride;
+use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
+use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
+use bevy::core_pipeline::oit::{
+    OrderIndependentTransparencySettings, OrderIndependentTransparencySettingsOffset,
+};
+use bevy::core_pipeline::prepass::{
+    DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass, PreviousViewUniformOffset,
+    ViewPrepassTextures, MOTION_VECTOR_PREPASS_FORMAT, NORMAL_PREPASS_FORMAT,
+};
 use bevy::ecs::query::QueryItem;
 use bevy::image::Image;
 use bevy::mesh::VertexBufferLayout;
 use bevy::pbr::{
-    MeshPipeline, MeshPipelineViewLayoutKey, MeshViewBindGroup, ViewEnvironmentMapUniformOffset,
-    ViewFogUniformOffset, ViewLightProbesUniformOffset, ViewLightsUniformOffset,
-    ViewScreenSpaceReflectionsUniformOffset,
+    ExtractedAtmosphere, MeshPipeline, MeshPipelineViewLayoutKey, MeshViewBindGroup,
+    PrepassPipeline, PrepassViewBindGroup, ViewEnvironmentMapUniformOffset, ViewFogUniformOffset,
+    ViewLightProbesUniformOffset, ViewLightsUniformOffset, ViewScreenSpaceReflectionsUniformOffset,
 };
-use bevy::platform::collections::HashMap;
+use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
+use bevy::render::camera::ExtractedCamera;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -25,7 +36,7 @@ use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    sampler, storage_buffer_read_only_sized, texture_2d_array, uniform_buffer_sized,
+    sampler, storage_buffer_read_only_sized, texture_2d_array, uniform_buffer, uniform_buffer_sized,
 };
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
@@ -35,8 +46,7 @@ use bevy::render::{Render, RenderSystems};
 use bevy::shader::ShaderDefVal;
 use std::ops::Range;
 
-use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::core_3d::CORE_3D_DEPTH_FORMAT;
+mod wind;
 
 /// One baked item's draw facts, in bake order: the vertex word's low bits index its record.
 #[derive(Clone)]
@@ -45,6 +55,8 @@ pub(crate) struct GxItemDraw {
     pub texture: Option<AssetId<Image>>,
     pub cutout: bool,
     pub two_sided: bool,
+    /// The CPU copy of the baked `WORD_FOLIAGE_WIND` classification.
+    pub foliage_wind: bool,
     #[allow(dead_code)] // bake-side bookkeeping; the node draws by index range alone
     pub vertex_range: Range<u32>,
     /// The selection key (a WMO group or a prop referrer set); `None` on cell items.
@@ -138,6 +150,163 @@ pub(crate) struct GxWorld {
     pub visible_wmos: Vec<(Entity, GxSel)>,
 }
 
+#[cfg(test)]
+impl GxWorld {
+    /// Test-only snapshot of the retained color node's readiness for one view.
+    pub(crate) fn native_draw_diagnostics(&self, world: &World, view: Entity) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        let Some(pipes) = world.get_resource::<GxPipelines>() else {
+            return "pipes=absent".to_string();
+        };
+        let Some(pipeline_cache) = world.get_resource::<PipelineCache>() else {
+            return "pipeline_cache=absent".to_string();
+        };
+        let _ = writeln!(
+            out,
+            "specialized={:?} color_family={} prepass_family={}",
+            pipes.specialized_for,
+            pipes.pipelines.len(),
+            pipes.prepass_pipelines.len()
+        );
+        for cutout in [false, true] {
+            for two_sided in [false, true] {
+                let status = match pipes.pipelines.get(&(cutout, two_sided)) {
+                    Some(id) => {
+                        let state = pipeline_cache.get_render_pipeline_state(*id);
+                        let state = match state {
+                            CachedPipelineState::Queued => "Queued".to_string(),
+                            CachedPipelineState::Creating(_) => "Creating".to_string(),
+                            CachedPipelineState::Ok(_) => "Ok".to_string(),
+                            CachedPipelineState::Err(error) => format!("Err({error:?})"),
+                        };
+                        format!("{id:?}:{state}")
+                    }
+                    None => "missing".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "color c{} t{}={status}",
+                    u8::from(cutout),
+                    u8::from(two_sided)
+                );
+            }
+        }
+        for normal in [false, true] {
+            for cutout in [false, true] {
+                for two_sided in [false, true] {
+                    let status = match pipes.prepass_pipelines.get(&(cutout, two_sided, normal)) {
+                        Some(id) => {
+                            let state = pipeline_cache.get_render_pipeline_state(*id);
+                            let state = match state {
+                                CachedPipelineState::Queued => "Queued".to_string(),
+                                CachedPipelineState::Creating(_) => "Creating".to_string(),
+                                CachedPipelineState::Ok(_) => "Ok".to_string(),
+                                CachedPipelineState::Err(error) => {
+                                    format!("Err({error:?})")
+                                }
+                            };
+                            format!("{id:?}:{state}")
+                        }
+                        None => "missing".to_string(),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "prepass c{} t{} n{}={status}",
+                        u8::from(cutout),
+                        u8::from(two_sided),
+                        u8::from(normal)
+                    );
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "light_bind={} torch_bind={} eligible={}",
+            world.get_resource::<GxLightBind>().is_some(),
+            world.get_resource::<GxTorchBind>().is_some(),
+            world
+                .get_entity(view)
+                .is_ok_and(|entity| entity.contains::<GxEligibleNativePrepass>()),
+        );
+        let query = world
+            .get_entity(view)
+            .map(|entity| {
+                format!(
+                    "target={} depth={} view={} lights={} fog={} probes={} ssr={} env={} mesh_view={} view_marker={}",
+                    entity.contains::<ViewTarget>(),
+                    entity.contains::<ViewDepthTexture>(),
+                    entity.contains::<ViewUniformOffset>(),
+                    entity.contains::<ViewLightsUniformOffset>(),
+                    entity.contains::<ViewFogUniformOffset>(),
+                    entity.contains::<ViewLightProbesUniformOffset>(),
+                    entity.contains::<ViewScreenSpaceReflectionsUniformOffset>(),
+                    entity.contains::<ViewEnvironmentMapUniformOffset>(),
+                    entity.contains::<MeshViewBindGroup>(),
+                    entity.contains::<StaticGxView>() || entity.contains::<StaticGxMirror>(),
+                )
+            })
+            .unwrap_or_else(|_| "view=absent".to_string());
+        let _ = writeln!(out, "{query}");
+
+        let _ = writeln!(
+            out,
+            "visible_cells={} visible_wmos={} visible_doodads={} cells={} wmos={} props={}",
+            self.visible
+                .iter()
+                .filter(|v| matches!(v, GxDoodadVis::Cell(_)))
+                .count(),
+            self.visible_wmos.len(),
+            self.visible.len(),
+            self.cells.len(),
+            self.wmos.len(),
+            self.props.len()
+        );
+
+        let Some(cache) = world.get_resource::<GxGpuCache>() else {
+            let _ = writeln!(out, "gpu_cache=absent");
+            return out;
+        };
+        let meshes = world.get_resource::<RenderAssets<RenderMesh>>();
+        let allocator = world.get_resource::<MeshAllocator>();
+        let resolved = resolved_regions(self, cache);
+        let mut runs = 0usize;
+        let mut rigid_runs = 0usize;
+        let mut mesh_present = 0usize;
+        let mut vertex_present = 0usize;
+        let mut index_present = 0usize;
+        for (gpu, draw, sel) in &resolved {
+            let id = draw.mesh.id();
+            if meshes.is_some_and(|m| m.get(id).is_some()) {
+                mesh_present += 1;
+            }
+            if allocator.is_some_and(|a| a.mesh_vertex_slice(&id).is_some()) {
+                vertex_present += 1;
+            }
+            if allocator.is_some_and(|a| a.mesh_index_slice(&id).is_some()) {
+                index_present += 1;
+            }
+            for run in &gpu.runs {
+                if run_admitted(run, *sel) {
+                    runs += 1;
+                    if !run.foliage_wind {
+                        rigid_runs += 1;
+                    }
+                }
+            }
+        }
+        let _ = writeln!(
+            out,
+            "resolved={} admitted_runs={} rigid_runs={} mesh={mesh_present} vertex={vertex_present} index={index_present}",
+            resolved.len(),
+            runs,
+            rigid_runs,
+        );
+        out
+    }
+}
+
 use super::pool::GxTexturePool;
 
 /// Record column w, bit 14: the item's interior fog lane, read by `static_gx.wgsl`. Bit 0 is the
@@ -194,6 +363,8 @@ struct GxRun {
     slot: usize,
     cutout: bool,
     two_sided: bool,
+    /// A mixed rigid/wind run cannot be used by the rigid-only native prepass.
+    foliage_wind: bool,
     index_range: Range<u32>,
     /// The run's selection key; `None` for a cell run, which always draws.
     group: Option<u16>,
@@ -224,6 +395,10 @@ struct GxGpuCache {
     props: HashMap<Entity, GxCellGpu>,
 }
 
+/// Marks render views whose native TAA inputs the retained prepass is allowed to feed.
+#[derive(Component)]
+struct GxEligibleNativePrepass;
+
 #[derive(Resource)]
 struct GxPipelines {
     view_layout: BindGroupLayoutDescriptor,
@@ -232,16 +407,20 @@ struct GxPipelines {
     /// MONKEY (torch shadows Phase 1): group 3 — the torch depth array + comparison sampler + the
     /// ≤16-entry `TorchTable` uniform. Present on every static_gx pipeline (`TORCH_SHADOWS` def).
     torch_layout: BindGroupLayoutDescriptor,
+    /// Previous packed tree-wind rows for the native prepass (group 3).
+    previous_wind_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     sampler_clamp: Sampler,
     /// Keyed `(cutout, two_sided)`, re-specialized if the world view's (samples, format) changes.
     pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
+    /// Native-TAA prepass variants, keyed `(cutout, two_sided, normal)`.
+    prepass_pipelines: HashMap<(bool, bool, bool), CachedRenderPipelineId>,
     /// MONKEY (sun shadow perf): the key now carries the live `shadowFilter` too — the PCF branch
     /// is a shader DEF, so a change has to re-specialize the family. Once per CHANGE, not per
     /// frame: exactly the posture the (samples, format) pair beside it already has, and the same
     /// caveat (a flip re-queues four pipelines rather than reviving the previous four — a cvar
     /// A/B costs a shader build, a rendered frame costs nothing).
-    specialized_for: Option<(u32, TextureFormat, bool)>,
+    specialized_for: Option<(u32, TextureFormat, bool, MeshPipelineViewLayoutKey)>,
 }
 
 fn init_pipelines(
@@ -324,6 +503,13 @@ fn init_pipelines(
         ),
     );
     let filter = benilla_assets::tex_filter();
+    let previous_wind_layout = BindGroupLayoutDescriptor::new(
+        "static_gx_previous_wind_layout",
+        &BindGroupLayoutEntries::single(
+            ShaderStages::VERTEX_FRAGMENT,
+            uniform_buffer::<wind::GxPreviousWindData>(true),
+        ),
+    );
     let make = |label: &'static str, mode: AddressMode| {
         render_device.create_sampler(&SamplerDescriptor {
             label: Some(label),
@@ -352,9 +538,11 @@ fn init_pipelines(
         cell_layout,
         light_layout,
         torch_layout,
+        previous_wind_layout,
         sampler: make("static_gx_repeat", AddressMode::Repeat),
         sampler_clamp: make("static_gx_clamp", AddressMode::ClampToEdge),
         pipelines: HashMap::default(),
+        prepass_pipelines: HashMap::default(),
         specialized_for: None,
     });
 }
@@ -365,7 +553,77 @@ type GxViewKey = (
     &'static Msaa,
     &'static ViewTarget,
     &'static StaticGxView,
+    Option<&'static ViewPrepassTextures>,
+    Has<OrderIndependentTransparencySettings>,
+    Has<ExtractedAtmosphere>,
 );
+
+/// A world view whose native TAA attachments the retained prepass may supplement.
+type GxNativeViewKey = (
+    Entity,
+    &'static Msaa,
+    &'static StaticGxView,
+    &'static TemporalAntiAliasing,
+    &'static DepthPrepass,
+    &'static MotionVectorPrepass,
+    &'static ViewPrepassTextures,
+    &'static ExtractedCamera,
+    Has<NormalPrepass>,
+    Has<DeferredPrepass>,
+    Option<&'static MainPassResolutionOverride>,
+);
+
+fn native_view_eligible(
+    msaa: &Msaa,
+    prepass: &ViewPrepassTextures,
+    camera: &ExtractedCamera,
+    has_normal: bool,
+    has_deferred: bool,
+    resolution_override: bool,
+) -> bool {
+    if *msaa != Msaa::Off || has_deferred || resolution_override {
+        return false;
+    }
+    if camera.viewport.is_some()
+        || camera.physical_target_size != Some(UVec2::new(prepass.size.width, prepass.size.height))
+    {
+        return false;
+    }
+    if prepass.size.width == 0 || prepass.size.height == 0 {
+        return false;
+    }
+    let Some(depth) = prepass.depth.as_ref() else {
+        return false;
+    };
+    let Some(motion) = prepass.motion_vectors.as_ref() else {
+        return false;
+    };
+    let depth = &depth.texture.texture;
+    let motion = &motion.texture.texture;
+    if has_normal {
+        let Some(normal) = prepass.normal.as_ref() else {
+            return false;
+        };
+        let normal = &normal.texture.texture;
+        if normal.format() != NORMAL_PREPASS_FORMAT
+            || normal.sample_count() != 1
+            || normal.width() != prepass.size.width
+            || normal.height() != prepass.size.height
+        {
+            return false;
+        }
+    } else if prepass.normal.is_some() {
+        return false;
+    }
+    depth.format() == CORE_3D_DEPTH_FORMAT
+        && depth.sample_count() == 1
+        && depth.width() == prepass.size.width
+        && depth.height() == prepass.size.height
+        && motion.format() == MOTION_VECTOR_PREPASS_FORMAT
+        && motion.sample_count() == 1
+        && motion.width() == prepass.size.width
+        && motion.height() == prepass.size.height
+}
 
 /// The bake's interleaved vertex layout, in the attribute-id order Bevy interleaves by: position,
 /// normal, uv, colour, then the word and anchor (988_101, 988_102). Keep in sync with `bake_cell`
@@ -411,6 +669,7 @@ fn vertex_layout() -> VertexBufferLayout {
 
 /// Specialize the four pipelines for the world view, and assemble visible regions' GPU state.
 fn prepare_static_gx(
+    mut commands: Commands,
     gx: Res<GxWorld>,
     mut cache: ResMut<GxGpuCache>,
     mut pool: ResMut<GxTexturePool>,
@@ -420,8 +679,11 @@ fn prepare_static_gx(
     render_queue: Res<RenderQueue>,
     asset_server: Res<AssetServer>,
     mesh_pipeline: Res<MeshPipeline>,
+    prepass_pipeline: Res<PrepassPipeline>,
     images: Res<RenderAssets<GpuImage>>,
     views: Query<GxViewKey>,
+    native_views: Query<GxNativeViewKey, Without<StaticGxMirror>>,
+    eligible_markers: Query<Entity, With<GxEligibleNativePrepass>>,
     // MONKEY (sun shadow perf): the live `shadowFilter`, extracted from the main world. `Option`
     // because `ExtractResourcePlugin` only publishes it while the lighting plugin is in the app
     // (a bare static_gx harness has no lighting) — absent reads as the shipped Gaussian.
@@ -429,7 +691,8 @@ fn prepare_static_gx(
 ) {
     let shadow_gaussian = shadow_filter.is_none_or(|f| f.0);
     let _t = super::gx_perf_guard(3);
-    let Some((view, msaa, _, _)) = views.iter().next() else {
+    let Some((view, msaa, _, _, prepass_textures, has_oit, has_atmosphere)) = views.iter().next()
+    else {
         return;
     };
     let format = if view.hdr {
@@ -437,10 +700,18 @@ fn prepare_static_gx(
     } else {
         TextureFormat::bevy_default()
     };
-    let key = (msaa.samples(), format, shadow_gaussian);
+    let mut layout_key =
+        MeshPipelineViewLayoutKey::from(*msaa) | MeshPipelineViewLayoutKey::from(prepass_textures);
+    if has_oit {
+        layout_key |= MeshPipelineViewLayoutKey::OIT_ENABLED;
+    }
+    if has_atmosphere {
+        layout_key |= MeshPipelineViewLayoutKey::ATMOSPHERE;
+    }
+    let key = (msaa.samples(), format, shadow_gaussian, layout_key);
     if pipes.specialized_for != Some(key) {
         pipes.view_layout = mesh_pipeline
-            .get_view_layout(MeshPipelineViewLayoutKey::from(*msaa))
+            .get_view_layout(layout_key)
             .main_layout
             .clone();
         let shader: Handle<Shader> =
@@ -512,6 +783,128 @@ fn prepare_static_gx(
             }
         }
         pipes.specialized_for = Some(key);
+    }
+
+    // The retained native-TAA prepass is a separate, opt-in pipeline family. Queue it only while
+    // a supported world view exists; remove the marker from every other view before the node can
+    // touch an attachment.
+    let mut eligible: HashSet<Entity> = HashSet::default();
+    let mut normal_configs: HashSet<bool> = HashSet::default();
+    for (
+        entity,
+        msaa,
+        _static_view,
+        _taa,
+        _depth,
+        _motion,
+        prepass,
+        camera,
+        has_normal,
+        has_deferred,
+        resolution_override,
+    ) in &native_views
+    {
+        if native_view_eligible(
+            msaa,
+            prepass,
+            camera,
+            has_normal,
+            has_deferred,
+            resolution_override.is_some(),
+        ) {
+            commands.entity(entity).insert(GxEligibleNativePrepass);
+            eligible.insert(entity);
+            normal_configs.insert(has_normal);
+        }
+    }
+    for entity in &eligible_markers {
+        if !eligible.contains(&entity) {
+            commands.entity(entity).remove::<GxEligibleNativePrepass>();
+        }
+    }
+    if eligible.is_empty() {
+        pipes.prepass_pipelines.clear();
+    } else {
+        let shader: Handle<Shader> =
+            asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
+        for normal in normal_configs {
+            for cutout in [false, true] {
+                for two_sided in [false, true] {
+                    if pipes
+                        .prepass_pipelines
+                        .contains_key(&(cutout, two_sided, normal))
+                    {
+                        continue;
+                    }
+                    let mut defs = vec![ShaderDefVal::from("GX_PREPASS")];
+                    if normal {
+                        defs.push(ShaderDefVal::from("GX_NORMAL_PREPASS"));
+                    }
+                    if cutout {
+                        defs.push(ShaderDefVal::from("GX_CUTOUT"));
+                    }
+                    let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+                        label: Some(
+                            format!(
+                                "static_gx prepass c{} t{} n{}",
+                                u8::from(cutout),
+                                u8::from(two_sided),
+                                u8::from(normal)
+                            )
+                            .into(),
+                        ),
+                        layout: vec![
+                            prepass_pipeline.view_layout_motion_vectors.clone(),
+                            pipes.cell_layout.clone(),
+                            pipes.light_layout.clone(),
+                            pipes.previous_wind_layout.clone(),
+                        ],
+                        vertex: VertexState {
+                            shader: shader.clone(),
+                            shader_defs: defs.clone(),
+                            entry_point: Some("prepass_vertex".into()),
+                            buffers: vec![vertex_layout()],
+                        },
+                        fragment: Some(FragmentState {
+                            shader: shader.clone(),
+                            shader_defs: defs,
+                            entry_point: Some("prepass_fragment".into()),
+                            targets: vec![
+                                normal.then_some(ColorTargetState {
+                                    format: NORMAL_PREPASS_FORMAT,
+                                    blend: None,
+                                    write_mask: ColorWrites::ALL,
+                                }),
+                                Some(ColorTargetState {
+                                    format: MOTION_VECTOR_PREPASS_FORMAT,
+                                    blend: None,
+                                    write_mask: ColorWrites::ALL,
+                                }),
+                            ],
+                        }),
+                        primitive: PrimitiveState {
+                            cull_mode: (!two_sided).then_some(Face::Back),
+                            ..Default::default()
+                        },
+                        depth_stencil: Some(DepthStencilState {
+                            format: CORE_3D_DEPTH_FORMAT,
+                            depth_write_enabled: true,
+                            depth_compare: CompareFunction::GreaterEqual,
+                            stencil: StencilState::default(),
+                            bias: DepthBiasState::default(),
+                        }),
+                        multisample: MultisampleState {
+                            count: 1,
+                            ..Default::default()
+                        },
+                        ..default()
+                    });
+                    pipes
+                        .prepass_pipelines
+                        .insert((cutout, two_sided, normal), id);
+                }
+            }
+        }
     }
 
     // Every published map empty is a map change (`StaticGx::clear`): reset the pool and cache.
@@ -799,6 +1192,7 @@ fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<Gx
                 if r.slot == slot
                     && r.cutout == item.cutout
                     && r.two_sided == item.two_sided
+                    && r.foliage_wind == item.foliage_wind
                     && r.group == item.group
                     && r.index_range.end == item.index_range.start =>
             {
@@ -808,6 +1202,7 @@ fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<Gx
                 slot,
                 cutout: item.cutout,
                 two_sided: item.two_sided,
+                foliage_wind: item.foliage_wind,
                 index_range: item.index_range.clone(),
                 group: item.group,
             }),
@@ -817,7 +1212,7 @@ fn build_runs(draws: &[GxItemDraw], item_slot: &[u16], killed: &[u64]) -> Vec<Gx
 }
 
 /// Record-table column 3: item `i`'s exile kill bit from the published bitmap.
-fn kill_bit(killed: &[u64], i: usize) -> u32 {
+pub(super) fn kill_bit(killed: &[u64], i: usize) -> u32 {
     u32::from(
         killed
             .get(i / 64)
@@ -1009,6 +1404,229 @@ fn build_torch_bind(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct StaticGxLabel;
 
+type ResolvedRegion<'a> = (&'a GxCellGpu, &'a GxCellDraw, Option<&'a GxSel>);
+
+fn resolved_regions<'a>(gx: &'a GxWorld, cache: &'a GxGpuCache) -> Vec<ResolvedRegion<'a>> {
+    let mut resolved: Vec<ResolvedRegion<'a>> = Vec::new();
+    for (entity, sel) in &gx.visible_wmos {
+        if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
+            resolved.push((gpu, draw, Some(sel)));
+        }
+    }
+    for vis in &gx.visible {
+        match vis {
+            GxDoodadVis::Cell(cell) => {
+                if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
+                    resolved.push((gpu, draw, None));
+                }
+            }
+            GxDoodadVis::Prop(entity, sel) => {
+                if let (Some(gpu), Some(draw)) = (cache.props.get(entity), gx.props.get(entity)) {
+                    resolved.push((gpu, draw, Some(sel)));
+                }
+            }
+        }
+    }
+    resolved
+}
+
+fn run_admitted(run: &GxRun, sel: Option<&GxSel>) -> bool {
+    match (sel, run.group) {
+        (Some(sel), Some(group)) => sel.drawn.get(usize::from(group)).copied().unwrap_or(false),
+        _ => true,
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct StaticGxPrepassLabel;
+
+#[derive(Default)]
+struct StaticGxPrepassNode;
+
+impl ViewNode for StaticGxPrepassNode {
+    type ViewQuery = (
+        &'static ViewDepthTexture,
+        &'static ViewPrepassTextures,
+        &'static ViewUniformOffset,
+        &'static PreviousViewUniformOffset,
+        &'static StaticGxView,
+        &'static GxEligibleNativePrepass,
+        &'static wind::GxPreviousWindBind,
+        &'static wind::GxPreviousWindOffset,
+    );
+
+    fn run<'w>(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext<'w>,
+        (
+            depth,
+            prepass,
+            view_offset,
+            previous_offset,
+            _marker,
+            _eligible,
+            wind_bind,
+            wind_offset,
+        ): QueryItem<'w, '_, Self::ViewQuery>,
+        world: &'w World,
+    ) -> Result<(), NodeRunError> {
+        let gx = world.resource::<GxWorld>();
+        let cache = world.resource::<GxGpuCache>();
+        let pipes = world.resource::<GxPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(light_bind) = world.get_resource::<GxLightBind>() else {
+            return Ok(());
+        };
+        let Some(torch_bind) = world.get_resource::<GxTorchBind>() else {
+            return Ok(());
+        };
+        let Some(prepass_view) = world.get_resource::<PrepassViewBindGroup>() else {
+            return Ok(());
+        };
+        let Some(prepass_view_bind) = prepass_view.motion_vectors.as_ref() else {
+            return Ok(());
+        };
+        let meshes = world.resource::<RenderAssets<RenderMesh>>();
+        let allocator = world.resource::<MeshAllocator>();
+
+        // The color family must be drawable before retained depth/motion may become occluders.
+        if pipes.pipelines.len() != 4 {
+            return Ok(());
+        }
+        let mut ready: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
+        for (key, id) in &pipes.pipelines {
+            let Some(pipeline) = pipeline_cache.get_render_pipeline(*id) else {
+                return Ok(());
+            };
+            ready.insert(*key, pipeline);
+        }
+        let normal_required = prepass.normal.is_some();
+        let mut prepass_ready: HashMap<(bool, bool, bool), &RenderPipeline> = HashMap::default();
+        for cutout in [false, true] {
+            for two_sided in [false, true] {
+                let key = (cutout, two_sided, normal_required);
+                let Some(id) = pipes.prepass_pipelines.get(&key) else {
+                    return Ok(());
+                };
+                let Some(pipeline) = pipeline_cache.get_render_pipeline(*id) else {
+                    return Ok(());
+                };
+                prepass_ready.insert(key, pipeline);
+            }
+        }
+        let _ = &torch_bind; // the color family is bound before this pass becomes an occluder
+
+        let Some(depth_attachment) = prepass.depth.as_ref() else {
+            return Ok(());
+        };
+        let Some(motion_attachment) = prepass.motion_vectors.as_ref() else {
+            return Ok(());
+        };
+        let depth_texture = &depth_attachment.texture.texture;
+        let motion_texture = &motion_attachment.texture.texture;
+        if depth_texture.format() != CORE_3D_DEPTH_FORMAT
+            || depth_texture.sample_count() != 1
+            || depth_texture.width() != prepass.size.width
+            || depth_texture.height() != prepass.size.height
+            || motion_texture.format() != MOTION_VECTOR_PREPASS_FORMAT
+            || motion_texture.sample_count() != 1
+            || motion_texture.width() != prepass.size.width
+            || motion_texture.height() != prepass.size.height
+        {
+            return Ok(());
+        }
+        if let Some(normal) = prepass.normal.as_ref() {
+            let normal = &normal.texture.texture;
+            if normal.format() != NORMAL_PREPASS_FORMAT
+                || normal.sample_count() != 1
+                || normal.width() != prepass.size.width
+                || normal.height() != prepass.size.height
+            {
+                return Ok(());
+            }
+        }
+        for cutout in [false, true] {
+            for two_sided in [false, true] {
+                if !prepass_ready.contains_key(&(cutout, two_sided, normal_required)) {
+                    return Ok(());
+                }
+            }
+        }
+
+        let resolved = resolved_regions(gx, cache);
+        let drawable = resolved
+            .iter()
+            .any(|(gpu, _, sel)| gpu.runs.iter().any(|run| run_admitted(run, *sel)));
+        if !drawable {
+            return Ok(());
+        }
+
+        let depth_attachment = depth.get_attachment(StoreOp::Store);
+        let normal_attachment = prepass
+            .normal
+            .as_ref()
+            .map(|normal| normal.get_attachment());
+        let motion_attachment = motion_attachment.get_attachment();
+        let color_attachments = [normal_attachment, Some(motion_attachment)];
+        let diagnostics = render_context.diagnostic_recorder();
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("static_gx prepass"),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: Some(depth_attachment),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
+        pass.set_bind_group(
+            0,
+            prepass_view_bind,
+            &[view_offset.offset, previous_offset.offset],
+        );
+        for (gpu, draw, sel) in &resolved {
+            let Some(mesh) = meshes.get(draw.mesh.id()) else {
+                continue;
+            };
+            let (Some(vslice), Some(islice)) = (
+                allocator.mesh_vertex_slice(&draw.mesh.id()),
+                allocator.mesh_index_slice(&draw.mesh.id()),
+            ) else {
+                continue;
+            };
+            let index_format = match &mesh.buffer_info {
+                bevy::render::mesh::RenderMeshBufferInfo::Indexed { index_format, .. } => {
+                    *index_format
+                }
+                bevy::render::mesh::RenderMeshBufferInfo::NonIndexed => continue,
+            };
+            pass.set_vertex_buffer(0, vslice.buffer.slice(..));
+            pass.set_index_buffer(islice.buffer.slice(..), index_format);
+            for run in &gpu.runs {
+                if !run_admitted(run, *sel) {
+                    continue;
+                }
+                if run.foliage_wind && !wind_bind.wind_ready {
+                    continue;
+                }
+                pass.set_render_pipeline(
+                    prepass_ready[&(run.cutout, run.two_sided, normal_required)],
+                );
+                pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
+                pass.set_bind_group(2, &light_bind.0, &[]);
+                pass.set_bind_group(3, &wind_bind.bind, &[wind_offset.0]);
+                pass.draw_indexed(
+                    (islice.range.start + run.index_range.start)
+                        ..(islice.range.start + run.index_range.end),
+                    i32::try_from(vslice.range.start).unwrap_or(0),
+                    0..1,
+                );
+            }
+        }
+        span.end(&mut pass);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct StaticGxNode;
 
@@ -1069,27 +1687,7 @@ impl ViewNode for StaticGxNode {
         let allocator = world.resource::<MeshAllocator>();
         // WMO regions first, then the doodad phase near-first, the 1.12 client's WMO-then-doodad
         // drain order. Cells draw whole; a region draws only its admitted runs.
-        let mut resolved: Vec<(&GxCellGpu, &GxCellDraw, Option<&GxSel>)> = Vec::new();
-        for (entity, sel) in &gx.visible_wmos {
-            if let (Some(gpu), Some(draw)) = (cache.wmos.get(entity), gx.wmos.get(entity)) {
-                resolved.push((gpu, draw, Some(sel)));
-            }
-        }
-        for vis in &gx.visible {
-            match vis {
-                GxDoodadVis::Cell(cell) => {
-                    if let (Some(gpu), Some(draw)) = (cache.cells.get(cell), gx.cells.get(cell)) {
-                        resolved.push((gpu, draw, None));
-                    }
-                }
-                GxDoodadVis::Prop(entity, sel) => {
-                    if let (Some(gpu), Some(draw)) = (cache.props.get(entity), gx.props.get(entity))
-                    {
-                        resolved.push((gpu, draw, Some(sel)));
-                    }
-                }
-            }
-        }
+        let resolved = resolved_regions(gx, cache);
         if resolved.is_empty() {
             return Ok(());
         }
@@ -1148,10 +1746,8 @@ impl ViewNode for StaticGxNode {
             pass.set_index_buffer(islice.buffer.slice(..), index_format);
             for run in &gpu.runs {
                 // A region's run draws only if its selection key is admitted; a cell run always.
-                if let (Some(sel), Some(group)) = (sel, run.group) {
-                    if !sel.drawn.get(usize::from(group)).copied().unwrap_or(false) {
-                        continue;
-                    }
+                if !run_admitted(run, *sel) {
+                    continue;
                 }
                 pass.set_render_pipeline(ready[&(run.cutout, run.two_sided)]);
                 pass.set_bind_group(1, &gpu.bind_groups[run.slot].1, &[]);
@@ -1190,25 +1786,36 @@ pub(super) fn build(app: &mut App) {
     render_app
         .init_resource::<GxGpuCache>()
         .init_resource::<GxTexturePool>()
+        .init_resource::<wind::GxRetainedWindHistory>()
+        .init_resource::<wind::GxPreviousWindUniforms>()
         .add_systems(bevy::render::RenderStartup, init_pipelines)
         .add_systems(
             Render,
             (
-                prepare_static_gx.in_set(RenderSystems::PrepareResources),
+                wind::prepare_retained_wind_epoch.in_set(RenderSystems::ManageViews),
+                // Layout and eligibility must observe this frame's published prepass textures.
+                prepare_static_gx
+                    .after(bevy::core_pipeline::core_3d::prepare_prepass_textures)
+                    .in_set(RenderSystems::PrepareResources),
+                wind::prepare_previous_wind_uniforms
+                    .after(prepare_static_gx)
+                    .in_set(RenderSystems::PrepareResources),
                 // MONKEY (room gate): before the bind groups, beside the shared light's upload.
                 prepare_room_claims.in_set(RenderSystems::PrepareResources),
                 prepare_view_bind.in_set(RenderSystems::PrepareBindGroups),
+                wind::prepare_previous_wind_bindings.in_set(RenderSystems::PrepareBindGroups),
                 prepare_torch_bind.in_set(RenderSystems::PrepareBindGroups),
             ),
         )
         .add_render_graph_node::<ViewNodeRunner<StaticGxNode>>(Core3d, StaticGxLabel)
-        // Before bevy's opaque pass, as early-z occluders for terrain. This pass takes the depth
-        // and colour clear (attachments clear on first use); with nothing visible it returns
-        // untouched and the opaque pass clears.
+        .add_render_graph_node::<ViewNodeRunner<StaticGxPrepassNode>>(Core3d, StaticGxPrepassLabel)
         .add_render_graph_edges(
             Core3d,
             (Node3d::StartMainPass, StaticGxLabel, Node3d::MainOpaquePass),
-        );
+        )
+        // Retained inputs clear the native prepass attachments first; EarlyPrepass loads them,
+        // resolves native/retained overlap and copies the combined depth for TAA.
+        .add_render_graph_edges(Core3d, (StaticGxPrepassLabel, Node3d::EarlyPrepass));
 }
 
 /// Copy the collector's published half into the extractable resource.
@@ -1243,47 +1850,4 @@ pub(super) fn publish_gx_world(gx: Res<super::StaticGx>, mut out: ResMut<GxWorld
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(index_range: Range<u32>, cutout: bool) -> GxItemDraw {
-        GxItemDraw {
-            index_range,
-            texture: None,
-            cutout,
-            two_sided: false,
-            vertex_range: 0..0,
-            group: None,
-            order: 0,
-            sidn: [0; 3],
-            slot: 0,
-            ext_night: false,
-            enclosed: false,
-        }
-    }
-
-    #[test]
-    fn runs_fuse_live_items_and_split_at_kills() {
-        let draws = vec![
-            item(0..3, false),
-            item(3..6, false),
-            item(6..9, false),
-            item(9..12, true), // bucket change
-            item(12..15, true),
-        ];
-        let slots = vec![0, 0, 0, 0, 1]; // the last item binds another pool class
-        let runs = build_runs(&draws, &slots, &[]);
-        assert_eq!(runs.len(), 3, "opaque span fused; cutout split by slot");
-        assert_eq!(runs[0].index_range, 0..9);
-        assert_eq!(runs[1].index_range, 9..12);
-        assert!(runs[1].cutout);
-        assert_eq!(runs[2].slot, 1);
-        // Kill the middle opaque item: the fused run splits around it.
-        let runs = build_runs(&draws, &slots, &[0b010u64]);
-        assert_eq!(runs.len(), 4);
-        assert_eq!(runs[0].index_range, 0..3);
-        assert_eq!(runs[1].index_range, 6..9);
-        // Kill everything: nothing is submitted.
-        assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
-    }
-}
+mod tests;

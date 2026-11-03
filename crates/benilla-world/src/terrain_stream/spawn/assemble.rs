@@ -16,7 +16,7 @@ use crate::mesh_tag::alpha_bits;
 use crate::model_fade::DoodadFade;
 use crate::model_render::{model_material, MaterialCache, ShadeSel};
 use crate::model_render::{ModelKind, ModelPart};
-use benilla_assets::materials::{TorchBinds, WowModelMaterial};
+use benilla_assets::materials::{RigTaaBinds, TorchBinds, WowModelMaterial};
 
 /// What one placement's anim host armed, for the fx spawned beside its submeshes.
 pub struct PlacementHost {
@@ -61,6 +61,7 @@ pub fn spawn_model_entities(
     light: &Buffer,
     // MONKEY (torch shadows Phase 3A): the shared torch bindings, beside the light buffer.
     torch: &TorchBinds,
+    rig_taa: &RigTaaBinds,
     submeshes: &[ModelSubmesh],
     // Index-parallel with `submeshes`; complete, as callers gate on `ModelForms::require`.
     forms: crate::model_forms::FormSlices<'_>,
@@ -194,6 +195,7 @@ pub fn spawn_model_entities(
             false, // the world streamer never spawns a skybox
             light,
             torch,
+            rig_taa,
             seq_owner,
         );
         // The fade's blend twin, the cutout itself when already blended or never fading. A multiply
@@ -234,6 +236,7 @@ pub fn spawn_model_entities(
                 false, // the world streamer never spawns a skybox
                 light,
                 torch,
+                rig_taa,
                 seq_owner,
             )
         };
@@ -272,6 +275,7 @@ pub fn spawn_model_entities(
                     false,
                     light,
                     torch,
+                    rig_taa,
                     seq_owner,
                 )
             };

@@ -359,7 +359,8 @@ impl Plugin for PlayerPlugin {
             // After the config load: the camera reads `gxMultisample` once, at spawn.
             setup::setup_player
                 .after(AssetSet::Open)
-                .after(crate::cvars::CvarLoad),
+                .after(crate::cvars::CvarLoad)
+                .after(crate::aa_options::AaBootApplied),
         )
         // The world camera renders only in world or under the loading screen, whose covered
         // render compiles the world's pipelines before the first visible frame.
@@ -367,6 +368,14 @@ impl Plugin for PlayerPlugin {
         .add_systems(
             Update,
             setup::gate_world_camera.before(crate::vm_pass::VmPass::Start),
+        )
+        // A same-map teleport is the app-owned camera cut; `Last` sees this frame's message before
+        // extraction, and the AA history is a world resource already present in the game app.
+        // Before the AA policy resolution and the jitter schedule, so a cut's invalidation and the
+        // sequence restart land on the same frame.
+        .add_systems(
+            Last,
+            setup::invalidate_history_on_teleport.before(benilla_world::aa::AaPolicyResolved),
         )
         // Off in capture mode, where the harness pins the camera, and in world only, so the glue
         // screens keep the cursor and send no movement.

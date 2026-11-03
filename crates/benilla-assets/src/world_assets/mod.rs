@@ -10,7 +10,9 @@ use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Buffer, Face};
 
-use crate::materials::{TorchBinds, WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF};
+use crate::materials::{
+    RigTaaBinds, TorchBinds, WowModelExt, WowModelMaterial, VANILLA_ALPHA_KEY_REF,
+};
 use crate::SpatialCache;
 use benilla_formats::{
     blp_to_rgba, makes_device_texture, read_texture_native_chain, tga_texture_size, tga_to_rgba,
@@ -47,6 +49,7 @@ pub struct WorldAssets {
     /// beside `shared_light` for the same reason — cloned into every deduped model material's
     /// `torch_depth`/`torch_buf` without threading them through the call sites.
     pub torch: TorchBinds,
+    pub rig_taa: RigTaaBinds,
 }
 
 /// Identity of a deduped model material; everything textureless shares one fallback per WMO flag.
@@ -685,7 +688,12 @@ impl WorldAssets {
     ///
     /// `torch` (MONKEY, torch shadows Phase 3A) is the same shape of seam for the torch-shadow
     /// receiver bindings: the raw image handle + table buffer, cloned into every model material.
-    pub fn open(chain: Chain, shared_light: Buffer, torch: TorchBinds) -> Self {
+    pub fn open(
+        chain: Chain,
+        shared_light: Buffer,
+        torch: TorchBinds,
+        rig_taa: RigTaaBinds,
+    ) -> Self {
         Self {
             chain: Arc::new(Mutex::new(chain)),
             textures: SpatialCache::default(),
@@ -695,6 +703,7 @@ impl WorldAssets {
             model_materials: SpatialCache::default(),
             shared_light,
             torch,
+            rig_taa,
         }
     }
 
@@ -1028,6 +1037,7 @@ impl WorldAssets {
                 // MONKEY (torch shadows Phase 3A): the shared torch receiver bindings.
                 torch_depth: self.torch.depth.clone(),
                 torch_buf: self.torch.table.clone(),
+                rig_taa: self.rig_taa.previous.clone(),
             },
         });
         self.model_materials.insert(key, handle.clone());

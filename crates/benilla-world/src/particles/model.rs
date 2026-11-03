@@ -13,7 +13,7 @@ use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 use crate::model_render::{model_material, MaterialCache, ShadeSel};
-use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::materials::{RigTaaBinds, WowModelMaterial};
 
 use super::{ChildDraw, ParticleEmitter};
 
@@ -37,6 +37,7 @@ pub(super) fn update_model_particles(
     light: Res<crate::lighting::SharedLightBuffer>,
     // MONKEY (torch shadows Phase 3A): the shared torch bindings every instance material takes.
     torch: crate::static_gx::TorchShared,
+    rig_taa: Option<Res<RigTaaBinds>>,
     mut emitters: Query<&mut ParticleEmitter>,
     mut draws: Query<
         (
@@ -53,6 +54,7 @@ pub(super) fn update_model_particles(
     let Some(torch) = torch.binds() else {
         return;
     };
+    let Some(rig_taa) = rig_taa else { return };
     for mut emitter in &mut emitters {
         let Some(geometry) = emitter.geometry.clone() else {
             continue;
@@ -106,6 +108,7 @@ pub(super) fn update_model_particles(
                         false, // an effect model is never a skybox
                         &light.0,
                         &torch,
+                        &rig_taa,
                         None, // a shard's material is shared by the whole emitter
                     );
                     // Realized now: the over-life ramp writes it every frame.

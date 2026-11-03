@@ -117,6 +117,7 @@ mod shaders;
 mod shadow_core;
 mod zone_skybox;
 
+mod aa_options;
 mod game_tip;
 mod opaque2d;
 /// Where "the client is going down" is observed, in `Last`; every system that persists state on the

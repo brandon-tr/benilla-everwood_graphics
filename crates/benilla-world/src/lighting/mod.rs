@@ -81,6 +81,15 @@ pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,
 // never a row index.
 pub(crate) use global_light::per_frame_blob_bytes; // MONKEY (rainshelter)
+pub(crate) use global_light::GxRetainedWindFrame;
+// The shared-light render-world upload on its own, for the previous-rig snapshot's host-GPU
+// regression, which owns the shared buffer but not the rest of the light pack.
+#[cfg(test)]
+pub(crate) use global_light::install_test_light_data;
+#[cfg(test)]
+pub(crate) use global_light::register_upload;
+#[cfg(test)]
+pub(crate) use global_light::upload_light;
 pub(crate) use prop_probes::prop_probe_region_offset;
 pub use resolve::WmoCrossfade;
 use resolve::{apply_sky_backdrop, setup_lighting, update_time_lighting};

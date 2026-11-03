@@ -17,6 +17,7 @@ use bevy::render::renderer::RenderQueue;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::mesh_tag::MAX_RIG_SLOTS;
+pub(crate) mod temporal;
 use crate::vis_chain::VisChainOnly;
 
 /// Bone capacity across every live rig, about twice a Lower Blackrock Spire census (~61 k).
@@ -84,6 +85,8 @@ pub struct RigPalettes {
     /// Bone ranges rewritten since the last publish; `.2` = the owning slot was mirrored.
     dirty: Vec<(u32, u32, bool)>,
     table_generation: u64,
+    allocation_ids: Vec<u64>,
+    next_allocation_id: u64,
     peak_slots: usize,
     peak_bones: u32,
     live_bones: u32,
@@ -114,6 +117,8 @@ impl Default for RigPalettes {
             free_ranges: vec![(0, MAX_PALETTE_BONES as u32)],
             dirty: Vec::new(),
             table_generation: 0,
+            allocation_ids: vec![0; MAX_RIG_SLOTS],
+            next_allocation_id: 0,
             peak_slots: 0,
             peak_bones: 0,
             live_bones: 0,
@@ -193,6 +198,7 @@ impl RigPalettes {
         if bones == 0 {
             return None;
         }
+        let allocation_id = self.next_allocation_id.checked_add(1)?;
         let (i, &(base, len)) = self
             .free_ranges
             .iter()
@@ -226,6 +232,8 @@ impl RigPalettes {
         rows[r0..r1].fill([0.0; 4]);
         Arc::make_mut(&mut self.table)[slot as usize] = base;
         self.slot_len[slot as usize] = bones;
+        self.allocation_ids[slot as usize] = allocation_id;
+        self.next_allocation_id = allocation_id;
         self.mirrored[slot as usize] = false;
         self.table_generation += 1;
         self.live_bones += bones;
@@ -245,6 +253,7 @@ impl RigPalettes {
         };
         let base = self.table[s];
         self.slot_len[s] = 0;
+        self.allocation_ids[s] = 0;
         self.free_slots.push(slot);
         self.live_bones -= len;
         self.table_generation += 1;
@@ -432,6 +441,21 @@ impl RigPalettes {
         self.rows_at(slot, bones, [0.0; 3])
     }
 
+    /// The rig-relative affine for one bone, without adding the rig origin and without allocating.
+    /// Returns `None` for the slot-0 sentinel, a free/unknown slot, or an out-of-range bone.
+    pub(crate) fn rig_row(&self, slot: u16, bone: u16) -> Option<Mat4> {
+        let s = slot as usize;
+        let len = *self.slot_len.get(s)?;
+        if slot == 0 || u32::from(bone) >= len {
+            return None;
+        }
+        let base = *self.table.get(s)? as usize;
+        let r = 3 * (base + bone as usize);
+        let rows = self.rows.get(r..r + 3)?;
+        let row = |i: usize| Vec4::from_array(rows[i]);
+        Some(Mat4::from_cols(row(0), row(1), row(2), Vec4::W).transpose())
+    }
+
     /// The rows of `slot` as `Mat4`s, `o` added to the translation column.
     fn rows_at(&self, slot: u16, bones: usize, o: [f32; 3]) -> Option<Vec<Mat4>> {
         let s = slot as usize;
@@ -520,7 +544,7 @@ pub struct RigStarved;
 #[component(on_replace = free_rig_skin)]
 pub struct RigSkin {
     pub slot: u16,
-    base: u32,
+    pub(crate) base: u32,
     len: u32,
     pub(crate) joints: Vec<Entity>,
     pub(crate) ibp: Handle<SkinnedMeshInverseBindposes>,
@@ -650,6 +674,13 @@ fn compute_rig_palettes(
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RigAllocation {
+    pub(crate) id: u64,
+    pub(crate) base: u32,
+    pub(crate) bones: u32,
+}
+
 /// The render-world mirror: `Arc` bumps and the frame's dirty ranges.
 #[derive(Resource, Clone, ExtractResource)]
 struct RigPaletteExtract {
@@ -658,6 +689,9 @@ struct RigPaletteExtract {
     origins: Arc<Vec<[f32; 4]>>,
     dirty: Arc<Vec<(u32, u32, bool)>>,
     table_generation: u64,
+    frame: Option<u32>,
+    allocations: Arc<Vec<RigAllocation>>,
+    watermark: u32,
     origin_generation: u64,
     origin_mirror_generation: u64,
 }
@@ -671,6 +705,9 @@ impl Default for RigPaletteExtract {
             dirty: Arc::new(Vec::new()),
             // != RigPalettes' initial 0, so the first publish uploads even an empty table.
             table_generation: u64::MAX,
+            frame: None,
+            allocations: Arc::new(Vec::new()),
+            watermark: 0,
             origin_generation: u64::MAX,
             origin_mirror_generation: u64::MAX,
         }
@@ -685,7 +722,22 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
     {
         return;
     }
+    let table_changed = out.table_generation != palettes.table_generation;
     let p = palettes.as_mut();
+    if table_changed {
+        let mut allocations = vec![RigAllocation::default(); MAX_RIG_SLOTS];
+        for (slot, allocation) in allocations.iter_mut().enumerate().take(p.slot_high).skip(1) {
+            if p.slot_len[slot] > 0 {
+                *allocation = RigAllocation {
+                    id: p.allocation_ids[slot],
+                    base: p.table[slot],
+                    bones: p.slot_len[slot],
+                };
+            }
+        }
+        out.allocations = Arc::new(allocations);
+    }
+    out.watermark = p.bone_watermark();
     if rig_cost_enabled() {
         eprintln!(
             "[rig-cost] ranges={} rows={} copies={} copy_ms={:.3}",
@@ -705,6 +757,14 @@ fn publish_rig_palettes(mut palettes: ResMut<RigPalettes>, mut out: ResMut<RigPa
     out.origin_mirror_generation = p.origin_mirror_generation;
 }
 
+/// Stamp the published snapshot after Bevy's Last frame-count increment.
+fn stamp_rig_palette_epoch(
+    frame: Option<Res<bevy::diagnostic::FrameCount>>,
+    mut published: ResMut<RigPaletteExtract>,
+) {
+    published.frame = frame.as_deref().map(|f| f.0);
+}
+
 /// The glue and portrait booths' studio light buffers, which mirror the palette regions.
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct RigPaletteMirrors(
@@ -718,6 +778,101 @@ struct UploadedGenerations {
     dirty: u64,
     origin: Option<u64>,
     origin_mirror: Option<u64>,
+    shared_source: Option<bevy::render::render_resource::BufferId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SharedRigUploadPlan {
+    table: bool,
+    origins: bool,
+    ranges: Vec<(u32, u32)>,
+}
+
+fn rig_publication_complete(data: &RigPaletteExtract) -> bool {
+    data.allocations.len() == MAX_RIG_SLOTS
+        && data.table.len() == MAX_RIG_SLOTS
+        && data.origins.len() == MAX_RIG_SLOTS
+        && data.watermark <= MAX_PALETTE_BONES as u32
+        && data.rows.len() >= 3 * data.watermark as usize
+}
+
+fn shared_rig_upload_plan(
+    last: &UploadedGenerations,
+    source: bevy::render::render_resource::BufferId,
+    data: &RigPaletteExtract,
+) -> Option<SharedRigUploadPlan> {
+    if !rig_publication_complete(data) {
+        return None;
+    }
+    if last.shared_source != Some(source) {
+        return Some(SharedRigUploadPlan {
+            table: true,
+            origins: true,
+            ranges: (data.watermark > 0)
+                .then_some((0, data.watermark))
+                .into_iter()
+                .collect(),
+        });
+    }
+    let dirty_ptr = std::sync::Arc::as_ptr(&data.dirty) as u64;
+    let ranges = if last.dirty != dirty_ptr && !data.dirty.is_empty() {
+        coalesce_ranges(data.dirty.iter().map(|&(b, l, _)| (b, l)).collect())
+    } else {
+        Vec::new()
+    };
+    Some(SharedRigUploadPlan {
+        table: last.table != Some(data.table_generation),
+        origins: last.origin != Some(data.origin_generation),
+        ranges,
+    })
+}
+
+fn rig_upload_plans(
+    last: &UploadedGenerations,
+    source: Option<bevy::render::render_resource::BufferId>,
+    data: &RigPaletteExtract,
+) -> (Option<SharedRigUploadPlan>, SharedRigUploadPlan) {
+    let shared = source.and_then(|id| shared_rig_upload_plan(last, id, data));
+    let dirty_ptr = Arc::as_ptr(&data.dirty) as u64;
+    let ranges = if last.dirty != dirty_ptr && !data.dirty.is_empty() {
+        coalesce_ranges(
+            data.dirty
+                .iter()
+                .filter(|&&(_, _, mirrored)| mirrored)
+                .map(|&(base, len, _)| (base, len))
+                .collect(),
+        )
+    } else {
+        Vec::new()
+    };
+    let mirror = SharedRigUploadPlan {
+        table: last.table != Some(data.table_generation) && !data.table.is_empty(),
+        origins: last.origin_mirror != Some(data.origin_mirror_generation)
+            && !data.origins.is_empty(),
+        ranges,
+    };
+    (shared, mirror)
+}
+fn palette_upload_receipt(
+    frame: Option<u32>,
+    source: Option<bevy::render::render_resource::BufferId>,
+    data: Option<&RigPaletteExtract>,
+    last: &UploadedGenerations,
+) -> Option<(u32, bevy::render::render_resource::BufferId)> {
+    let (frame, source, data) = (frame?, source?, data?);
+    if data.frame != Some(frame)
+        || !rig_publication_complete(data)
+        || last.shared_source != Some(source)
+        || last.table != Some(data.table_generation)
+        || last.origin != Some(data.origin_generation)
+    {
+        return None;
+    }
+    let dirty_ptr = std::sync::Arc::as_ptr(&data.dirty) as u64;
+    if !data.dirty.is_empty() && last.dirty != dirty_ptr {
+        return None;
+    }
+    Some((frame, source))
 }
 
 /// Render world (`PrepareResources`): write the dirty rows, and on change the slot and origin
@@ -727,56 +882,64 @@ fn upload_rig_palettes(
     shared: Option<Res<crate::lighting::SharedLightBuffer>>,
     mirrors: Option<Res<RigPaletteMirrors>>,
     data: Option<Res<RigPaletteExtract>>,
+    frame: Option<Res<bevy::diagnostic::FrameCount>>,
+    mut receipts: Option<ResMut<crate::rig_palette::temporal::snapshot::RigTaaUploadReceipts>>,
     mut last: Local<UploadedGenerations>,
 ) {
-    let Some(data) = data else { return };
-    // The extract clones every frame, so gate on content.
-    let dirty_ptr = Arc::as_ptr(&data.dirty) as u64;
-    let table_new = last.table != Some(data.table_generation);
-    let dirty_new = last.dirty != dirty_ptr && !data.dirty.is_empty();
-    // The 32 KB origin table is written whole; the mirrors gate on their own generation.
-    let origin_new = last.origin != Some(data.origin_generation) && !data.origins.is_empty();
-    let origin_mirror_new =
-        last.origin_mirror != Some(data.origin_mirror_generation) && !data.origins.is_empty();
-    if !table_new && !dirty_new && !origin_new && !origin_mirror_new {
-        return;
+    if let Some(receipts) = receipts.as_deref_mut() {
+        receipts.palette = None;
     }
-    *last = UploadedGenerations {
-        table: Some(data.table_generation),
-        dirty: dirty_ptr,
-        origin: Some(data.origin_generation),
-        origin_mirror: Some(data.origin_mirror_generation),
+    let Some(data) = data else {
+        last.shared_source = None;
+        return;
     };
+    let source = shared.as_ref().map(|s| s.0.id());
+    let (shared_plan, mirror_plan) = rig_upload_plans(&last, source, &data);
+    let dirty_ptr = Arc::as_ptr(&data.dirty) as u64;
     let cost_t0 = rig_cost_enabled().then(std::time::Instant::now);
     let mut cost_calls = 0u32;
     let mut cost_bytes = 0u64;
-    // Coalesce first: each `write_buffer` call costs far more than its bytes.
-    let all = coalesce_ranges(data.dirty.iter().map(|&(b, l, _)| (b, l)).collect());
-    let mirrored_only = coalesce_ranges(
-        data.dirty
-            .iter()
-            .filter(|&&(_, _, m)| m)
-            .map(|&(b, l, _)| (b, l))
-            .collect(),
-    );
-    // Every target takes the slot table; the booth mirrors take only the mirrored ranges.
-    let targets = shared
-        .iter()
-        .map(|s| (&s.0, false))
-        .chain(mirrors.iter().flat_map(|m| m.0.values().map(|b| (b, true))));
-    for (buffer, mirror_only) in targets {
-        if table_new && !data.table.is_empty() {
+    if let (Some(plan), Some(shared)) = (&shared_plan, &shared) {
+        if plan.table {
+            queue.write_buffer(
+                &shared.0,
+                rig_table_region_offset(),
+                bytemuck::cast_slice(&data.table),
+            );
+            cost_calls += 1;
+            cost_bytes += (MAX_RIG_SLOTS * 4) as u64;
+        }
+        if plan.origins {
+            queue.write_buffer(
+                &shared.0,
+                rig_origin_region_offset(),
+                bytemuck::cast_slice(&data.origins),
+            );
+            cost_calls += 1;
+            cost_bytes += rig_origin_region_bytes();
+        }
+        for &(base, len) in &plan.ranges {
+            let rows = &data.rows[3 * base as usize..3 * (base + len) as usize];
+            queue.write_buffer(
+                &shared.0,
+                palette_region_offset() + base as u64 * BONE_BYTES,
+                bytemuck::cast_slice(rows),
+            );
+            cost_calls += 1;
+            cost_bytes += len as u64 * BONE_BYTES;
+        }
+    }
+    for buffer in mirrors.iter().flat_map(|m| m.0.values()) {
+        if mirror_plan.table {
             queue.write_buffer(
                 buffer,
                 rig_table_region_offset(),
                 bytemuck::cast_slice(&data.table),
             );
+            cost_calls += 1;
+            cost_bytes += (MAX_RIG_SLOTS * 4) as u64;
         }
-        if if mirror_only {
-            origin_mirror_new
-        } else {
-            origin_new
-        } {
+        if mirror_plan.origins {
             queue.write_buffer(
                 buffer,
                 rig_origin_region_offset(),
@@ -785,19 +948,28 @@ fn upload_rig_palettes(
             cost_calls += 1;
             cost_bytes += rig_origin_region_bytes();
         }
-        if dirty_new {
-            let ranges = if mirror_only { &mirrored_only } else { &all };
-            for &(base, len) in ranges {
-                let rows = &data.rows[3 * base as usize..3 * (base + len) as usize];
-                queue.write_buffer(
-                    buffer,
-                    palette_region_offset() + base as u64 * BONE_BYTES,
-                    bytemuck::cast_slice(rows),
-                );
-                cost_calls += 1;
-                cost_bytes += len as u64 * BONE_BYTES;
-            }
+        for &(base, len) in &mirror_plan.ranges {
+            let rows = &data.rows[3 * base as usize..3 * (base + len) as usize];
+            queue.write_buffer(
+                buffer,
+                palette_region_offset() + base as u64 * BONE_BYTES,
+                bytemuck::cast_slice(rows),
+            );
+            cost_calls += 1;
+            cost_bytes += len as u64 * BONE_BYTES;
         }
+    }
+    let shared_applied = shared.is_some() && shared_plan.is_some();
+    *last = UploadedGenerations {
+        table: Some(data.table_generation),
+        dirty: dirty_ptr,
+        origin: Some(data.origin_generation),
+        origin_mirror: Some(data.origin_mirror_generation),
+        shared_source: if shared_applied { source } else { None },
+    };
+    let receipt = palette_upload_receipt(frame.as_deref().map(|f| f.0), source, Some(&data), &last);
+    if let Some(receipts) = receipts.as_deref_mut() {
+        receipts.palette = receipt;
     }
     if let Some(t0) = cost_t0 {
         eprintln!(
@@ -807,7 +979,6 @@ fn upload_rig_palettes(
         );
     }
 }
-
 /// The widest gap, in bones, two dirty runs may leave and still upload as one `write_buffer`: a
 /// call's fixed cost (a staging buffer each) is about what re-sending this many live rows costs.
 const COALESCE_GAP_BONES: u32 = 256;
@@ -916,12 +1087,19 @@ fn census_rig_palettes(
 }
 
 pub fn plugin(app: &mut App) {
+    // The previous-rig snapshot service: the world-view demand scan, its extraction, the
+    // `CopyPrevious -> UploadCurrent -> RecordCurrent` set order and the render-world state.
+    temporal::snapshot::register(app);
     app.init_resource::<RigPalettes>()
         .init_resource::<RigPaletteExtract>()
         .init_resource::<RigPaletteMirrors>()
         .add_plugins(ExtractResourcePlugin::<RigPaletteExtract>::default())
         .add_plugins(ExtractResourcePlugin::<RigPaletteMirrors>::default())
         .add_systems(Update, census_rig_palettes)
+        .add_systems(
+            Last,
+            stamp_rig_palette_epoch.after(bevy::diagnostic::update_frame_count),
+        )
         .add_systems(
             PostUpdate,
             (
@@ -935,9 +1113,13 @@ pub fn plugin(app: &mut App) {
                 .after(crate::billboard::BillboardPlace),
         );
     if let Some(render) = app.get_sub_app_mut(RenderApp) {
+        // One of the two uploaders the snapshot's `CopyPrevious` must precede; the other is the
+        // shared light table's (`lighting::global_light::upload_light`).
         render.add_systems(
             Render,
-            upload_rig_palettes.in_set(RenderSystems::PrepareResources),
+            upload_rig_palettes
+                .in_set(RenderSystems::PrepareResources)
+                .in_set(temporal::snapshot::RigTaaSnapshotSet::UploadCurrent),
         );
     }
 }
@@ -978,293 +1160,4 @@ pub fn spawn_joints(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn alloc_free_coalesce_roundtrip() {
-        let mut p = RigPalettes::default();
-        let (s1, b1) = p.alloc(10).unwrap();
-        let (s2, b2) = p.alloc(20).unwrap();
-        let (s3, b3) = p.alloc(30).unwrap();
-        assert!(s1 >= 1, "slot 0 is the no-rig sentinel");
-        assert_eq!((b1, b2, b3), (0, 10, 30));
-        p.free(s2);
-        assert_eq!(p.occupancy().0, 2);
-        // An exact fit reuses the freed middle range.
-        let (s4, b4) = p.alloc(20).unwrap();
-        assert_eq!(b4, 10);
-        p.free(s1);
-        p.free(s4);
-        p.free(s3);
-        assert_eq!(p.free_ranges, vec![(0, MAX_PALETTE_BONES as u32)]);
-        assert_eq!(p.occupancy().0, 0);
-        assert_eq!(p.occupancy().2, 3, "peak slots");
-        assert_eq!(p.occupancy().3, 60, "peak bones");
-    }
-
-    #[test]
-    fn freed_rows_read_zero_not_stale() {
-        let mut p = RigPalettes::default();
-        let (slot, base) = p.alloc(2).unwrap();
-        Arc::make_mut(&mut p.rows)[3 * base as usize] = [1.0; 4];
-        p.free(slot);
-        assert_eq!(p.rows[3 * base as usize], [0.0; 4]);
-        // The free is a dirty range too, so the GPU copy zeroes as well.
-        assert!(p.dirty.contains(&(base, 2, false)));
-    }
-
-    /// The copy-on-write clone copies only the live prefix; a free while shared still zeroes.
-    #[test]
-    fn a_shared_arc_write_copies_only_the_live_prefix() {
-        let mut p = RigPalettes::default();
-        let (_s1, b1) = p.alloc(2).unwrap();
-        let (s2, b2) = p.alloc(3).unwrap();
-        for r in 3 * b1 as usize..3 * (b1 + 2) as usize {
-            Arc::make_mut(&mut p.rows)[r] = [1.0; 4];
-        }
-        for r in 3 * b2 as usize..3 * (b2 + 3) as usize {
-            Arc::make_mut(&mut p.rows)[r] = [2.0; 4];
-        }
-        assert_eq!(p.bone_watermark(), 5, "first-fit packs the content low");
-        // The extract's held reference, as at every frame's first write.
-        let held = p.rows.clone();
-        let wm = p.bone_watermark();
-        let rows = rows_make_mut(
-            &mut p.rows,
-            &mut p.spare,
-            wm,
-            &mut p.cost_copies,
-            &mut p.cost_copy_us,
-        );
-        rows[0] = [9.0; 4];
-        assert_eq!(p.cost_copies, 1, "the shared write copied");
-        assert_eq!(
-            p.rows[3 * b2 as usize],
-            [2.0; 4],
-            "the neighbour survived the prefix copy"
-        );
-        assert_eq!(held[0], [1.0; 4], "the held (extracted) side is untouched");
-        // Free the top rig while shared: the zeroing must land inside the copied prefix.
-        let held2 = p.rows.clone();
-        p.free(s2);
-        assert_eq!(
-            p.rows[3 * b2 as usize],
-            [0.0; 4],
-            "freed rows zeroed through the COW"
-        );
-        assert_eq!(
-            held2[3 * b2 as usize],
-            [2.0; 4],
-            "the held side keeps the old frame"
-        );
-        assert_eq!(
-            p.bone_watermark(),
-            2,
-            "the tail grew back down to the live rig"
-        );
-        // A fresh shared write after the shrink still carries the survivor whole.
-        let _held3 = p.rows.clone();
-        let wm = p.bone_watermark();
-        let rows = rows_make_mut(
-            &mut p.rows,
-            &mut p.spare,
-            wm,
-            &mut p.cost_copies,
-            &mut p.cost_copy_us,
-        );
-        rows[1] = [7.0; 4];
-        assert_eq!(
-            p.rows[0], [9.0; 4],
-            "the live rig's rows survive every bounded copy"
-        );
-    }
-
-    #[test]
-    fn alloc_fails_gracefully_at_capacity() {
-        let mut p = RigPalettes::default();
-        let (big, _) = p.alloc(MAX_PALETTE_BONES as u32).unwrap();
-        assert!(p.alloc(1).is_none(), "no bones left");
-        p.free(big);
-        // Slot exhaustion, separately from bone exhaustion.
-        let taken: Vec<u16> = (0..MAX_RIG_SLOTS - 1)
-            .map(|_| p.alloc(1).unwrap().0)
-            .collect();
-        assert!(p.alloc(1).is_none(), "no slots left");
-        for s in taken {
-            p.free(s);
-        }
-        assert!(p.alloc(1).is_some());
-    }
-
-    #[test]
-    fn a_rider_frame_fills_every_row_and_re_writing_it_is_free() {
-        let mut p = RigPalettes::default();
-        let skin = RigSkin::allocate_bones(&mut p, 4, Handle::default()).unwrap();
-        let origin = Vec3::new(-9464.31, 62.17, 56.91);
-        let frame = Affine3A::from_rotation_translation(
-            Quat::from_rotation_y(0.7),
-            Vec3::new(0.3, 1.4, -0.2),
-        );
-        p.dirty.clear();
-        p.write_rider(skin.slot, frame, origin);
-        assert_eq!(p.dirty.len(), 1, "the first write dirties the range");
-        assert_eq!(p.dirty[0].1, 4, "and dirties ALL of it, not just row 0");
-
-        let pal = p.world_palette(skin.slot, 4).unwrap();
-        let want = Mat4::from(Affine3A::from_translation(origin) * frame);
-        for (b, m) in pal.iter().enumerate() {
-            assert!(m.abs_diff_eq(want, 1e-2), "row {b}: {m:?} vs {want:?}");
-        }
-        // And the unsummed pair the vertex stage actually reads.
-        let (o, t) = p.rider_placement(skin.slot).unwrap();
-        assert_eq!(o, origin);
-        assert!(t.abs_diff_eq(Vec3::from(frame.translation), 1e-6));
-
-        p.dirty.clear();
-        p.write_rider(skin.slot, frame, origin);
-        assert!(
-            p.dirty.is_empty(),
-            "an unchanged rider frame must not dirty its range"
-        );
-        // A sub-epsilon move still lands: bit equality, not an epsilon.
-        p.write_rider(
-            skin.slot,
-            Affine3A::from_translation(Vec3::new(0.3, 1.4, -0.2 + 1.0e-6)) * frame,
-            origin,
-        );
-        assert_eq!(p.dirty.len(), 1, "a sub-millimetre move is still a move");
-    }
-
-    #[test]
-    fn world_palette_reconstructs_the_affine_including_the_rig_origin() {
-        let mut p = RigPalettes::default();
-        let (slot, base) = p.alloc(1).unwrap();
-        // A 90° turn about Y and a (1, 2, 3) offset, in a rig far from the map origin.
-        let origin = Vec3::new(-9464.31, 62.17, 56.91);
-        let m = Mat4::from_rotation_translation(
-            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            Vec3::new(1.0, 2.0, 3.0),
-        );
-        let a = Affine3A::from_mat4(m);
-        p.set_origin(slot, origin);
-        let rows = Arc::make_mut(&mut p.rows);
-        let (m3, t) = (a.matrix3, a.translation);
-        let r = 3 * base as usize;
-        rows[r] = [m3.x_axis.x, m3.y_axis.x, m3.z_axis.x, t.x];
-        rows[r + 1] = [m3.x_axis.y, m3.y_axis.y, m3.z_axis.y, t.y];
-        rows[r + 2] = [m3.x_axis.z, m3.y_axis.z, m3.z_axis.z, t.z];
-        let want = Mat4::from_translation(origin) * m;
-        let pal = p.world_palette(slot, 1).unwrap();
-        assert!(pal[0].abs_diff_eq(want, 1e-2), "{:?} vs {want:?}", pal[0]);
-        let q = Vec3::new(0.5, -1.0, 2.0);
-        assert!(pal[0]
-            .transform_point3(q)
-            .abs_diff_eq(want.transform_point3(q), 1e-2));
-        // The origin is load-bearing here, not a rounding-sized detail.
-        assert!(
-            p.world_palette(slot, 1).unwrap()[0]
-                .w_axis
-                .truncate()
-                .distance(origin + Vec3::new(1.0, 2.0, 3.0))
-                < 1e-2
-        );
-    }
-
-    /// A slot recycles: the freed rig's origin must not ride into the next unit that claims it.
-    #[test]
-    fn freeing_a_slot_clears_its_origin() {
-        let mut p = RigPalettes::default();
-        let (slot, _) = p.alloc(4).unwrap();
-        p.set_origin(slot, Vec3::new(-9464.31, 62.17, 56.91));
-        assert_ne!(p.origins[slot as usize], [0.0; 4]);
-        p.free(slot);
-        assert_eq!(p.origins[slot as usize], [0.0; 4]);
-    }
-
-    #[test]
-    fn dirty_ranges_coalesce_into_runs() {
-        // Adjacent and overlapping merge, a hole splits, input order does not matter.
-        assert_eq!(
-            coalesce_ranges_with_gap(vec![(70, 5), (0, 10), (10, 20), (25, 10), (40, 5)], 0),
-            vec![(0, 35), (40, 5), (70, 5)]
-        );
-        assert_eq!(coalesce_ranges(Vec::new()), Vec::new());
-    }
-
-    #[test]
-    fn dirty_ranges_bridge_small_gaps_but_not_large_ones() {
-        // A parked rig between two live ones is bridged; a wider gap still splits.
-        assert_eq!(
-            coalesce_ranges_with_gap(vec![(0, 10), (14, 6), (30, 5)], 4),
-            vec![(0, 20), (30, 5)]
-        );
-        // The shipped tolerance bridges a gap of exactly its size and no more.
-        let g = COALESCE_GAP_BONES;
-        assert_eq!(
-            coalesce_ranges(vec![(0, 10), (10 + g, 5)]),
-            vec![(0, 15 + g)]
-        );
-        assert_eq!(
-            coalesce_ranges(vec![(0, 10), (11 + g, 5)]),
-            vec![(0, 10), (11 + g, 5)]
-        );
-    }
-
-    #[test]
-    fn region_layout_is_consistent() {
-        // `wow_model.wgsl` mirrors this layout, and wgpu checks the bound size against its struct
-        // at draw time, so a mismatch fails there.
-        assert_eq!(
-            crate::instance_tint::region_offset() - rig_table_region_offset(),
-            (MAX_RIG_SLOTS * 4) as u64,
-            "the tint table follows the slot table"
-        );
-        assert_eq!(
-            rig_origin_region_offset() - crate::instance_tint::region_offset(),
-            crate::instance_tint::region_bytes(),
-            "the rig-origin table follows the tint table"
-        );
-        assert_eq!(
-            crate::mat_anim_table::region_offset() - rig_origin_region_offset(),
-            rig_origin_region_bytes(),
-            "the mat-anim table follows the origin table"
-        );
-        assert_eq!(
-            crate::straddle::region_offset() - crate::mat_anim_table::region_offset(),
-            crate::mat_anim_table::region_bytes(),
-            "the straddle clip table follows the mat-anim table"
-        );
-        assert_eq!(
-            crate::instance_surface::region_offset() - crate::straddle::region_offset(), // MONKEY: new table.
-            crate::straddle::region_bytes(),
-            "the surface table follows the straddle clip table" // MONKEY: layout fence.
-        );
-        // MONKEY: vec4 surface rows directly precede the runtime palette array.
-        assert_eq!(
-            palette_region_offset() - crate::instance_surface::region_offset(),
-            crate::instance_surface::region_bytes()
-        );
-        assert_eq!(
-            crate::instance_surface::region_bytes(),
-            (MAX_RIG_SLOTS * 16) as u64
-        );
-        assert_eq!(
-            palette_regions_bytes(),
-            (MAX_RIG_SLOTS * 4) as u64
-                + crate::instance_tint::region_bytes()
-                + rig_origin_region_bytes()
-                + crate::mat_anim_table::region_bytes()
-                + crate::straddle::region_bytes()
-                + crate::instance_surface::region_bytes() // MONKEY: full buffer size.
-                + (MAX_PALETTE_BONES as u64) * BONE_BYTES
-        );
-        // One `vec4` a slot: the shader declares `array<vec4<f32>, 2048>`.
-        assert_eq!(rig_origin_region_bytes(), (MAX_RIG_SLOTS * 16) as u64);
-        // One word a slot: the shader declares `array<u32, 2048>` for both tables.
-        assert_eq!(
-            crate::instance_tint::region_bytes(),
-            (MAX_RIG_SLOTS * 4) as u64
-        );
-    }
-}
+mod tests;

@@ -9,6 +9,10 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use super::global_light::{
     commit_raw, light_blob_bytes, pack_model_core_rows, LIGHT_HEADER_ROWS, MAX_LIVE_POINT_LIGHTS,
 };
+#[cfg(test)]
+use super::global_light::{GxRetainedWindFrame, MAX_POINT_LIGHTS};
+#[cfg(test)]
+use super::monkey_frame::{MonkeyFrame, MONKEY_FRAME_ROWS};
 use super::prop_probes::prop_probe_region_offset;
 use super::sh::prop_probe_coeffs;
 
@@ -130,6 +134,22 @@ impl LightBlob {
                 bytemuck::cast_slice(&rows),
             );
         }
+    }
+
+    /// Test-only: write the packed MonkeyFrame block and return the exact retained wind rows.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn write_monkey_frame(
+        queue: &RenderQueue,
+        buffer: &Buffer,
+        frame: &MonkeyFrame,
+        time_of_day: f32,
+        night: f32,
+    ) -> GxRetainedWindFrame {
+        let rows: [[f32; 4]; MONKEY_FRAME_ROWS] = frame.pack(time_of_day, night);
+        let offset = ((LIGHT_HEADER_ROWS + 2 * MAX_POINT_LIGHTS) * 16) as u64;
+        queue.write_buffer(buffer, offset, bytemuck::cast_slice(&rows));
+        GxRetainedWindFrame::from_rows(&rows)
     }
 }
 

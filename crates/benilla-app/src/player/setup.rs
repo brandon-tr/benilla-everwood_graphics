@@ -8,7 +8,10 @@ use bevy::render::view::Hdr;
 
 use benilla_assets::coords::wow_to_bevy;
 
+use crate::aa_options::{boot_camera_msaa, AaBootSelection};
+
 use benilla_assets::{RenderConfig, WorldAssets};
+use benilla_world::aa::{AaInvalidation, AaReadiness, TemporalHistory};
 use benilla_world::terrain_stream::SPAWN_XY;
 use benilla_world::view::{WorldCamera, CAM_FAR, CAM_FOVY, NEARCLIP_DEFAULT};
 
@@ -57,6 +60,8 @@ pub(super) fn setup_player(
     world_assets: Option<Res<WorldAssets>>,
     // `gxMultisample` with `config.toml` folded in: this runs after [`crate::cvars::CvarLoad`].
     msaa: Res<benilla_world::view::MsaaSetting>,
+    aa: Option<Res<AaBootSelection>>,
+    aa_readiness: Option<Res<AaReadiness>>,
 ) {
     let env_speed = std::env::var("WOW_MOVE_SPEED")
         .ok()
@@ -80,9 +85,15 @@ pub(super) fn setup_player(
         ..default()
     });
 
+    let fallback_msaa = msaa.level();
+    // Native TAA is single-sample by construction: the temporal depth lane copies the main depth
+    // attachment, which cannot be multisampled. A readiness-off selection keeps the MSAA fallback.
+    let camera_msaa = aa.map_or(fallback_msaa, |aa| {
+        boot_camera_msaa(aa.0, fallback_msaa, aa_readiness.as_deref())
+    });
     // No client data: free-fly an empty scene.
     let (Some(_), Some(_)) = (config, world_assets) else {
-        spawn_fallback_camera(&mut commands, msaa.level());
+        spawn_fallback_camera(&mut commands, camera_msaa);
         return;
     };
 
@@ -96,7 +107,9 @@ pub(super) fn setup_player(
         WorldCamera,
         // `gxMultisample` is read once: the reference latches it, pending until the next launch,
         // and a live swap would mismatch our post passes. `$WOW_MSAA` overrides it for a session.
-        msaa.level(),
+        // With `gxAntiAliasing = 2` and native readiness this is `Msaa::Off`: the temporal depth
+        // lane copies a single-sample attachment.
+        camera_msaa,
         Projection::from(PerspectiveProjection {
             far: cam_far,
             // Frame zero only: `view::stamp_near_clip` re-stamps the live `nearclip` every frame,
@@ -151,3 +164,23 @@ pub(super) fn gate_world_camera(
         }
     }
 }
+
+/// A same-map teleport cuts the view: drop every temporal history before the destination renders.
+/// Cross-map transitions arrive as `world_map::MapChange` and are handled in `benilla-world`; this
+/// is the app-owned same-map signal. `None` in a harness without the AA plugin.
+pub(super) fn invalidate_history_on_teleport(
+    mut teleports: MessageReader<crate::net::TeleportMessage>,
+    mut self_moves: MessageReader<crate::net::SelfMoveMessage>,
+    history: Option<ResMut<TemporalHistory>>,
+) {
+    let teleported = teleports.read().next().is_some() || self_moves.read().any(|m| m.teleport);
+    if !teleported {
+        return;
+    }
+    if let Some(mut history) = history {
+        history.invalidate_all(AaInvalidation::Teleport);
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -101,6 +101,8 @@ pub mod testing {
     }
 }
 
+/// Anti-aliasing policy and the temporal-history lifecycle (no temporal rendering yet).
+pub mod aa;
 pub mod art_scope;
 pub mod assets;
 pub mod bgwin;

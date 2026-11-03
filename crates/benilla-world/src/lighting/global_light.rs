@@ -645,7 +645,7 @@ impl ResolvedPointLights {
 
 /// The packed light for this frame, extracted for [`upload_light`].
 #[derive(Resource, Clone, Copy, ExtractResource)]
-struct WowLightData(LightStd430);
+pub(crate) struct WowLightData(LightStd430);
 
 impl Default for WowLightData {
     fn default() -> Self {
@@ -662,9 +662,22 @@ impl Default for WowLightData {
 #[derive(Resource, Clone, ExtractResource)]
 pub struct SharedLightBuffer(pub Buffer);
 
+/// The exact packed tree-wind rows published for the retained motion adapter.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, ExtractResource)]
+pub(crate) struct GxRetainedWindFrame {
+    pub(crate) rows: [[f32; 4]; super::monkey_frame::MONKEY_FRAME_ROWS],
+}
+
+impl GxRetainedWindFrame {
+    pub(crate) fn from_rows(rows: &[[f32; 4]; super::monkey_frame::MONKEY_FRAME_ROWS]) -> Self {
+        Self { rows: *rows }
+    }
+}
+
 /// Registers the light pack, the probe publish, their extracts and the render-world uploads.
 pub(super) fn register(app: &mut App) {
     app.init_resource::<WowLightData>()
+        .init_resource::<GxRetainedWindFrame>()
         // MONKEY (lampfog): CPU mirror of only the live point rows; not extracted or GPU-bound.
         .init_resource::<ResolvedPointLights>()
         // MONKEY (room gate): the per-fixture room claims, packed beside the point table.
@@ -690,9 +703,8 @@ pub(super) fn register(app: &mut App) {
         .init_resource::<super::prop_probes::PropProbeExtract>()
         // MONKEY (p0 MonkeyFrame): the per-frame programme parameters any system may write.
         .init_resource::<super::MonkeyFrame>()
-        .add_plugins(ExtractResourcePlugin::<WowLightData>::default())
+        .add_plugins(ExtractResourcePlugin::<GxRetainedWindFrame>::default())
         .add_plugins(ExtractResourcePlugin::<RoomClaimTable>::default())
-        .add_plugins(ExtractResourcePlugin::<SharedLightBuffer>::default())
         .add_plugins(ExtractResourcePlugin::<super::prop_probes::PropProbeExtract>::default())
         // After transform propagation: a carried light (a torch in a hand) is a child of a moving
         // joint, so its `GlobalTransform` is this frame's only once `Propagate` has run.
@@ -716,14 +728,44 @@ pub(super) fn register(app: &mut App) {
         )
         // After the spawners (PostUpdate): publish the probe table for extraction on change.
         .add_systems(PostUpdate, super::prop_probes::publish_prop_probes);
-    // A headless build (no GPU, `backends: None`), as the schedule tests use, has no render app.
-    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-        render_app.add_systems(
-            Render,
-            (upload_light, super::prop_probes::upload_prop_probes)
-                .in_set(RenderSystems::PrepareResources),
-        );
-    }
+    register_upload(app);
+}
+
+/// The shared-light render-world upload: its two extract resources and the uploader itself, in
+/// [`RigTaaSnapshotSet::UploadCurrent`].
+///
+/// [`register`] installs it with the rest of the light pack. It is also the production seam a
+/// harness that owns the shared buffer alone uses — the ignored host-GPU snapshot regression runs
+/// this exact registration rather than re-adding the system by hand.
+pub(crate) fn register_upload(app: &mut App) {
+    app.add_plugins(ExtractResourcePlugin::<WowLightData>::default())
+        .add_plugins(ExtractResourcePlugin::<SharedLightBuffer>::default());
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app.add_systems(
+        Render,
+        (
+            upload_light
+                .in_set(crate::rig_palette::temporal::snapshot::RigTaaSnapshotSet::UploadCurrent),
+            super::prop_probes::upload_prop_probes,
+        )
+            .in_set(RenderSystems::PrepareResources),
+    );
+}
+
+/// Test-only: replace the packed light with `monkey` as its frame block, every other row zero.
+///
+/// The pack is private because production producers state values through `LightStd430`; a GPU
+/// regression needs distinguishable frame bytes, and this keeps the layout private.
+#[cfg(test)]
+pub(crate) fn install_test_light_data(
+    app: &mut App,
+    monkey: [[f32; 4]; super::monkey_frame::MONKEY_FRAME_ROWS],
+) {
+    let mut data = WowLightData::default();
+    data.0.monkey = monkey;
+    app.insert_resource(data);
 }
 
 /// Creates the shared light buffer, sized by [`light_blob_bytes`], from the main-world
@@ -732,7 +774,7 @@ pub fn new_shared_light_buffer(device: &RenderDevice) -> SharedLightBuffer {
     SharedLightBuffer(device.create_buffer(&BufferDescriptor {
         label: Some("wow_shared_light"),
         size: light_blob_bytes(),
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     }))
 }
@@ -766,6 +808,7 @@ fn pack_monkey_frame(
     spell_gain: Res<SpellLightGain>,
     lava_gain: Option<Res<super::LavaLightGain>>,
     mut data: ResMut<WowLightData>,
+    mut retained_wind: Option<ResMut<GxRetainedWindFrame>>,
 ) {
     let night = 1.0 - sun_shadow_strength(light.celestial_dir.y);
     let mut packed = frame.pack(clock.minute as f32 / 1440.0, night);
@@ -776,6 +819,12 @@ fn pack_monkey_frame(
     }
     if data.0.monkey != packed {
         data.0.monkey = packed;
+    }
+    if let Some(retained_wind) = retained_wind.as_mut() {
+        let wind = GxRetainedWindFrame::from_rows(&data.0.monkey);
+        if **retained_wind != wind {
+            **retained_wind = wind;
+        }
     }
 }
 
@@ -1984,17 +2033,24 @@ fn light_verdict_interior(
 
 /// Render-world: write the packed light into the shared buffer in place, before any draw reads it
 /// (`RenderSystems::PrepareResources`). One small upload per frame, independent of material count.
-fn upload_light(
+pub(crate) fn upload_light(
     queue: Res<RenderQueue>,
     buffer: Option<Res<SharedLightBuffer>>,
     data: Option<Res<WowLightData>>,
+    frame: Option<Res<bevy::diagnostic::FrameCount>>,
+    mut receipts: Option<ResMut<crate::rig_palette::temporal::snapshot::RigTaaUploadReceipts>>,
 ) {
+    if let Some(receipts) = receipts.as_deref_mut() {
+        receipts.light = None;
+    }
     let (Some(buffer), Some(data)) = (buffer, data) else {
         return;
     };
     queue.write_buffer(&buffer.0, 0, bytemuck::bytes_of(&data.0));
+    if let (Some(frame), Some(receipts)) = (frame.as_deref(), receipts.as_deref_mut()) {
+        receipts.light = Some((frame.0, buffer.0.id()));
+    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3545,3 +3601,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod retained_wind_tests;

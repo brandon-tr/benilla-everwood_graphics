@@ -11,6 +11,7 @@ use bevy::pbr::{
     MeshPipelineKey,
 };
 use bevy::prelude::*;
+use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{
     AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, ColorWrites,
     CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError,
@@ -109,6 +110,11 @@ impl From<&WowModelExt> for WowModelKey {
     }
 }
 
+#[derive(Resource, Clone, ExtractResource)]
+pub struct RigTaaBinds {
+    pub previous: Buffer,
+}
+
 /// The model material's extension. Every `Vec4` uniform packs into binding 100, one buffer entry,
 /// to stay under Metal's 16-buffer vertex-stage cap (Bevy 0.18 ignores `visibility` on uniforms);
 /// `ModelParams` in `wow_model.wgsl` must match the field order.
@@ -186,6 +192,8 @@ pub struct WowModelExt {
     /// member is 16-aligned). Set once, never mutated.
     #[storage(93, read_only, buffer, visibility(fragment))]
     pub torch_buf: Buffer,
+    #[storage(96, read_only, buffer, visibility(vertex))]
+    pub rig_taa: Buffer,
 }
 
 /// MONKEY (torch shadows Phase 3A): the two torch-receiver bindings every [`WowModelExt`] shares —

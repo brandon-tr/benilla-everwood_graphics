@@ -162,11 +162,12 @@ pub(super) fn spawn_wmo_gameobject_props(
     time: Res<Time>,
     mut hosts: Query<(Entity, &GlobalTransform, &mut WmoProps)>,
 ) {
-    let Some((mat_cache, materials, light, torch)) = mats.pieces() else {
+    let Some((mat_cache, materials, light, torch, rig_taa)) = mats.pieces() else {
         return; // no shared light buffer / torch bindings yet
     };
     let light = &light;
     let torch = &torch;
+    let rig_taa = &rig_taa;
     // Animated props take their phase from their spawn time.
     let now = time.elapsed_secs();
     for (entity, host_gt, mut props) in &mut hosts {
@@ -277,6 +278,7 @@ pub(super) fn spawn_wmo_gameobject_props(
                 materials,
                 light,
                 torch,
+                rig_taa,
                 &m.submeshes,
                 forms.slices(&prop.handle),
                 prop.local, // doodad-local; the parent composes the world pose

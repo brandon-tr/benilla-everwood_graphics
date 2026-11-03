@@ -78,6 +78,8 @@ fn open_world_assets(
     };
     commands.insert_resource(torch_image);
     commands.insert_resource(torch_buffer);
+    let rig_taa = crate::rig_palette::temporal::new_rig_taa_binds(&device);
+    commands.insert_resource(rig_taa.clone());
     let Some(data) = benilla_formats::wow_data() else {
         warn!(
             "no WoW install found — looked in {:?}; starting with no world",
@@ -93,7 +95,7 @@ fn open_world_assets(
     commands.insert_resource(RenderConfig { unload_budget });
 
     match open_chain(&data) {
-        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf, torch)),
+        Ok(chain) => commands.insert_resource(WorldAssets::open(chain, light_buf, torch, rig_taa)),
         Err(e) => error!("failed to open client data: {e:#}"),
     }
 }

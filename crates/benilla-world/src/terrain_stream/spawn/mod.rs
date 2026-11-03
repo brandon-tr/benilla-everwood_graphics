@@ -32,7 +32,7 @@ use crate::model_render::ModelKind;
 use crate::model_render::ShadeSel;
 use crate::wmo_portal::{WmoGroupVis, WmoPortalInstance, WmoRoom};
 use benilla_assets::m2_url;
-use benilla_assets::materials::WowModelMaterial;
+use benilla_assets::materials::{RigTaaBinds, WowModelMaterial};
 
 use super::collider::{
     build_collider_task, doodad_bodies_disabled, doodad_hulls_bare, placement_collider_data,
@@ -62,6 +62,7 @@ type SpawnTables<'w> = (
     // MONKEY (torch shadows Phase 3A): the shared torch bindings every spawned material takes
     // (nested here for the same 16-param reason as the rest of the tuple).
     crate::static_gx::TorchShared<'w>,
+    Option<Res<'w, RigTaaBinds>>,
 );
 
 /// Retires a placement, or a WMO prop, whose model load failed: it spawns nothing and stops
@@ -121,8 +122,17 @@ pub(super) fn spawn_loaded_placements(
     mut anim_table: ResMut<crate::mat_anim_table::MatAnimTable>,
     tables: SpawnTables,
 ) {
-    let (mut probes, mut activity, focus, mut forms, mut welds, mut merge, mut staticgx, torch) =
-        tables;
+    let (
+        mut probes,
+        mut activity,
+        focus,
+        mut forms,
+        mut welds,
+        mut merge,
+        mut staticgx,
+        torch,
+        rig_taa,
+    ) = tables;
     let Some(shared_light) = shared_light else {
         return;
     };
@@ -130,6 +140,8 @@ pub(super) fn spawn_loaded_placements(
         return; // created in the same startup system as the light buffer — retry like it
     };
     let torch = &torch;
+    let Some(rig_taa) = rig_taa else { return };
+    let rig_taa = &*rig_taa;
     // Steady state is everything spawned, and the walk below still visits every placement and
     // every WMO prop to find that out — the pending count (kept by the register/handoff/release
     // sites) makes that frame free.
@@ -237,6 +249,7 @@ pub(super) fn spawn_loaded_placements(
                         materials,
                         light,
                         torch,
+                        rig_taa,
                         &m.submeshes,
                         FormSlices {
                             stat: forms.static_meshes(key).unwrap_or(&[]),
@@ -443,6 +456,7 @@ pub(super) fn spawn_loaded_placements(
                         materials,
                         light,
                         torch,
+                        rig_taa,
                         &m.submeshes,
                         FormSlices {
                             stat: forms.static_meshes(key).unwrap_or(&[]),
@@ -796,6 +810,7 @@ pub(super) fn spawn_loaded_placements(
                 materials,
                 light,
                 torch,
+                rig_taa,
                 &m.submeshes,
                 FormSlices {
                     stat: forms.static_meshes(key).unwrap_or(&[]),

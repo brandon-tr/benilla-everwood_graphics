@@ -99,6 +99,8 @@ impl PluginGroup for WorldPlugins {
             .add(crate::entity_shade::EntityShadePlugin)
             // The world camera's pose, published before the viewer authorities below read it.
             .add(crate::view::ViewPlugin)
+            // AA policy, native-TAA production wiring and per-view temporal-history lifecycle.
+            .add(crate::aa::AaPlugin)
             // The WMO portal PVS: groups reachable from the camera's, applied by `model_render`.
             .add(crate::wmo_portal::WmoPortalPlugin)
             // From inside a building, the exterior draws only through the flood's portal windows.

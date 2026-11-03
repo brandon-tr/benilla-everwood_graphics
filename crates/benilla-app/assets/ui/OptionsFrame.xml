@@ -537,6 +537,10 @@
                 foliageWind = "Foliage Wind",
                 windGrass = "Grass",
                 windTrees = "Grass + Trees",
+                antiAliasing = "Anti-Aliasing",
+                aaOff = "Off",
+                aaFallback = "Existing (MSAA)",
+                aaNative = "Native TAA (requires restart)",
                 foliageWindStrength = "Foliage Wind Strength", -- MONKEY (fix-wind)
                 -- MONKEY (ao): localised contact-shadow row.
                 ambientOcclusion = "Ambient Occlusion",
@@ -801,6 +805,10 @@
                 foliageWind = "Ветер листвы",
                 windGrass = "Трава",
                 windTrees = "Трава + деревья",
+                antiAliasing = "Сглаживание",
+                aaOff = "Выкл.",
+                aaFallback = "Существующее (MSAA)",
+                aaNative = "Native TAA (нужен перезапуск)",
                 foliageWindStrength = "Сила ветра листвы", -- MONKEY (fix-wind)
                 -- MONKEY (ao): Russian contact-shadow row.
                 ambientOcclusion = "Затенение окружения",
@@ -1069,7 +1077,7 @@
             -- three of eighteen shadow settings and no hint that the other fifteen existed.
             AdvancedGraphics = {
                 -- MONKEY (presets): the ladder over every row below, then the view distance.
-                "RowGraphicsQuality", "RowRenderDistance",
+                "RowGraphicsQuality", "RowAntiAliasing", "RowRenderDistance",
                 -- MONKEY (volumetric fog): include in refresh, defaults and search.
                 "RowLightingQuality", "RowWaterQuality", "RowVolumetricFog",
                 -- MONKEY (sky): the sky tier row.
@@ -2835,10 +2843,26 @@
                                              Distance, on the extended range (`view::FARCLIP_RANGE`,
                                              177..1497 on the 1.12 grid of 60). Live like its
                                              Graphics twin; both read the one CVar. -->
-                                        <Frame name="$parentRowRenderDistance" inherits="BenillaOptionsSliderRowTemplate">
+                                        <Frame name="$parentRowAntiAliasing" inherits="BenillaOptionsDropdownRowTemplate">
                                             <Anchors>
                                                 <Anchor point="TOPLEFT" relativeTo="$parentRowGraphicsQuality" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                                 <Anchor point="TOPRIGHT" relativeTo="$parentRowGraphicsQuality" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                BenillaOptionsRow_OnLoad(this, "gxAntiAliasing",
+                                                    BENILLA_ADVGFX.antiAliasing,
+                                                    "BENILLA_TOOLTIP_ANTI_ALIASING")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = BENILLA_ADVGFX.aaOff, value = "0" },
+                                                    { text = BENILLA_ADVGFX.aaFallback, value = "1" },
+                                                    { text = BENILLA_ADVGFX.aaNative, value = "2" },
+                                                })
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowRenderDistance" inherits="BenillaOptionsSliderRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowAntiAliasing" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowAntiAliasing" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
                                             </Anchors>
                                             <Scripts><OnLoad>
                                                 BenillaOptionsRow_OnLoad(this, "farclip",

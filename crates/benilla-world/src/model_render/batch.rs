@@ -3,7 +3,7 @@
 //! cannot feather through alpha, an authored-Blend batch is its own twin, and a batch that writes
 //! no depth primes nothing.
 
-use benilla_assets::materials::{TorchBinds, WowModelMaterial};
+use benilla_assets::materials::{RigTaaBinds, TorchBinds, WowModelMaterial};
 use benilla_assets::ModelSubmesh;
 use benilla_formats::ModelBlend;
 use bevy::ecs::system::SystemParam;
@@ -61,16 +61,17 @@ pub struct M2BatchMaterials<'w> {
     cache: ResMut<'w, ModelMaterials>,
     materials: ResMut<'w, Assets<WowModelMaterial>>,
     light: Option<Res<'w, SharedLightBuffer>>,
+    rig_taa: Option<Res<'w, RigTaaBinds>>,
     /// MONKEY (torch shadows Phase 3A): the shared torch bindings every built material takes —
     /// created in the same startup system as the light buffer, so the same "retry" contract.
     torch: TorchShared<'w>,
 }
 
 impl M2BatchMaterials<'_> {
-    /// Is the shared light buffer (and the torch pair) resident? A spawner that has other work to
+    /// Are the shared light, torch and previous-rig bindings resident? A spawner that has other work to
     /// skip asks first.
     pub fn ready(&self) -> bool {
-        self.light.is_some() && self.torch.binds().is_some()
+        self.light.is_some() && self.torch.binds().is_some() && self.rig_taa.is_some()
     }
 
     /// The material store this param holds: a second `ResMut<Assets<WowModelMaterial>>` beside it
@@ -90,6 +91,7 @@ impl M2BatchMaterials<'_> {
     ) -> Option<Handle<WowModelMaterial>> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
+        let rig_taa = self.rig_taa.as_deref()?.clone();
         Some(self.build(
             sub,
             texture,
@@ -100,6 +102,7 @@ impl M2BatchMaterials<'_> {
             false,
             &light,
             &torch,
+            &rig_taa,
         ))
     }
 
@@ -123,6 +126,7 @@ impl M2BatchMaterials<'_> {
     ) -> Option<SkyboxBatch> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
+        let rig_taa = self.rig_taa.as_deref()?.clone();
         let mut mk = |fade: bool| {
             model_material(
                 &mut self.cache.0,
@@ -152,6 +156,7 @@ impl M2BatchMaterials<'_> {
                 true, // the sky lane
                 &light,
                 &torch,
+                &rig_taa,
                 None, // one shared sky material — no per-sequence channel to key on
             )
         };
@@ -172,6 +177,7 @@ impl M2BatchMaterials<'_> {
     pub fn sky_fog_cone(&mut self, order: u16) -> Option<Handle<WowModelMaterial>> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
+        let rig_taa = self.rig_taa.as_deref()?.clone();
         Some(model_material(
             &mut self.cache.0,
             &mut self.materials,
@@ -199,6 +205,7 @@ impl M2BatchMaterials<'_> {
             true, // the sky lane
             &light,
             &torch,
+            &rig_taa,
             None,
         ))
     }
@@ -227,7 +234,14 @@ impl M2BatchMaterials<'_> {
             "TorchShared: the torch depth image + table are created at Startup \
              (assets::open_world_assets) before any off-world material is built",
         );
-        self.build(sub, texture, order, shade, false, false, rig, light, &torch)
+        let rig_taa = self
+            .rig_taa
+            .as_deref()
+            .expect("RigTaaBinds is created at Startup before off-world materials")
+            .clone();
+        self.build(
+            sub, texture, order, shade, false, false, rig, light, &torch, &rig_taa,
+        )
     }
 
     /// [`Self::off_world`] for one scene's own batches: keyed to `scene`, so two scenes of one
@@ -245,6 +259,11 @@ impl M2BatchMaterials<'_> {
         let torch = self.torch.binds().expect(
             "TorchShared: the torch depth image + table are created at Startup              (assets::open_world_assets) before any off-world material is built",
         );
+        let rig_taa = self
+            .rig_taa
+            .as_deref()
+            .expect("RigTaaBinds is created at Startup before off-world materials")
+            .clone();
         self.build_for(
             sub,
             texture,
@@ -255,6 +274,7 @@ impl M2BatchMaterials<'_> {
             true,
             light,
             &torch,
+            &rig_taa,
             Some(scene),
         )
     }
@@ -277,6 +297,7 @@ impl M2BatchMaterials<'_> {
     ) -> Option<BatchVariants> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
+        let rig_taa = self.rig_taa.as_deref()?.clone();
         let steady = self.build(
             sub,
             texture.clone(),
@@ -287,6 +308,7 @@ impl M2BatchMaterials<'_> {
             true,
             &light,
             &torch,
+            &rig_taa,
         );
         let interior = self.build(
             sub,
@@ -298,6 +320,7 @@ impl M2BatchMaterials<'_> {
             true,
             &light,
             &torch,
+            &rig_taa,
         );
         let interior_bake = self.build(
             sub,
@@ -309,6 +332,7 @@ impl M2BatchMaterials<'_> {
             true,
             &light,
             &torch,
+            &rig_taa,
         );
         // A multiply batch fades by the shader's identity lerp (the reference's preset-5 shape)
         // and a Blend batch already blends: both are their own twin. The rest twin from the
@@ -330,6 +354,7 @@ impl M2BatchMaterials<'_> {
                 true,
                 &light,
                 &torch,
+                &rig_taa,
             )
         };
         let interior_bake_blend = if own_twin {
@@ -345,6 +370,7 @@ impl M2BatchMaterials<'_> {
                 true,
                 &light,
                 &torch,
+                &rig_taa,
             )
         };
         // `register_entity_uv` is idempotent per material, so collapsed variants cost nothing.
@@ -373,7 +399,7 @@ impl M2BatchMaterials<'_> {
             interior_bake,
             interior_bake_blend,
             fade_blend,
-            zfill: self.zfill_for(sub, texture, &light, &torch),
+            zfill: self.zfill_for(sub, texture, &light, &torch, &rig_taa),
         })
     }
 
@@ -387,6 +413,7 @@ impl M2BatchMaterials<'_> {
     ) -> Option<BatchVariants> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
+        let rig_taa = self.rig_taa.as_deref()?.clone();
         let mut mk = |shade: ShadeSel, probe: bool, fade: bool| {
             model_material(
                 &mut self.cache.0,
@@ -417,6 +444,7 @@ impl M2BatchMaterials<'_> {
                 false, // a character composite is never a skybox
                 &light,
                 &torch,
+                &rig_taa,
                 None, // a composite sheet carries no animated UV/tint channel at all
             )
         };
@@ -438,11 +466,12 @@ impl M2BatchMaterials<'_> {
                 blend == ModelBlend::AlphaTest,
                 &light,
                 &torch,
+                &rig_taa,
             )),
         })
     }
 
-    /// The cache, store and light buffer for the placed-instance spawner, whose indoor look is set
+    /// The cache, store and shared bindings for the placed-instance spawner, whose indoor look is set
     /// once per placement.
     pub fn pieces(
         &mut self,
@@ -451,10 +480,18 @@ impl M2BatchMaterials<'_> {
         &mut Assets<WowModelMaterial>,
         Buffer,
         TorchBinds,
+        RigTaaBinds,
     )> {
         let light = self.light.as_ref()?.0.clone();
         let torch = self.torch.binds()?;
-        Some((&mut self.cache.0, &mut self.materials, light, torch))
+        let rig_taa = self.rig_taa.as_deref()?.clone();
+        Some((
+            &mut self.cache.0,
+            &mut self.materials,
+            light,
+            torch,
+            rig_taa,
+        ))
     }
 
     /// The depth-prime twin; a multiply batch never feathers, so it primes nothing.
@@ -464,6 +501,7 @@ impl M2BatchMaterials<'_> {
         texture: Option<Handle<Image>>,
         light: &Buffer,
         torch: &TorchBinds,
+        rig_taa: &RigTaaBinds,
     ) -> Option<Handle<WowModelMaterial>> {
         if sub.no_depth_write || sub.no_depth_test {
             return None;
@@ -480,6 +518,7 @@ impl M2BatchMaterials<'_> {
                 b == ModelBlend::AlphaTest,
                 light,
                 torch,
+                rig_taa,
             )),
         }
     }
@@ -496,11 +535,12 @@ impl M2BatchMaterials<'_> {
         play_uv: bool,
         light: &Buffer,
         torch: &TorchBinds,
+        rig_taa: &RigTaaBinds,
     ) -> Handle<WowModelMaterial> {
         // Entity batches share one material per batch: an entity resolves its sequence through
         // `MatAnim::host`, so only the world streamer keys one per placement.
         self.build_for(
-            sub, texture, order, shade, probe, fade, play_uv, light, torch, None,
+            sub, texture, order, shade, probe, fade, play_uv, light, torch, rig_taa, None,
         )
     }
 
@@ -516,6 +556,7 @@ impl M2BatchMaterials<'_> {
         play_uv: bool,
         light: &Buffer,
         torch: &TorchBinds,
+        rig_taa: &RigTaaBinds,
         instance: Option<Entity>,
     ) -> Handle<WowModelMaterial> {
         model_material(
@@ -548,6 +589,7 @@ impl M2BatchMaterials<'_> {
             false,
             light,
             torch,
+            rig_taa,
             instance,
         )
     }

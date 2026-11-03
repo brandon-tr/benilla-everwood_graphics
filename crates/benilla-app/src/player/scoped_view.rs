@@ -76,31 +76,4 @@ pub(super) fn apply_scoped_view(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_spyglass_narrows_our_own_field_of_view_six_fold() {
-        let scoped = ScopedView {
-            zoom: Some(15.0 / REFERENCE_DEFAULT_DEGREES),
-        };
-        let fov = CAM_FOVY * scoped.zoom.unwrap();
-        assert!(
-            (fov - CAM_FOVY / 6.0).abs() < 1e-6,
-            "the spyglass is a 6x zoom off whatever our normal FOV is, not a literal 15 degrees"
-        );
-        assert!(
-            (fov.to_degrees() - 7.5).abs() < 1e-4,
-            "…which lands at 7.5 degrees vertical for our 45 degree default, not 15"
-        );
-        assert!(scoped.active());
-
-        let none = ScopedView { zoom: None };
-        assert_eq!(
-            CAM_FOVY * none.zoom.unwrap_or(1.0),
-            CAM_FOVY,
-            "unscoped restores OUR default, never the reference's stored 90"
-        );
-        assert!(!none.active());
-    }
-}
+mod tests;
